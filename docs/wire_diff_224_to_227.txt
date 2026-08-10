@@ -1,0 +1,32 @@
+
+== ArenaPlayerInfo
+  + int storageSuperlimit;  // 0x48
+
+== BattleCharData
+  + int SuperLimit;  // 0x54 json_rva=0x1127CC4
+  + int StorageSuperLimit;  // 0x58 json_rva=0x1127CFC
+
+== DBCharData
+  + int super_limit;  // 0x44 json_rva=0x1128ECC
+
+== PlayerCampaign.CampaignScreenshotCharData
+  + int super_limit;  // 0x38 json_rva=0x1152850
+
+== PlayerCharData
+  + uint storageSuperlimit;  // 0x70 json_rva=0x11287B4
+
+== PlayerGeneral.GeneralSyncGameRuleData
+  + SuperLimitDefineData SuperLimitDefine;  // 0xB8 json_rva=0x11520D0
+
+== UIArenaPlayerInfo
+  + UILabel mStorageSuperLimit;  // 0x20
+
+== UIObsNpcInfo
+  + UILabel _lbAllyStorageSuperLimit;  // 0x70
+  + UILabel _lbOpponentStorageSuperLimit;  // 0x78
+
+== new classes (4)
+  + MBGResCmd
+  + PlayerJSAgentClientCmd
+  + SocialMediaData
+  + SuperLimitDefineData

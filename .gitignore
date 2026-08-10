@@ -1,0 +1,55 @@
+# ---- Python ----
+__pycache__/
+*.pyc
+.venv/
+
+# ---- Logs / captures / runtime dumps ----
+*.log
+*.log.prev
+logcat*.txt
+mitm.out
+server/titan_server.log*
+server/bundle_traffic.log*
+
+# ---- Runtime player state (per-account saves, regenerated) ----
+server/accounts/
+server/player_state/*.bak-*
+*.bak-*
+
+# ---- Generated design cache (rebuilt from the design pack) ----
+server/design_cache/
+server/design_cache.*.bak/
+server/build/
+
+# ---- Large binary game assets (not source; distributed out-of-band) ----
+server/patch_root/
+*.ab
+server/Android
+server/Android_manifest.ab
+
+# ---- Reverse-engineering working data (IDA dbs, extracted APKs, il2cpp dumps) ----
+re/apk/
+re/apk227/
+re/il2cpp/
+re/il2cpp227/
+re/mars-java/
+*.i64
+*.idb
+
+# ---- Built / signed APKs and the signing key (back these up separately!) ----
+apkpatch/*.apk
+apkpatch/*.idsig
+*.keystore
+
+# ---- hostapp: gradle build output + stageServer-generated python copy ----
+hostapp/app/build/
+hostapp/build/
+hostapp/.gradle/
+hostapp/local.properties
+hostapp/app/src/main/python/sevensins/
+
+# ---- IDA MCP scratch ----
+.ida-mcp/
+
+# ---- Local proxy certs / private keys ----
+certs/

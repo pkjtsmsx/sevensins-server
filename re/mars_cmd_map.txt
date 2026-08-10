@@ -1,0 +1,34 @@
+ cmd reply  handler                                          reply fields
+  11    12  RequestSettingsHandler                           
+  36    37  RequestBindPlatformHandler                       0,1,status
+  38    39  RequestUnBindPlatformHandler                     0,1,status
+  40    42  RequestHashedAccountIdHandler                    0,1,2,platformId,status
+  41    42  RequestHashedAccountIdBySnsHandler               0,1,2,platformId
+  43    45  RequestHashedAccountIdByPlayerIdHandler          0,1,2,3
+  44    47  LoginByHashedAccountIdHandler                    0,1,2,3,4
+  57    58  ReqGetGoodsList                                  status
+  67    68  RequestAllProductID                              status
+  67    68  RequestBillingVerify                             status
+  67    68  RequestUJOrder                                   productId,status,ujOrderId
+  67    68  RequestUJOrderList                               orderListCount,status
+  69    42  RequestHashedAccountIdV2Handler                  0,1,2,3,4,platformId,status
+  70    71  ModifyPlayerIdPasswordHandler                    pwd_version,status
+  72    42  RequestHashedAccountIdBySnsV2Handler             0,1,2,3,platformId,status
+  86    87  WebBillingHandler                                errmsg,gameid,playerid,status,url
+  88    89  RequestTelephoneVerifyStatus                     
+  90    91  RequestDoTelephoneBind                           passTime,status
+  90    91  RequestStartTelephoneBind                        platformCode,status,verifyCodeExpiryTime
+  92    93  RequestDoTelephoneVerifyPass                     passTime,status
+  92    93  RequestTelephoneVerifyPass                       platformCode,status,verifyCodeExpiryTime
+  94    95  RequestUploadSessionKey                          sessionKey,status
+ 101   102  RequestSetNicknameHandler                        status
+ 107   108  AskUserRuleStatusBase                            pURL,uURL
+ 109   110  RequestTelephoneLoginCheckIsRobotHandler         status,verifyCode
+ 109   110  RequestTelephoneLoginSendMessageHandler          expiry,messageCount,platformCode,status
+ 109   110  RequestTelephoneLoginVerifyMessageHandler        status
+ 111   112  RequestOneStoreAllProductIDHandler               status
+ 111   112  RequestOneStoreUJOrderHandler                    productId,status,ujOrderId
+ 111   112  RequestOneStoreUJOrderListHandler                orderListCount,status
+ 111   112  RequestOneStoreVerifyOrderHandler                orderListCount,status
+ 115   116  ReqGPPCheckOrderInfo                             status
+ 115   116  ReqGPPClaimOrder                                 orderListCount,status

@@ -1,0 +1,34 @@
+subsystem id  method
+  0x9E0476F2  PlayerAchievementServerCmd
+  0xAC096B50  PlayerArenaServerCmd
+  0xC50AB056  PlayerBackpackServerCmd
+  0xFA6D759E  PlayerBattleServerCmd
+  0xBF38D586  PlayerCampaignServerCmd
+  0xD6EDDBC0  PlayerChallengeServerCmd
+  0x76B12CF8  PlayerCharServerCmd
+  0x3A6083E0  PlayerChatRoomServerCmd
+  0xBD2055EA  PlayerCurrencyServerCmd
+  0xAFE7F2EF  PlayerEnergyServerCmd
+  0xB9FABC82  PlayerFriendServerCmd
+  0x5A8E8551  PlayerGachaServerCmd
+  0x4DB7FD4B  PlayerGeneralServerCmd
+  0x109CDAC8  PlayerGmServerCmd
+  0x92F719BA  PlayerGuildServerCmd
+  0x7FDE8871  PlayerLevelServerCmd
+  0xFE16052C  PlayerLoginBonusServerCmd
+  0x925A4AC7  PlayerMailServerCmd
+  0xC3ADCF00  PlayerMarketServerCmd
+  0xBACD0EB3  PlayerNotificationServerCmd
+  0xAE866295  PlayerOFAServerCmd
+  0x132D9204  PlayerQuestServerCmd
+  0x12FA79DC  PlayerRaidServerCmd
+  0xB7C131D3  PlayerRankingServerCmd
+  0xEC831CF2  PlayerRedeemServerCmd
+  0xAE5C58BD  PlayerRefereeServerCmd
+  0x910208AB  PlayerSessionServerCmd
+  0x94357119  PlayerShopServerCmd
+  0xFA90E9CC  PlayerStageServerCmd
+  0x45AFA0CC  PlayerTriggerServerCmd
+  0x49D0EB60  PlayerVillageServerCmd
+
+resolved 31/31; distinct ids: 31

@@ -1,0 +1,157 @@
+plugins {
+    id 'com.android.application'
+    id 'com.chaquo.python'
+}
+
+// The server is NOT vendored here: it is staged at build time from ../server so there is
+// one copy of the truth. `stageServer` copies the runtime modules into Chaquopy's python
+// source dir (gitignored) as a package, along with the pre-built design cache and the
+// design pack.
+//
+// WHY A PACKAGE, when the modules import each other as top level (`import player_state`)?
+// Because `extractPackages` works per package, and we NEED extraction: design_data and
+// player_state open real files next to themselves, which fails while they live inside
+// Chaquopy's asset bundle. main.py puts the extracted dir on sys.path, so the flat
+// imports keep working untouched.
+def serverDir = file("${rootDir}/../server")
+def stage = file("${projectDir}/src/main/python/sevensins")
+
+// Only what the running server needs. The patch_* / build tools live in ../tools now
+// (they import UnityPy) and must never be bundled -- shipping them would drag a
+// dependency we deliberately do not have. wire.py is the transport layer titan_server
+// imports; adding a runtime module here is mandatory or `import titan_server` fails on
+// device with ModuleNotFoundError.
+def runtimeModules = ['titan_server.py', 'wire.py', 'battle.py',
+                      'design_data.py', 'bundle_server.py']
+// player_state is a PACKAGE (a directory), not a single .py, so it is staged with a
+// glob rather than the flat include list. If this ever reverts to a single file, move
+// it back into runtimeModules -- the two staging paths are why it is called out here.
+def runtimePackages = ['player_state']
+
+tasks.register('stageServer', Copy) {
+    description = 'Stage the Seven Sins server package into the Chaquopy python source dir.'
+    doFirst {
+        runtimeModules.each { m ->
+            if (!file("${serverDir}/${m}").exists()) {
+                throw new GradleException("missing ${serverDir}/${m}")
+            }
+        }
+        runtimePackages.each { p ->
+            if (!file("${serverDir}/${p}/__init__.py").exists()) {
+                throw new GradleException("missing package ${serverDir}/${p}/__init__.py")
+            }
+        }
+        // Drop any stale copy so a removed/renamed module does not linger on device.
+        delete stage
+    }
+    into stage
+    // ONE from-spec covering both the flat modules and the package(s). Two separate
+    // from(serverDir) blocks each matched player_state/core.py and Gradle flagged it as a
+    // duplicate destination entry; a single spec matches each file at most once.
+    from(serverDir) {
+        include runtimeModules
+        runtimePackages.each { include "${it}/**" }
+        // A runtime package is code only. Desktop runs leave __pycache__ next to it, and
+        // player_state's STATE_DIR default would drop an accounts/ dir inside the package
+        // if its anchor were ever wrong again -- neither belongs in the shipped app.
+        exclude '**/__pycache__/**', '**/*.pyc', '**/accounts/**'
+    }
+    // Pre-built design tables: shipping these is what keeps the app free of UnityPy and
+    // TypeTreeGenerator, which design_data imports ONLY when it has to reparse the pack.
+    // Includes the `.source` stamp dotfile, which is load-bearing: without it
+    // design_data._ensure_stamp decides the cache came from a different pack, PURGES
+    // every form and tries to reparse -- which on device means importing UnityPy, which
+    // is not installed. Verify it survives into the APK after changing this block.
+    // The `include '**'` is REQUIRED, not decorative. Once the from(serverDir) block
+    // above declares include patterns (runtimeModules + player_state/**), Gradle applies
+    // them as the task's effective filter to sibling from-blocks that declare none -- so
+    // without an explicit include here, design_cache matched nothing and staged EMPTY,
+    // failing the cache-stamp guard. Every from-block must carry its own include.
+    from("${serverDir}/design_cache") { include '**'; into 'design_cache' }
+    // A minimal patch_root, copied into app storage on first run. Two things are
+    // non-negotiable for the client to boot:
+    //   * the AssetBundleManifest -- the FIRST thing it fetches; without it the title
+    //     screen sits on "Retrieving patch manifest ... Retry n/10" and never proceeds;
+    //   * the design pack, which is both what the client downloads AND what the server
+    //     parses, so design_data's stamp matches and no reparse is attempted.
+    // Everything else is the user-imported bundle set.
+    from("${serverDir}/patch_root/bundles") {
+        include 'design_pack_*.ab'
+        into 'pack/bundles'
+    }
+    from("${serverDir}/patch_root/Android_AssetBundles") {
+        include '231101en/Android'
+        into 'pack/Android_AssetBundles'
+    }
+    // A starting account, so a fresh install can log straight in.
+    from("${serverDir}/accounts") { include '1000001.json'; into 'seed_accounts' }
+    // Without __init__.py this is a NAMESPACE package: its __file__ is None, and
+    // Chaquopy's extractPackages does not apply to one. Both matter -- main.py locates
+    // the extracted directory through this package.
+    doLast {
+        new File(stage, '__init__.py').text =
+            '# Staged Seven Sins server package (generated by the stageServer task).\n'
+
+        // GUARD: the shipped design cache must have been built from the shipped pack.
+        // design_data's stamp is "<pack name>:<sha1 of pack>:DummyDll"; if it does not
+        // match, the device decides the cache is stale. It can no longer delete it (see
+        // _ensure_stamp), but it would serve tables that do not match the pack the
+        // client is running. Re-patching the pack after warming the cache is an easy
+        // mistake to make -- it cost a debugging round already -- so fail the BUILD
+        // rather than ship the mismatch. Fix by re-warming: see hostapp/README.md.
+        def packFile = new File(stage, 'pack/bundles').listFiles()
+                ?.find { it.name.startsWith('design_pack_') }
+        def stampFile = new File(stage, 'design_cache/.source')
+        if (packFile == null) throw new GradleException("no design pack staged")
+        if (!stampFile.exists()) throw new GradleException("no design_cache/.source staged")
+        def digest = java.security.MessageDigest.getInstance('SHA-1')
+        packFile.eachByte(1 << 20) { buf, n -> digest.update(buf, 0, n) }
+        def sha1 = digest.digest().encodeHex().toString()
+        def expected = "${packFile.name}:${sha1}:DummyDll"
+        def actual = stampFile.text.trim()
+        if (actual != expected) {
+            throw new GradleException(
+                "design cache was NOT built from the staged pack.\n" +
+                "  staged pack : ${expected}\n" +
+                "  cache stamp : ${actual}\n" +
+                "Re-warm the cache against the current pack, then rebuild.")
+        }
+        logger.lifecycle("stageServer: cache matches pack (${packFile.name})")
+    }
+}
+
+tasks.matching { it.name ==~ /merge.*PythonSources/ }.configureEach {
+    dependsOn 'stageServer'
+}
+
+android {
+    namespace 'com.sevensins.host'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'com.sevensins.host'
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName '0.1'
+        // arm64 for real devices, x86_64 so it also runs on the development AVD.
+        ndk { abiFilters 'arm64-v8a', 'x86_64' }
+        python {
+            version '3.12'
+            // Materialize the package on the filesystem: design_data reads its cache and
+            // the pack through real paths, and player_state writes account JSON.
+            extractPackages 'sevensins'
+            // NO pip block, deliberately. The whole server is stdlib-only -- design_data
+            // imports UnityPy lazily and never reaches that path with a warm cache.
+        }
+    }
+    buildFeatures { buildConfig true }
+    applicationVariants.all { variant ->
+        variant.outputs.all { output ->
+            output.outputFileName = 'SevenSinsHost.apk'
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+}

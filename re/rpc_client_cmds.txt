@@ -1,0 +1,34 @@
+   rpc index  ClientCmd handler
+  0x9FABF964  TitanStack.PlayerAchievementClientCmd_TypeInfo
+  0xADA6E4C6  TitanStack.PlayerArenaClientCmd_TypeInfo
+  0xC4A53FC0  TitanStack.PlayerBackpackClientCmd_TypeInfo
+  0xFBC2FA08  TitanStack.PlayerBattleClientCmd_TypeInfo
+  0xBE975A10  TitanStack.PlayerCampaignClientCmd_TypeInfo
+  0xD7425456  TitanStack.PlayerChallengeClientCmd_TypeInfo
+  0x771EA36E  TitanStack.PlayerCharClientCmd_TypeInfo
+  0x3BCF0C76  TitanStack.PlayerChatRoomClientCmd_TypeInfo
+  0xBC8FDA7C  TitanStack.PlayerCurrencyClientCmd_TypeInfo
+  0xAE487D79  TitanStack.PlayerEnergyClientCmd_TypeInfo
+  0xB8553314  TitanStack.PlayerFriendClientCmd_TypeInfo
+  0x5B210AC7  TitanStack.PlayerGachaClientCmd_TypeInfo
+  0x4C1872DD  TitanStack.PlayerGeneralClientCmd_TypeInfo
+  0x1133555E  TitanStack.PlayerGmClientCmd_TypeInfo
+  0x9358962C  TitanStack.PlayerGuildClientCmd_TypeInfo
+  0x7E7107E7  TitanStack.PlayerLevelClientCmd_TypeInfo
+  0xFFB98ABA  TitanStack.PlayerLoginBonusClientCmd_TypeInfo
+  0x93F5C551  TitanStack.PlayerMailClientCmd_TypeInfo
+  0xC2024096  TitanStack.PlayerMarketClientCmd_TypeInfo
+  0xBB628125  TitanStack.PlayerNotificationClientCmd_TypeInfo
+  0xAF29ED03  TitanStack.PlayerOFAClientCmd_TypeInfo
+  0x12821D92  TitanStack.PlayerQuestClientCmd_TypeInfo
+  0x1355F64A  TitanStack.PlayerRaidClientCmd_TypeInfo
+  0xB66EBE45  TitanStack.PlayerRankingClientCmd_TypeInfo
+  0xED2C9364  TitanStack.PlayerRedeemClientCmd_TypeInfo
+  0xAFF3D72B  TitanStack.PlayerRefereeClientCmd_TypeInfo
+  0x90AD873D  TitanStack.PlayerSessionClientCmd_TypeInfo
+  0x959AFE8F  TitanStack.PlayerShopClientCmd_TypeInfo
+  0xFB3F665A  TitanStack.PlayerStageClientCmd_TypeInfo
+  0x44002F5A  TitanStack.PlayerTriggerClientCmd_TypeInfo
+  0x487F64F6  TitanStack.PlayerVillageClientCmd_TypeInfo
+
+resolved: 31/31
