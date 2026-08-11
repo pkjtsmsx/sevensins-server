@@ -132,6 +132,21 @@ def parse_segment(text, trigger, catalog):
     for m in re.finditer(r"deals?\s+(\d+)%?\s+HP-based\s+absolute\s+damage", text, re.I):
         effects.append({**base, "op": "damage", "pct_target_maxhp": int(m.group(1)),
                         "times": 1, "target": target_of(text) or "enemy_target"})
+    # "% Max HP as damage" + optional chance-status: "Deals X% MAX HP as damage with a
+    # Y% chance of inflicting <Status> on the target." Damage is % of the target's Max HP
+    # (ignores DEF); the status is chance-gated (the dispatcher rolls eff["chance"]).
+    for m in re.finditer(r"deals?\s+(\d+)%\s+MAX\s+HP\s+as\s+damage"
+                         r"(?:\s+with\s+a\s+(\d+)%\s+chance\s+of\s+inflicting\s+"
+                         r"([A-Za-z][A-Za-z ]+?)\s+on\s+"
+                         r"(the target|the enemy[\w ]*|all enemies))?", text, re.I):
+        tgt = target_of(m.group(4) or text) or "enemy_target"
+        effects.append({**base, "op": "damage", "pct_target_maxhp": int(m.group(1)),
+                        "times": 1, "target": tgt})
+        status = (m.group(3) or "").strip()
+        if m.group(2) and status in catalog:
+            effects.append({**base, "op": "apply_status", "status": status,
+                            "chance": int(m.group(2)), "target": tgt,
+                            "duration": _dur(text)})
     # move gauge, verb phrasing: "increases/decreases the Move Gauge of <t> by N[%]"
     for m in re.finditer(r"(increase|decrease)s?\s+the\s+Move\s+Gauge\s+of\s+(.+?)\s+by\s+(\d+)",
                          text, re.I):
@@ -151,6 +166,16 @@ def parse_segment(text, trigger, catalog):
                         "pct": (1 if m.group(2) == "+" else -1) * int(m.group(3)),
                         "unit": "pct" if m.group(4) else "flat",
                         "duration": _dur(text), "target": target_of(text) or "self"})
+    # skill-unlock passive stat: "Gains ability increase when unlocking skill: Base <STAT>
+    # Stat +N" -- a permanent always-on buff, so it fires at battle_start (the passive
+    # path), on self, flat.
+    m = re.search(r"ability increase when unlocking skill:\s*Base\s+(ATK|DEF|HP|SPD)\s+Stat"
+                  r"\s*([+\-])\s*(\d+)", text, re.I)
+    if m:
+        effects.append({"trigger": "battle_start", "op": "stat_mod",
+                        "stat": m.group(1).upper(),
+                        "pct": (1 if m.group(2) == "+" else -1) * int(m.group(3)),
+                        "unit": "flat", "duration": "battle", "target": "self"})
     # heal: "restores X% of Max HP"
     m = re.search(r"restores?\s+(\d+)%\s+of\s+Max\s+HP", text, re.I)
     if m:
