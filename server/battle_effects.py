@@ -196,11 +196,20 @@ def resolve_targets(token, attacker, primary, allies, enemies):
 IMMEDIATE_TRIGGERS = ("on_use", "before_action", "after_action", "after_attack")
 
 
+# Crowd-control statuses, for "immunity to crowd control" (a class, not one status).
+CC_STATUSES = {"Stun", "Freeze", "Daze", "Silence", "Seal", "Sleep", "Petrify",
+               "Paralyze", "Entangle", "Entangled", "Confuse", "Confusion", "Fear",
+               "Taunt", "Charm", "Frostbite", "Immobilize"}
+
+
 def _immune_to(unit, name):
-    """True if an active immunity on the unit blocks the named status."""
+    """True if an active immunity on the unit blocks the named status. `immune_to` may be
+    a specific status, "all", or "CrowdControl" (blocks the CC_STATUSES class)."""
     for st in unit.statuses:
         imm = st.definition.get("immune_to")
-        if imm in (name, "all") and (st.remaining == "battle" or st.remaining > 0):
+        if not imm or not (st.remaining == "battle" or st.remaining > 0):
+            continue
+        if imm in (name, "all") or (imm == "CrowdControl" and name in CC_STATUSES):
             return True
     return False
 
@@ -272,16 +281,22 @@ def _apply_op(eff, attacker, primary, allies, enemies, reduce, per_target, outco
         return e
 
     if op == "damage":
-        pct = eff.get("pct_atk", 0)
         times = eff.get("times", 1) or 1
-        # Effective attacker ATK: base scaled by the attacker's own ATK statuses
+        pct = eff.get("pct_atk", 0)
+        pct_def = eff.get("pct_def", 0)
+        pct_hp = eff.get("pct_target_maxhp", 0)      # "absolute" -- ignores DEF
+        # Effective attacker ATK/DEF: base scaled by the attacker's own statuses
         # (Keen +, Fracture -) plus any flat mod.
         eff_atk = (attacker.atk * stat_multiplier(attacker.statuses, "ATK")
                    + flat_bonus(attacker.statuses, "ATK"))
+        eff_def = (attacker.defense * stat_multiplier(attacker.statuses, "DEF")
+                   + flat_bonus(attacker.statuses, "DEF"))
         for u in targets:
             for _ in range(times):
-                base = eff_atk * pct / 100.0 * (1.0 - reduce(u))
-                dmg = max(1, int(base * damage_taken_multiplier(u.statuses)))
+                mitigable = (eff_atk * pct + eff_def * pct_def) / 100.0
+                val = mitigable * (1.0 - reduce(u)) * damage_taken_multiplier(u.statuses)
+                val += u.max_hp * pct_hp / 100.0
+                dmg = max(1, int(val))
                 u.hp = max(0, u.hp - dmg)
                 e = hit_entry(u)
                 e["damage"] += dmg
@@ -313,13 +328,22 @@ def _apply_op(eff, attacker, primary, allies, enemies, reduce, per_target, outco
                 outcome["status_events"].append(
                     {"unit": u, "name": st.name, "round": st.remaining})
     elif op == "stat_mod":
-        # a bare stat buff/debuff with no named status -> synthesize one
+        # a bare stat buff/debuff with no named status. HP mods change max_hp directly
+        # (statuses don't recompute max_hp); ATK/DEF/SPD ride a synthesized status;
+        # unmodelled stats (CRIT, ...) are skipped rather than applied wrong.
         for u in targets:
-            synth = {"stat_mods": [{"stat": eff["stat"], "value": eff["pct"],
-                                    "unit": "pct"}],
-                     "duration": eff.get("duration") or 1}
-            u.statuses.append(Status(f"{eff['stat']}{eff['pct']:+d}%",
-                                     synth["duration"], synth))
+            stat = eff["stat"]
+            val = eff["pct"]
+            unit = eff.get("unit", "pct")
+            if stat == "HP":
+                delta = int(u.max_hp * val / 100.0) if unit == "pct" else int(val)
+                u.max_hp = max(1, u.max_hp + delta)
+                u.hp = max(1, min(u.max_hp, u.hp + delta))
+            elif stat in ("ATK", "DEF", "SPD"):
+                synth = {"stat_mods": [{"stat": stat, "value": val, "unit": unit}],
+                         "duration": eff.get("duration") or 1}
+                tag = f"{stat}{val:+d}%" if unit == "pct" else f"{stat}{val:+d}"
+                u.statuses.append(Status(tag, synth["duration"], synth))
     elif op == "move_gauge":
         # pct signed: negative drains the target's charge gauge, positive fills it.
         for u in targets:

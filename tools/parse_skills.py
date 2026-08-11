@@ -157,6 +157,36 @@ def split_segments(text, catalog):
     return segs
 
 
+# Clauses that carry NO executable effect -- status metadata (duration/stack/removability
+# restatements), damage-cap footnotes, trigger caveats, and split noise. Consuming these
+# keeps an otherwise fully-parsed skill from being marked incomplete over a stray
+# "Lasts for 2 turns." An empty-effect skill still stays incomplete (parse_skill requires
+# got > 0), so this never fakes a do-nothing skill into `complete`.
+NOOP_RES = [
+    re.compile(r"^\(?\s*unremovable\s*\)?\.?$", re.I),
+    re.compile(r"^\s*lasts\s+(?:for\s+\d+\s+turns?|the\s+entire\s+battle)"
+               r"(?:\s+and\s+(?:un)?removable)?\.?$", re.I),
+    re.compile(r"cannot be cleansed", re.I),
+    re.compile(r"stacks?\s+up\s+to\s+\d+", re.I),
+    re.compile(r"will not stack", re.I),
+    re.compile(r"^\(?\s*(?:un)?stackable\s*\)?\.?$", re.I),
+    re.compile(r"^\(?\s*(?:un)?carried\s*\)?\.?$", re.I),
+    re.compile(r"will not exceed", re.I),            # damage-cap footnote
+    re.compile(r"will not trigger on", re.I),        # trigger caveat
+    re.compile(r"triggers once while", re.I),
+    re.compile(r"^turns?\s*/?$", re.I),
+]
+
+
+def is_noop_clause(clause):
+    """A clause with no executable effect: pure metadata/caveat/noise (see NOOP_RES),
+    or a fragment with no 3+ letter word (bare numbers, punctuation, '*')."""
+    c = clause.strip()
+    if not re.search(r"[A-Za-z]{3,}", c):
+        return True
+    return any(r.search(c) for r in NOOP_RES)
+
+
 def parse_clause(clause, catalog):
     """-> list of effect dicts for one clause. Trigger is clause-level; target and
     chance are resolved per SEGMENT so co-located ops don't steal each other's."""
@@ -206,6 +236,42 @@ def parse_segment(text, trigger, catalog):
                         "times": WORDNUM.get((times or "").lower(),
                                              int(times) if times and times.isdigit() else 1),
                         "target": target_of(m.group(1) or text) or "enemy_target"})
+    # extra ATK damage: "deals X% extra ATK as damage" -> ordinary ATK-scaled hit.
+    for m in re.finditer(r"deals?\s+(\d+)%\s+extra\s+ATK\s+as\s+damage", text, re.I):
+        effects.append({**base, "op": "damage", "pct_atk": int(m.group(1)), "times": 1,
+                        "target": target_of(text) or "enemy_target"})
+    # DEF-scaled damage: "deals X% DEF as damage [N times]" (caster's DEF).
+    for m in re.finditer(r"deals?\s+(\d+)%\s+DEF\s+as\s+damage"
+                         r"(?:\s+(\d+|two|three)\s+times)?", text, re.I):
+        t = m.group(2)
+        effects.append({**base, "op": "damage", "pct_def": int(m.group(1)),
+                        "times": WORDNUM.get((t or "").lower(),
+                                             int(t) if t and t.isdigit() else 1),
+                        "target": target_of(text) or "enemy_target"})
+    # HP-based absolute damage: "deals X% HP-based absolute damage" (% of target Max HP,
+    # ignores DEF).
+    for m in re.finditer(r"deals?\s+(\d+)%?\s+HP-based\s+absolute\s+damage", text, re.I):
+        effects.append({**base, "op": "damage", "pct_target_maxhp": int(m.group(1)),
+                        "times": 1, "target": target_of(text) or "enemy_target"})
+    # move gauge, verb phrasing: "increases/decreases the Move Gauge of <t> by N[%]"
+    for m in re.finditer(r"(increase|decrease)s?\s+the\s+Move\s+Gauge\s+of\s+(.+?)\s+by\s+(\d+)",
+                         text, re.I):
+        sign = 1 if m.group(1).lower() == "increase" else -1
+        effects.append({**base, "op": "move_gauge", "pct": sign * int(m.group(3)),
+                        "target": target_of(m.group(2)) or "self"})
+    # crowd-control immunity: "gains immunity to (all) crowd control / all control effects"
+    if re.search(r"immunity to\s+(?:all\s+)?(?:crowd control|control effects)", text, re.I):
+        effects.append({**base, "op": "immunity", "status": "CrowdControl",
+                        "duration": _dur(text) or "battle", "target": target_of(text) or "self"})
+    # stat shorthand: "ATK+30%", "MAX HP+3000", "Basic SPD+15", "DEF-20%" (buff = self).
+    for m in re.finditer(r"\b(MAX HP|Basic SPD|ATK|DEF|SPD|HP|CRIT)\s*([+\-])\s*(\d+)(%?)",
+                         text, re.I):
+        raw = m.group(1).upper()
+        stat = "HP" if "HP" in raw else ("SPD" if "SPD" in raw else raw)
+        effects.append({**base, "op": "stat_mod", "stat": stat,
+                        "pct": (1 if m.group(2) == "+" else -1) * int(m.group(3)),
+                        "unit": "pct" if m.group(4) else "flat",
+                        "duration": _dur(text), "target": target_of(text) or "self"})
     # heal: "restores X% of Max HP"
     m = re.search(r"restores?\s+(\d+)%\s+of\s+Max\s+HP", text, re.I)
     if m:
@@ -314,7 +380,7 @@ def parse_skill(row, catalog):
             got = parse_clause(clause, catalog)
             if got:
                 effects.extend(got)
-            elif clause.strip():
+            elif clause.strip() and not is_noop_clause(clause):
                 unparsed.append(clause.strip())
         out_blocks.append({"name": name, "effects": effects})
     return {"id": row.get("_id"), "type": row.get("_type"),
