@@ -629,6 +629,25 @@ class Battle:
             u = c["unit"]
             u.cooldowns = [max(0, cd + c["delta"]) for cd in u.cooldowns]
 
+    def _status_wire(self, events):
+        """Turn engine status applications into DamageInfo.status entries
+        [unit_order, skillID, round]. skillID is the _type-6 STATUS skill whose
+        _statusID names the icon (fx.status_skill_id); a status we have no graphic for
+        is dropped -- no icon beats a wrong one. `round` is the remaining turn count the
+        client displays and self-decrements; a permanent ("battle") status shows as 99.
+        Because two statuses map to two different skillIDs, several distinct icons can
+        sit on the same unit at once."""
+        wire = []
+        for ev in events:
+            sid = fx.status_skill_id(ev["name"])
+            if sid is None:
+                continue
+            r = ev["round"]
+            rnd = 99 if r == "battle" else int(r)
+            if rnd > 0:
+                wire.append([int(ev["unit"].order), sid, rnd])
+        return wire
+
     def _apply_battle_start(self, units):
         """Fire the battle-start effects of each given unit's passive skills against the
         current field. Called when units ENTER the fight -- the whole roster at battle
@@ -724,12 +743,12 @@ class Battle:
         def dmg_info(u, amount):
             return {"c": u.order, "md": 1, "cg": 0, "dmg": -amount, "cri": 0,
                     "die": 1 if not u.alive else 0,
-                    # DamageInfo.status wire format is not yet reversed; leave it empty so
-                    # the engine's status MECHANICS apply server-side (they change future
-                    # damage) without risking the client on a malformed field.
+                    # status is filled below from the engine's applied statuses; extra/
+                    # picons stay empty (picons = passive-icon list, not yet used).
                     "status": [], "extra": [], "picons": [], "pskill_id": 0}
 
         rows = []
+        status_events = []
         if attacker and target and fx.is_complete(skill_id):
             # Trusted skill -> full effect engine: correct per-hit coefficients, real
             # targeting (a debuff can land on a different unit than the damage), and
@@ -739,6 +758,7 @@ class Battle:
             reduce = self._defend_reduce()
             outcome = fx.execute_skill(attacker, target, allies, enemies, skill_id,
                                        damage_reduce=reduce)
+            status_events += outcome["status_events"]
             for h in outcome["hits"]:
                 if h["damage"] > 0:
                     rows.append(dmg_info(h["target"], h["damage"]))
@@ -761,6 +781,7 @@ class Battle:
                                          [u for u in self.units.values()
                                           if u.team != tgt.team],
                                          damage_reduce=reduce)
+                    status_events += c_out["status_events"]
                     for ch in c_out["hits"]:
                         if ch["damage"] > 0:
                             rows.append(dmg_info(ch["target"], ch["damage"]))
@@ -778,6 +799,13 @@ class Battle:
             rows.append(dmg_info(target, damage))
         if not rows and target:
             rows.append(dmg_info(target, 0))    # never send an empty combo
+        # Attach status icons to the lead DamageInfo. Each entry is [order, skillID,
+        # round]: the client resolves the graphic from a _type-6 STATUS skill's
+        # _statusID (see _status_wire) and counts `round` down itself, so one push per
+        # application is enough. Every entry names its own unit order, so hanging them
+        # all off the first row reaches every affected unit.
+        if rows:
+            rows[0]["status"] = self._status_wire(status_events)
 
         cmd = json.loads(self.battle_cmd_json(
             cur_team=attacker.team if attacker else TEAM_PLAYER))

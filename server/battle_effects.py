@@ -56,6 +56,24 @@ def is_complete(skill_id):
     return bool(rec and rec.get("complete"))
 
 
+_status_icons = None
+
+
+def status_skill_id(name):
+    """The DesignSkillForm row id the client's DamageInfo.status needs to draw `name`'s
+    icon, or None if we have no graphic for it (built by tools/build_status_icons.py --
+    the visual lives on a _type-6 STATUS skill whose _statusID picks the DesignStatusForm
+    graphic). None -> the caller emits no icon entry, never a wrong one."""
+    global _status_icons
+    if _status_icons is None:
+        try:
+            with open(os.path.join(DATA, "status_icons.json"), encoding="utf-8") as f:
+                _status_icons = json.load(f)
+        except FileNotFoundError:
+            _status_icons = {}
+    return _status_icons.get(name)
+
+
 # ---- status instances on a unit --------------------------------------------
 class Status:
     """One active status on a unit: its catalog name, remaining turns and stack count."""
@@ -161,8 +179,12 @@ def resolve_targets(token, attacker, primary, allies, enemies):
         key = {"hp": lambda u: u.hp, "atk": lambda u: u.atk,
                "spd": lambda u: u.spd, "def": lambda u: u.defense}.get(stat)
         return [max(pool, key=key)] if key else [pool[0]]
-    # "enemy_target" / default: the chosen primary, else the first live enemy.
-    if primary and primary.alive:
+    # "enemy_target" / default: the unit the caster chose. EVERY op of the skill stays on
+    # that same unit -- even if an earlier hit in the same combo killed it (the follow-on
+    # debuff is then simply wasted). Re-picking a live enemy per-op would scatter one
+    # combo's damage and debuffs across different units. Only with no chosen target at all
+    # (a passive/AoE with no primary) do we fall back to the first live enemy.
+    if primary is not None:
         return [primary]
     live = [u for u in enemies if u.alive]
     return live[:1]
@@ -227,8 +249,9 @@ def _default_reduce(_target):
 def _new_outcome(trusted=True):
     # `gauge`/`cd` collect turn-flow changes the caller applies to its own Unit fields
     # (scv, cooldowns), which the engine's unit protocol deliberately does not expose.
+    # `status_events` = each named status applied this action, for DamageInfo.status icons.
     return {"hits": [], "self": {"heal": 0, "statuses": [], "gauge": 0},
-            "gauge": [], "cd": [], "deferred": [], "trusted": trusted}
+            "gauge": [], "cd": [], "status_events": [], "deferred": [], "trusted": trusted}
 
 
 def _apply_op(eff, attacker, primary, allies, enemies, reduce, per_target, outcome):
@@ -269,6 +292,8 @@ def _apply_op(eff, attacker, primary, allies, enemies, reduce, per_target, outco
             if st:
                 (outcome["self"]["statuses"] if u is attacker
                  else hit_entry(u)["statuses"]).append(st.name)
+                outcome["status_events"].append(
+                    {"unit": u, "name": st.name, "round": st.remaining})
     elif op == "heal":
         amt = int(attacker.max_hp * eff.get("pct_maxhp", 0) / 100.0)
         for u in targets:
@@ -285,6 +310,8 @@ def _apply_op(eff, attacker, primary, allies, enemies, reduce, per_target, outco
             st = apply_status(u, "Shield", eff.get("duration"))
             if st:
                 st.definition = dict(st.definition, shield_amount=eff.get("amount"))
+                outcome["status_events"].append(
+                    {"unit": u, "name": st.name, "round": st.remaining})
     elif op == "stat_mod":
         # a bare stat buff/debuff with no named status -> synthesize one
         for u in targets:
