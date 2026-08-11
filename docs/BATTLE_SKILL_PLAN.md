@@ -70,15 +70,16 @@ Two files WILL bloat as we add rules; get ahead of them:
 
 ## Phased plan (ROI order)
 
-**Current status (2026-08-10): Phase 0 DONE. Next up = Phase 1.**
+**Current status (2026-08-10): Phases 0 and 1 DONE. Next up = Phase 2 (condition system).**
 - Engine is the `battle_effects/` package (registry + core + ops); parser is the
   `skillparse/` package. `server/test_battle_effects.py` is the committed regression
   harness (lock-step + no-crash + starters + full battles) — run it after any change.
+- Char-referenced coverage is now **1016/2009 = 50%**.
 
 | Phase | Work | Effort | Coverage (char-ref) |
 |---|---|---|---|
 | **0. Architecture prep** ✅ | Op-registry engine package; parser package; committed regression harness. | S | 45% → 45% |
-| **1. Cheap pattern sweep** | Concentrated leftovers: "ability-unlock: base `<stat>` +N" (~27+), "recovers N% HP after action", a handful more. Regex + existing ops. | S | 45% → ~52% |
+| **1. Cheap pattern sweep** ✅ | "% MAX HP as damage [+ chance status]" and "ability-unlock: Base `<stat>` +N". Both use existing ops. (Deferred: "recover HP by %ATK" — heal-targeting ambiguity.) | S | 45% → **50%** |
 | **2. Condition system** ⭐ | Condition grammar in parser + evaluator in engine + fire the deferred `conditional` effects in the turn loop. Unblocks ~195 incomplete player skills AND fixes ~667 already-`complete` skills whose conditional branch never fires. Highest value: coverage + correctness. | **L** | ~52% → ~68% |
 | **3. Mechanics depth** | Make parsed skills actually act: DoT/HoT ticking, shield absorption, un-enforced status flags (heal_block, ability_seal, forced_target…). | M | (correctness) |
 | **4. Long-tail grind** | The ~165 flat one-off shapes, added opportunistically. Deep diminishing returns (top 20 shapes ≈ 57 skills). | M, spread | ~68% → ~90% |
