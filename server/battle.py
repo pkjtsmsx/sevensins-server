@@ -106,6 +106,9 @@ SKILL_RANK = 4
 # SCV charge gauge (the blue bar): UICharStatus.SyncBar draws scv/100, so 100 is full.
 # The ultimate (skill slot 3) is gated on a full gauge.
 SCV_FULL, SCV_PER_TURN, ULTIMATE_SLOT = 100, 25, 2
+# DesignSkillRow._type (SkillType enum): 4 = PASSIVE. A passive's effects are event-
+# driven (battle_start / on_counter), not fired by an active use -- see battle_effects.
+SKILLTYPE_PASSIVE = 4
 
 
 def skill_ranks(char_row, limit_with_suit):
@@ -419,6 +422,14 @@ class Unit:
     def ultimate_ready(self):
         return self.scv >= SCV_FULL
 
+    def passives(self):
+        """The unit's PASSIVE skill ids that the effect engine fully understands.
+        Only `complete` passives fire, so a half-parsed one is silently inert rather
+        than firing a guessed effect (Lucifer's Fear Nothing, not yet complete, is one)."""
+        return [s for s in self.skills
+                if (dd.row("skill", s) or {}).get("_type") == SKILLTYPE_PASSIVE
+                and fx.is_complete(s)]
+
     @property
     def alive(self):
         return self.hp > 0
@@ -518,6 +529,9 @@ class Battle:
         self.team_super_star = team_super_star
         self._add_player_team(team_char_ids)
         self._spawn_wave()
+        # Passive battle-start effects fire before the turn order is rolled (a SPD buff
+        # can reorder it) and with both teams already on the field.
+        self._apply_battle_start(list(self.units.values()))
         self._roll_turn_order()
         self.all_mob_ids, self.all_skill_ids = self._collect_all_waves()
 
@@ -597,6 +611,36 @@ class Battle:
         alive = [u for u in self.units.values() if u.alive]
         alive.sort(key=lambda u: (-u.spd, u.team, u.index))
         self.turn_order = [u.order for u in alive]
+
+    def _defend_reduce(self):
+        """A damage-reduction function the effect engine calls per target: the client's
+        own defend-ratio curve applied to the target's post-status DEF."""
+        return lambda u: defend_ratio(
+            u.defense * fx.stat_multiplier(u.statuses, "DEF")
+            + fx.flat_bonus(u.statuses, "DEF"))
+
+    def _apply_gauge_cd(self, outcome):
+        """Fold an effect outcome's charge-gauge and cooldown changes back onto the
+        units. scv is the 0..100 ultimate gauge; cooldowns are per-skill-slot turns."""
+        for g in outcome["gauge"]:
+            u = g["unit"]
+            u.scv = max(0, min(SCV_FULL, u.scv + int(SCV_FULL * g["pct"] / 100.0)))
+        for c in outcome["cd"]:
+            u = c["unit"]
+            u.cooldowns = [max(0, cd + c["delta"]) for cd in u.cooldowns]
+
+    def _apply_battle_start(self, units):
+        """Fire the battle-start effects of each given unit's passive skills against the
+        current field. Called when units ENTER the fight -- the whole roster at battle
+        open, and each new wave's enemies as they spawn -- so team buffs, enemy debuffs
+        and self-immunities (e.g. Leviathan's Jealousy Vortex) are in place before the
+        first turn. Runs before the turn order is rolled so a SPD buff can reorder it."""
+        field = list(self.units.values())
+        for u in units:
+            allies = [x for x in field if x.team == u.team]
+            enemies = [x for x in field if x.team != u.team]
+            for sid in u.passives():
+                fx.run_phase(sid, "battle_start", u, None, allies, enemies)
 
     # -- payloads ---------------------------------------------------------
     def battle_datas_json(self):
@@ -692,17 +736,38 @@ class Battle:
             # server-side buff/debuff tracking that feeds back into damage.
             allies = [u for u in self.units.values() if u.team == attacker.team]
             enemies = [u for u in self.units.values() if u.team != attacker.team]
-            outcome = fx.execute_skill(
-                attacker, target, allies, enemies, skill_id,
-                damage_reduce=lambda u: defend_ratio(
-                    u.defense * fx.stat_multiplier(u.statuses, "DEF")
-                    + fx.flat_bonus(u.statuses, "DEF")))
+            reduce = self._defend_reduce()
+            outcome = fx.execute_skill(attacker, target, allies, enemies, skill_id,
+                                       damage_reduce=reduce)
             for h in outcome["hits"]:
                 if h["damage"] > 0:
                     rows.append(dmg_info(h["target"], h["damage"]))
                     self.damage_sum += h["damage"]
                     attacker.dmg_done += h["damage"]
                     h["target"].dmg_taken += h["damage"]
+            # on_use / after_action gauge & cooldown changes (e.g. drain the target's
+            # gauge, delay its skills, refresh the caster's own cooldowns).
+            self._apply_gauge_cd(outcome)
+            # Passive counters: any struck-and-still-alive enemy with an on_counter
+            # passive hits the attacker back in the same combo.
+            for h in outcome["hits"]:
+                tgt = h["target"]
+                if h["damage"] <= 0 or not tgt.alive:
+                    continue
+                for sid in tgt.passives():
+                    c_out = fx.run_phase(sid, "on_counter", tgt, attacker,
+                                         [u for u in self.units.values()
+                                          if u.team == tgt.team],
+                                         [u for u in self.units.values()
+                                          if u.team != tgt.team],
+                                         damage_reduce=reduce)
+                    for ch in c_out["hits"]:
+                        if ch["damage"] > 0:
+                            rows.append(dmg_info(ch["target"], ch["damage"]))
+                            self.damage_sum += ch["damage"]
+                            tgt.dmg_done += ch["damage"]
+                            ch["target"].dmg_taken += ch["damage"]
+                    self._apply_gauge_cd(c_out)
         elif attacker and target:
             # Fallback: the original single-hit simple-damage path.
             damage = self.damage(attacker, target, skill_id)
@@ -953,6 +1018,10 @@ class Battle:
         incremented the client's own BattleData.Wave by the time it asks for this."""
         self.wave += 1
         self._spawn_wave()
+        # New wave's enemies get their battle-start passives now that they are on the
+        # field; the party's already fired at battle open and does not re-trigger.
+        self._apply_battle_start([u for u in self.units.values()
+                                  if u.team == TEAM_ENEMY])
         self._roll_turn_order()
         # Every wave needs its own WaveBegin: BattleUnitManager.SetAllCollider() runs
         # only in HandleWaveBegin, and BattleUnit.InitBattleUnit does NOT add a
