@@ -43,16 +43,28 @@ class MockUnit:
         return self.hp > 0
 
 
+def _cond_kinds(cond):
+    out = {cond.get("kind")}
+    for c in cond.get("conds", []):
+        out |= _cond_kinds(c)
+    return out
+
+
 def test_lockstep(skills):
-    emitted = set()
+    emitted, kinds = set(), set()
     for rec in skills.values():
         for b in rec.get("blocks", []):
             for e in b.get("effects", []):
                 if e.get("op"):
                     emitted.add(e["op"])
+                if e.get("when"):
+                    kinds |= _cond_kinds(e["when"])
     missing = emitted - fx.registered_ops()
     check("lock-step: every emitted op has a handler", not missing,
           f"unhandled ops: {sorted(missing)}")
+    unkn = kinds - fx.registered_conds()
+    check("lock-step: every emitted condition kind has an evaluator", not unkn,
+          f"unhandled kinds: {sorted(unkn)}")
 
 
 def test_no_crash(skills):
@@ -62,12 +74,13 @@ def test_no_crash(skills):
         a = MockUnit(0, "101"); allies = [a, MockUnit(0, "102")]
         enemies = [MockUnit(1, "201"), MockUnit(1, "202"), MockUnit(1, "203")]
         try:
-            fx.execute_skill(a, enemies[0], allies, enemies, int(sid),
-                             damage_reduce=lambda u: 0.1)
+            for env in (None, {"turn": 3, "crit": True}, {"turn": 26}):
+                fx.execute_skill(a, enemies[0], allies, enemies, int(sid),
+                                 damage_reduce=lambda u: 0.1, env=env)
             for ph in ("battle_start", "on_counter", "after_action", "after_attack",
                        "conditional"):
                 fx.run_phase(int(sid), ph, a, enemies[0], allies, enemies,
-                             damage_reduce=lambda u: 0.1)
+                             damage_reduce=lambda u: 0.1, env={"turn": 5})
         except Exception as e:                                    # noqa: BLE001
             crashes.append((sid, type(e).__name__, str(e)))
     check(f"no-crash across {len(complete)} complete skills", not crashes,
@@ -88,6 +101,48 @@ def test_starters(skills):
     check("Blink Slash inflicts Fracture on target",
           any("Fracture" in h["statuses"] for h in out["hits"]))
     check("Blink Slash grants Keen on self", "Keen" in out["self"]["statuses"])
+
+
+def test_conditions():
+    """Evaluator semantics (Phase 2), driven through a duck-typed ctx."""
+    from types import SimpleNamespace
+
+    a = MockUnit(0, "101"); t = MockUnit(1, "201")
+    a.job = 2                                        # STR (char _job 2/3/4 = STR/AGI/TEC)
+    ctx = SimpleNamespace(attacker=a, primary=t, allies=[a], enemies=[t],
+                          env={"turn": 3}, per_target={})
+    ev = fx.eval_cond
+    check("hp gate: full HP passes >90%",
+          ev({"kind": "hp", "subject": "self", "cmp": "gt", "pct": 90}, ctx))
+    a.hp = a.max_hp // 2
+    check("hp gate: half HP fails >90%",
+          not ev({"kind": "hp", "subject": "self", "cmp": "gt", "pct": 90}, ctx))
+    check("status gate: absent status fails",
+          not ev({"kind": "status", "subject": "target", "names": ["Stun"],
+                  "negate": False}, ctx))
+    fx.apply_status(t, "Stun")
+    check("status gate: applied status passes",
+          ev({"kind": "status", "subject": "target", "names": ["Stun"],
+              "negate": False}, ctx))
+    check("status gate: negate flips",
+          not ev({"kind": "status", "subject": "target", "names": ["Stun"],
+                  "negate": True}, ctx))
+    check("status gate: Stun counts as a debuff class",
+          ev({"kind": "status", "subject": "target", "names": ["_debuff"],
+              "negate": False}, ctx))
+    check("cast_type gate: attacker job 2 is STR (self)",
+          ev({"kind": "cast_type", "subject": "self", "type": "STR"}, ctx))
+    check("cast_type gate: target without job fails",
+          not ev({"kind": "cast_type", "subject": "target", "type": "TEC"}, ctx))
+    check("turn gates: turn 3 is odd and <= 25",
+          ev({"kind": "turn_parity", "parity": "odd"}, ctx)
+          and ev({"kind": "turn_cmp", "cmp": "le", "n": 25}, ctx))
+    check("crit gate: false without a crit model",
+          not ev({"kind": "crit"}, ctx))
+    ctx.per_target = {"201": {"died": True}}
+    check("kill gate: sees this action's kills",
+          ev({"kind": "kill", "negate": False}, ctx))
+    check("unknown kind never fires", not ev({"kind": "someday"}, ctx))
 
 
 def test_battle_start_and_counter():
@@ -136,6 +191,7 @@ def main():
     test_lockstep(skills)
     test_no_crash(skills)
     test_starters(skills)
+    test_conditions()
     test_battle_start_and_counter()
     test_full_battles()
     print(f"\n{'ALL PASSED' if not _fail else f'{_fail} CHECK(S) FAILED'}")

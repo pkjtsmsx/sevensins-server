@@ -3,7 +3,8 @@ glosses, named passive blocks, and sentence clauses. No effect semantics here.""
 import re
 
 COLOR_RE = re.compile(r"\[[0-9A-Fa-f]{6}\]|\[-\]")
-WORDNUM = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
+WORDNUM = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+           "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
 
 
 def clean(text):

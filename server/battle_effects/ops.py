@@ -4,6 +4,7 @@ add a handler here (or in a new sibling module that also imports `register`), ne
 core's dispatch. Every op the parser can emit MUST have a handler here, or a `complete`
 skill silently does nothing (asserted by the regression harness via registry.registered_ops).
 """
+from .conditions import _CLASSES
 from .core import (Status, apply_status, damage_taken_multiplier, flat_bonus,
                    grant_immunity, resolve_targets, stat_multiplier)
 from .registry import register
@@ -35,7 +36,9 @@ def _damage(eff, ctx):
 @register("apply_status")
 def _apply_status(eff, ctx):
     for u in ctx.targets(eff.get("target")):
-        st = apply_status(u, eff.get("status"), eff.get("duration"))
+        st = None
+        for _ in range(eff.get("stacks", 1) or 1):
+            st = apply_status(u, eff.get("status"), eff.get("duration")) or st
         if st:
             (ctx.outcome["self"]["statuses"] if u is ctx.attacker
              else ctx.hit_entry(u)["statuses"]).append(st.name)
@@ -45,7 +48,10 @@ def _apply_status(eff, ctx):
 
 @register("heal")
 def _heal(eff, ctx):
-    amt = int(ctx.attacker.max_hp * eff.get("pct_maxhp", 0) / 100.0)
+    # pct_maxhp scales off the caster's Max HP; pct_caster_hp off their CURRENT HP
+    # ("recovers All allies' HP by 25% of the caster's HP").
+    amt = int(ctx.attacker.max_hp * eff.get("pct_maxhp", 0) / 100.0
+              + ctx.attacker.hp * eff.get("pct_caster_hp", 0) / 100.0)
     for u in ctx.targets(eff.get("target")):
         healed = min(amt, u.max_hp - u.hp)
         u.hp += healed
@@ -58,6 +64,19 @@ def _cleanse(eff, ctx):
     names = set(eff.get("statuses", []))
     for u in ctx.targets(eff.get("target")):
         u.statuses = [s for s in u.statuses if s.name not in names]
+
+
+@register("cleanse_class")
+def _cleanse_class(eff, ctx):
+    # Strip a whole class ("removes all buffs from the target"). Classifiers are shared
+    # with the condition evaluators; immunity markers are never stripped.
+    classify = _CLASSES.get(eff.get("cls"))
+    if classify is None:
+        return
+    for u in ctx.targets(eff.get("target")):
+        u.statuses = [s for s in u.statuses
+                      if "immunity" in s.definition.get("flags", [])
+                      or not classify(s.definition)]
 
 
 @register("shield")

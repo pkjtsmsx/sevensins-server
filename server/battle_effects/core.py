@@ -25,6 +25,7 @@ import json
 import os
 import random
 
+from .conditions import eval_cond
 from .registry import OPS
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -274,9 +275,10 @@ class Ctx:
     resolve their own targets via ctx.targets(), and fold results into ctx.outcome."""
 
     __slots__ = ("attacker", "primary", "allies", "enemies", "reduce",
-                 "per_target", "outcome")
+                 "per_target", "outcome", "env")
 
-    def __init__(self, attacker, primary, allies, enemies, reduce, per_target, outcome):
+    def __init__(self, attacker, primary, allies, enemies, reduce, per_target, outcome,
+                 env=None):
         self.attacker = attacker
         self.primary = primary
         self.allies = allies
@@ -284,6 +286,7 @@ class Ctx:
         self.reduce = reduce
         self.per_target = per_target
         self.outcome = outcome
+        self.env = env or {}
 
     def targets(self, token):
         return resolve_targets(token, self.attacker, self.primary,
@@ -310,11 +313,17 @@ def _apply_op(eff, ctx):
         fn(eff, ctx)
 
 
-def _run(effects, attacker, primary, allies, enemies, reduce, *, trusted=True):
+def _run(effects, attacker, primary, allies, enemies, reduce, *, trusted=True, env=None):
+    """Unconditional effects first, then the {"when": ...}-gated ones -- a gate like
+    'if this attack defeats an enemy' must see the outcome of the plain hits."""
     outcome = _new_outcome(trusted)
-    ctx = Ctx(attacker, primary, allies, enemies, reduce, {}, outcome)
+    ctx = Ctx(attacker, primary, allies, enemies, reduce, {}, outcome, env)
     for eff in effects:
-        _apply_op(eff, ctx)
+        if not eff.get("when"):
+            _apply_op(eff, ctx)
+    for eff in effects:
+        if eff.get("when") and eval_cond(eff["when"], ctx):
+            _apply_op(eff, ctx)
     outcome["hits"] = list(ctx.per_target.values())
     return outcome
 
@@ -324,7 +333,8 @@ def _run(effects, attacker, primary, allies, enemies, reduce, *, trusted=True):
 IMMEDIATE_TRIGGERS = ("on_use", "before_action", "after_action", "after_attack")
 
 
-def execute_skill(attacker, primary, allies, enemies, skill_id, *, damage_reduce=None):
+def execute_skill(attacker, primary, allies, enemies, skill_id, *, damage_reduce=None,
+                  env=None):
     """Run a skill's IMMEDIATE effects (on_use/before_action/after_action/after_attack).
     -> outcome dict:
 
@@ -339,8 +349,10 @@ def execute_skill(attacker, primary, allies, enemies, skill_id, *, damage_reduce
 
     battle_start and on_counter belong to a PASSIVE skill and are event-driven, so they
     are returned in `deferred` for the turn-flow layer to fire via run_phase().
-    `conditional` effects have no machine-readable condition (the gating text was lost in
-    parsing) and are returned unfired -- applying them blindly would be a guess.
+    An effect carrying {"when": cond} is gated: it runs AFTER the plain effects, and only
+    if the cond evaluates True against the live state + `env` ({"turn": n, "crit": bool}
+    from the turn-flow layer). Legacy `conditional`-trigger effects (no machine-readable
+    gate) stay in `deferred`, unfired -- applying them blindly would be a guess.
     """
     reduce = damage_reduce or _default_reduce
     rec = skill_effects(skill_id)
@@ -352,12 +364,13 @@ def execute_skill(attacker, primary, allies, enemies, skill_id, *, damage_reduce
             (immediate if eff.get("trigger", "on_use") in IMMEDIATE_TRIGGERS
              else deferred).append(eff)
     outcome = _run(immediate, attacker, primary, allies, enemies, reduce,
-                   trusted=bool(rec.get("complete")))
+                   trusted=bool(rec.get("complete")), env=env)
     outcome["deferred"] = deferred
     return outcome
 
 
-def run_phase(skill_id, phase, attacker, primary, allies, enemies, *, damage_reduce=None):
+def run_phase(skill_id, phase, attacker, primary, allies, enemies, *, damage_reduce=None,
+              env=None):
     """Fire the effects of one skill for a single TRIGGER phase (battle_start /
     on_counter / after_action / ...), returning the execute_skill outcome shape (minus
     `deferred`). This is how a unit's PASSIVE skills act on battle events: the turn-flow
@@ -370,4 +383,4 @@ def run_phase(skill_id, phase, attacker, primary, allies, enemies, *, damage_red
     effects = [e for b in rec.get("blocks", []) for e in b.get("effects", [])
                if e.get("trigger") == phase]
     return _run(effects, attacker, primary, allies, enemies, reduce,
-                trusted=bool(rec.get("complete")))
+                trusted=bool(rec.get("complete")), env=env)

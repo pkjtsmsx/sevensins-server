@@ -369,6 +369,9 @@ class Unit:
         self.healed = 0
         row = dd.row("char", char_id) or {}
         self.row = row
+        # STR/AGI/TEC class, for "if the target is a STR Type cast" gates: _job 2/3/4
+        # (CommonUtil.GetJobUseText renders job names via GetText(job + 12099)).
+        self.job = row.get("_job") or 0
         self.lv = lv
         self.star = star or _default_star(row)
         # LightBattleChar carries only Star, so super_star never crosses the wire --
@@ -659,7 +662,8 @@ class Battle:
             allies = [x for x in field if x.team == u.team]
             enemies = [x for x in field if x.team != u.team]
             for sid in u.passives():
-                fx.run_phase(sid, "battle_start", u, None, allies, enemies)
+                fx.run_phase(sid, "battle_start", u, None, allies, enemies,
+                             env={"turn": self.round})
 
     # -- payloads ---------------------------------------------------------
     def battle_datas_json(self):
@@ -756,8 +760,11 @@ class Battle:
             allies = [u for u in self.units.values() if u.team == attacker.team]
             enemies = [u for u in self.units.values() if u.team != attacker.team]
             reduce = self._defend_reduce()
+            # env feeds the condition gates: the turn counter for odd/even and turn-cap
+            # gates. No crit model exists yet, so crit-gated branches stay dormant.
+            env = {"turn": self.round}
             outcome = fx.execute_skill(attacker, target, allies, enemies, skill_id,
-                                       damage_reduce=reduce)
+                                       damage_reduce=reduce, env=env)
             status_events += outcome["status_events"]
             for h in outcome["hits"]:
                 if h["damage"] > 0:
@@ -780,7 +787,7 @@ class Battle:
                                           if u.team == tgt.team],
                                          [u for u in self.units.values()
                                           if u.team != tgt.team],
-                                         damage_reduce=reduce)
+                                         damage_reduce=reduce, env=env)
                     status_events += c_out["status_events"]
                     for ch in c_out["hits"]:
                         if ch["damage"] > 0:

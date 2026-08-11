@@ -34,5 +34,6 @@ from .core import (                                                     # noqa: 
     _default_reduce,
     _new_outcome,
 )
+from .conditions import eval_cond, registered_conds             # noqa: F401
 from .registry import OPS, register, registered_ops             # noqa: F401
 from . import ops as _ops                    # noqa: F401  -- side effect: register handlers

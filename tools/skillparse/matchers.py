@@ -27,12 +27,24 @@ def _dur(text):
 
 # --- clause-level trigger prefixes -----------------------------------------
 TRIGGERS = [
-    (re.compile(r"^before the action[,:]?\s*", re.I), "before_action"),
+    (re.compile(r"^before (?:the )?(?:attack )?action[,:]?\s*", re.I), "before_action"),
+    (re.compile(r"^before (?:dealing )?(?:the )?attack(?: action)?[,:]?\s*", re.I),
+     "before_action"),
+    (re.compile(r"^when (?:a|the) turn starts[,:]?\s*", re.I), "before_action"),
+    (re.compile(r"^at the start of a turn[,:]?\s*", re.I), "before_action"),
+    (re.compile(r"^while taking damage[,:]?\s*", re.I), "on_counter"),
+    (re.compile(r"^after attack(?:ing)?[,:]?\s*", re.I), "after_attack"),
     (re.compile(r"^after (?:an? )?attack[,:]?\s*", re.I), "after_attack"),
-    (re.compile(r"^after (?:the action|dealing damage)[,:]?\s*", re.I), "after_action"),
-    (re.compile(r"^when a battle starts[,:]?\s*", re.I), "battle_start"),
+    (re.compile(r"^after (?:the )?(?:action|dealing damage)[,:]?\s*", re.I), "after_action"),
+    (re.compile(r"^when (?:a|the) battle starts[,:]?\s*", re.I), "battle_start"),
     (re.compile(r"^when taking (?:enemy )?counterattack[,:]?\s*", re.I), "on_counter"),
 ]
+
+# In-attack context riders that add no trigger of their own ("When attacking, if ...");
+# stripped so the 'if' underneath is visible. The trigger stays on_use.
+RIDER_PREFIX_RE = re.compile(
+    r"^(?:when attacking|while attacking|while dealing (?:damage|attacks?)|"
+    r"while (?:the caster is )?dealing damage|when dealing damage)[,:]?\s*", re.I)
 
 
 # A segment boundary (', ' or ' and ') only starts a NEW effect when what follows opens
@@ -102,8 +114,8 @@ def parse_segment(text, trigger, catalog):
     # damage, two word orders:
     #  "deals X% ATK as damage [N times]"
     #  "deals damage [on <t>] by X% ATK [N times]"
-    for m in re.finditer(r"deals?\s+(\d+)%\s+ATK\s+as\s+damage(?:\s+(\d+|two|three)\s+times)?",
-                         text, re.I):
+    for m in re.finditer(r"deal(?:s|ing)?\s+(\d+)%\s+ATK\s+as\s+(?:pursuit\s+|extra\s+)?"
+                         r"damage(?:\s+(\d+|two|three)\s+times?)?", text, re.I):
         times = m.group(2)
         effects.append({**base, "op": "damage", "pct_atk": int(m.group(1)),
                         "times": WORDNUM.get((times or "").lower(),
@@ -181,6 +193,21 @@ def parse_segment(text, trigger, catalog):
     if m:
         effects.append({**base, "op": "heal", "pct_maxhp": int(m.group(1)),
                         "target": target_of(text) or "self"})
+    # heal: "recovers 15% of the caster's Max HP"
+    m = re.search(r"(?:restores?|recovers?)\s+(\d+)%\s+of\s+(?:the\s+)?(.+?)'\s*s?\s+Max\s+HP",
+                  text, re.I)
+    if m:
+        effects.append({**base, "op": "heal", "pct_maxhp": int(m.group(1)),
+                        "target": target_of(m.group(2)) or "self"})
+    # heal, by-phrasing: "restores/recovers <t>'(s) HP by X% [of the caster's (Max) HP]".
+    # Plain % and "of ... Max HP" scale off the caster's Max HP; "of the caster's HP"
+    # scales off the caster's CURRENT HP (pct_caster_hp).
+    m = re.search(r"(?:restores?|recovers?)\s+(.+?)'\s*s?\s+HP\s+by\s+(\d+)%"
+                  r"(\s+of\s+the\s+caster'\s*s\s+(Max\s+)?HP)?", text, re.I)
+    if m:
+        key = "pct_caster_hp" if (m.group(3) and not m.group(4)) else "pct_maxhp"
+        effects.append({**base, "op": "heal", key: int(m.group(2)),
+                        "target": target_of(m.group(1)) or "self"})
     # skill CD: "increases the Skill CD of <t> by N" / "reduce ... Skill CD ... by N"
     m = re.search(r"(increase|reduce|decrease)s?\s+the\s+Skill\s+CD\s+of\s+(.+?)\s+by\s+(\d+)",
                   text, re.I)
@@ -188,6 +215,75 @@ def parse_segment(text, trigger, catalog):
         sign = 1 if m.group(1).lower() == "increase" else -1
         effects.append({**base, "op": "skill_cd", "delta": sign * int(m.group(3)),
                         "target": target_of(m.group(2)) or "enemy_target"})
+    # skill CD, possessive: "increases the target's Skill CD by N" / "its skill CD by N"
+    m = re.search(r"(increase|reduce|decrease)s?\s+(.+?)(?:'s|s')\s+[Ss]kill\s+CD\s+by\s+(\d+)",
+                  text, re.I)
+    if m:
+        sign = 1 if m.group(1).lower() == "increase" else -1
+        effects.append({**base, "op": "skill_cd", "delta": sign * int(m.group(3)),
+                        "target": target_of(m.group(2)) or
+                        ("self" if "caster" in m.group(2).lower() else "enemy_target")})
+    # move gauge, gain phrasing: "gains 100% Move Gauge" (the caster's own)
+    m = re.search(r"gains?\s+(\d+)%\s+Move\s+Gauge", text, re.I)
+    if m:
+        effects.append({**base, "op": "move_gauge", "pct": int(m.group(1)),
+                        "target": "self"})
+    # buff/debuff strip: "removes all buffs from <t>" (unremovable-excluding caveat is
+    # implicit -- the engine's classifier only ever strips removable classes)
+    m = re.search(r"removes?\s+(?:all\s+)?(?:the\s+)?(buffs?|debuffs?)\s+from\s+(.+)",
+                  text, re.I)
+    if m:
+        cls = "_buff" if m.group(1).lower().startswith("buff") else "_debuff"
+        effects.append({**base, "op": "cleanse_class", "cls": cls,
+                        "target": target_of(m.group(2)) or "enemy_target"})
+    # stacked status: "inflicts 1 (more) stack(s) of <Name> on <t>" /
+    # "grants the caster 2 stacks of Spirit"
+    m = re.search(r"inflicts?\s+(\d+)\s+(?:more\s+)?stacks?\s+of\s+([A-Z][A-Za-z' ]+?)"
+                  r"\s+on\s+(the target|it|all enemies|the caster)", text)
+    if m and m.group(2).strip() in catalog:
+        effects.append({**base, "op": "apply_status", "status": m.group(2).strip(),
+                        "stacks": int(m.group(1)),
+                        "target": target_of(m.group(3)) or "enemy_target",
+                        "duration": _dur(text)})
+    m = re.search(r"grants?\s+(the caster|all allies|the target)\s+(\d+|" +
+                  "|".join(WORDNUM) + r")\s+stacks?\s+of\s+([A-Z][A-Za-z' ()]+?)(?:[.,]|$)",
+                  text, re.I)
+    if m:
+        names = [n.strip() for n in re.split(r"\s+and\s+|,\s*", m.group(3)) if n.strip()]
+        n = m.group(2).lower()
+        stacks = WORDNUM.get(n, int(n) if n.isdigit() else 1)
+        for nm in names:
+            if nm in catalog:
+                effects.append({**base, "op": "apply_status", "status": nm,
+                                "stacks": stacks, "target": target_of(m.group(1)) or "self",
+                                "duration": _dur(text)})
+    # class cleanse by name: "removes [healing over time] statuses from <t>" /
+    # "remove the DoT status from all allies"
+    m = re.search(r"removes?\s+(?:the\s+)?\[?(healing over time|damage over time|DoT|HoT)\]?"
+                  r"\s+status(?:es)?\s+from\s+(.+)", text, re.I)
+    if m:
+        cls = "_hot" if m.group(1).lower() in ("healing over time", "hot") else "_dot"
+        effects.append({**base, "op": "cleanse_class", "cls": cls,
+                        "target": target_of(m.group(2)) or "enemy_target"})
+    # possessive buff strip: "removes the target's buffs"
+    m = re.search(r"removes?\s+(.+?)(?:'s|s')\s+(buffs?|debuffs?)", text, re.I)
+    if m:
+        cls = "_buff" if m.group(2).lower().startswith("buff") else "_debuff"
+        effects.append({**base, "op": "cleanse_class", "cls": cls,
+                        "target": target_of(m.group(1)) or "enemy_target"})
+    # bare move gauge: "increase Move Gauge by N%" (the caster's own)
+    m = re.search(r"(increase|decrease)s?\s+(?:the\s+)?Move\s+Gauge\s+by\s+(\d+)%", text, re.I)
+    if m and "of" not in text[max(0, m.start() - 1):m.end() + 4].lower():
+        sign = 1 if m.group(1).lower() == "increase" else -1
+        effects.append({**base, "op": "move_gauge", "pct": sign * int(m.group(2)),
+                        "target": target_of(text[:m.start()]) or "self"})
+    # bare status gain: "gains All DMG Reduction (2 turns)" -- name must be in the
+    # catalog, so ordinary prose never matches.
+    m = re.search(r"gains?\s+([A-Z][A-Za-z' ]+?)(?:\s*\((\d+)\s*turns?\))?(?:[.,]|$)", text)
+    if m and m.group(1).strip() in catalog and "immunity" not in m.group(1).lower():
+        effects.append({**base, "op": "apply_status", "status": m.group(1).strip(),
+                        "target": "self",
+                        "duration": int(m.group(2)) if m.group(2) else _dur(text)})
     # move gauge: "Move Gauge+30%" or "reduce the target's Move Gauge by 35%"
     m = re.search(r"Move\s+Gauge\s*([+\-])\s*(\d+)%", text, re.I)
     if m:
