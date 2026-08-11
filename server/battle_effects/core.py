@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Runtime skill-effect engine (step 3 of the battle-engine revamp).
+"""Runtime skill-effect engine -- SPINE.
 
 Consumes the two data artifacts the mapping produced --
 `battle_data/status_catalog.json` (what each buff/debuff DOES) and
@@ -8,29 +8,43 @@ resolves a skill USE into concrete outcomes: damage numbers, status applications
 gauge/CD changes. The battle is server-authoritative (the client holds no mechanics; see
 memory sevensins-battle), so this is where those mechanics live.
 
+This module is the spine: data loaders, the Status model, stat/target helpers, the
+outcome shape, and `execute_skill`/`run_phase`. The OPS themselves live in `ops.py` and
+register into `registry.OPS`; `_apply_op` here just dispatches. Adding an op never touches
+this file -- see docs/BATTLE_SKILL_PLAN.md.
+
 Design goals:
   * DECOUPLED from battle.py's Unit/Battle -- the engine talks through a tiny protocol
-    (a unit exposes .atk/.defense/.hp/.max_hp/.team/.spd/.statuses and a couple of
-    helpers), so it can be unit-tested against mocks and wired into battle.py without a
-    circular import.
-  * SAFE-BY-DEFAULT -- only skills flagged `complete` in skill_effects.json are trusted;
-    for anything else the caller falls back to the existing simple-damage path.
-  * Never throws on unknown data -- an unrecognized status/target degrades to a no-op
-    with the raw info preserved, so a half-understood skill can't crash a live battle.
+    (a unit exposes .atk/.defense/.hp/.max_hp/.team/.spd/.statuses/.alive/.order), so it
+    unit-tests against mocks and wires into battle.py without a circular import.
+  * SAFE-BY-DEFAULT -- only skills flagged `complete` are trusted; anything else falls
+    back to the caller's simple-damage path.
+  * Never throws on unknown data -- an unrecognized status/target/op degrades to a no-op.
 """
 import json
 import os
 import random
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-DATA = os.path.join(HERE, "battle_data")
+from .registry import OPS
 
-# Chance-gated effects (e.g. "40% chance to drain the gauge") roll against this. It is
-# a module-level Random so a battle stays server-authoritative and a test can seed it.
+HERE = os.path.dirname(os.path.abspath(__file__))
+DATA = os.path.join(os.path.dirname(HERE), "battle_data")
+
+# Chance-gated effects (e.g. "40% chance to drain the gauge") roll against this. Use
+# set_rng() to make a battle reproducible in a test (reassigning the module global from
+# outside the package would not affect the dispatcher, which reads this name directly).
 _rng = random.Random()
+
+
+def set_rng(rng):
+    """Replace the RNG the chance-gate rolls against (tests pass a seeded/stub Random)."""
+    global _rng
+    _rng = rng
+
 
 _catalog = None
 _skills = None
+_status_icons = None
 
 
 def catalog():
@@ -54,9 +68,6 @@ def is_complete(skill_id):
     """True iff every clause of the skill parsed -- the engine trusts only these."""
     rec = skill_effects(skill_id)
     return bool(rec and rec.get("complete"))
-
-
-_status_icons = None
 
 
 def status_skill_id(name):
@@ -160,10 +171,9 @@ def is_immobilized(statuses):
 def resolve_targets(token, attacker, primary, allies, enemies):
     """Map a parsed target token to concrete units.
 
-    Args:
-        token: e.g. "self", "enemy_target", "all_allies", "highest_spd_enemy".
-        attacker: the acting unit. primary: the chosen primary enemy (may be None).
-        allies/enemies: unit lists from the attacker's point of view.
+    token: e.g. "self", "enemy_target", "all_allies", "highest_spd_enemy".
+    attacker: the acting unit. primary: the chosen primary enemy (may be None).
+    allies/enemies: unit lists from the attacker's point of view.
     """
     if token == "self":
         return [attacker]
@@ -190,12 +200,7 @@ def resolve_targets(token, attacker, primary, allies, enemies):
     return live[:1]
 
 
-# ---- applying statuses and executing a skill --------------------------------
-# Triggers that fire as part of USING the skill (in listed order). battle_start /
-# on_counter / conditional are deferred to the turn-flow layer (not yet wired).
-IMMEDIATE_TRIGGERS = ("on_use", "before_action", "after_action", "after_attack")
-
-
+# ---- immunity + status application -----------------------------------------
 # Crowd-control statuses, for "immunity to crowd control" (a class, not one status).
 CC_STATUSES = {"Stun", "Freeze", "Daze", "Silence", "Seal", "Sleep", "Petrify",
                "Paralyze", "Entangle", "Entangled", "Confuse", "Confusion", "Fear",
@@ -251,6 +256,7 @@ def apply_status(unit, name, duration_override=None):
     return st
 
 
+# ---- execution: context, dispatch, and the two entry points -----------------
 def _default_reduce(_target):
     return 0.0
 
@@ -263,119 +269,59 @@ def _new_outcome(trusted=True):
             "gauge": [], "cd": [], "status_events": [], "deferred": [], "trusted": trusted}
 
 
-def _apply_op(eff, attacker, primary, allies, enemies, reduce, per_target, outcome):
-    """Apply ONE already-triggered effect, mutating units and folding results into
-    `outcome`. Shared by immediate skill use and the phased passive triggers so the two
-    paths can never drift. Chance-gated effects roll here and no-op when they miss."""
-    op = eff.get("op")
+class Ctx:
+    """Everything an op handler needs for one skill execution. Handlers take (eff, ctx),
+    resolve their own targets via ctx.targets(), and fold results into ctx.outcome."""
+
+    __slots__ = ("attacker", "primary", "allies", "enemies", "reduce",
+                 "per_target", "outcome")
+
+    def __init__(self, attacker, primary, allies, enemies, reduce, per_target, outcome):
+        self.attacker = attacker
+        self.primary = primary
+        self.allies = allies
+        self.enemies = enemies
+        self.reduce = reduce
+        self.per_target = per_target
+        self.outcome = outcome
+
+    def targets(self, token):
+        return resolve_targets(token, self.attacker, self.primary,
+                               self.allies, self.enemies)
+
+    def hit_entry(self, u):
+        """The per-target damage/status row for unit u (created on first touch), so a
+        skill's multiple hits/statuses on one unit fold into a single DamageInfo."""
+        e = self.per_target.get(u.order)
+        if e is None:
+            e = {"target": u, "damage": 0, "died": False, "statuses": []}
+            self.per_target[u.order] = e
+        return e
+
+
+def _apply_op(eff, ctx):
+    """Dispatch ONE already-triggered effect to its registered handler. The chance gate is
+    shared here so every op honours "N% chance". Unknown ops degrade to a no-op."""
     chance = eff.get("chance")
     if chance not in (None, "") and _rng.random() > chance / 100.0:
         return
-    targets = resolve_targets(eff.get("target"), attacker, primary, allies, enemies)
-
-    def hit_entry(u):
-        e = per_target.get(u.order)
-        if e is None:
-            e = {"target": u, "damage": 0, "died": False, "statuses": []}
-            per_target[u.order] = e
-        return e
-
-    if op == "damage":
-        times = eff.get("times", 1) or 1
-        pct = eff.get("pct_atk", 0)
-        pct_def = eff.get("pct_def", 0)
-        pct_hp = eff.get("pct_target_maxhp", 0)      # "absolute" -- ignores DEF
-        # Effective attacker ATK/DEF: base scaled by the attacker's own statuses
-        # (Keen +, Fracture -) plus any flat mod.
-        eff_atk = (attacker.atk * stat_multiplier(attacker.statuses, "ATK")
-                   + flat_bonus(attacker.statuses, "ATK"))
-        eff_def = (attacker.defense * stat_multiplier(attacker.statuses, "DEF")
-                   + flat_bonus(attacker.statuses, "DEF"))
-        for u in targets:
-            for _ in range(times):
-                mitigable = (eff_atk * pct + eff_def * pct_def) / 100.0
-                val = mitigable * (1.0 - reduce(u)) * damage_taken_multiplier(u.statuses)
-                val += u.max_hp * pct_hp / 100.0
-                dmg = max(1, int(val))
-                u.hp = max(0, u.hp - dmg)
-                e = hit_entry(u)
-                e["damage"] += dmg
-                e["died"] = not u.alive
-    elif op == "apply_status":
-        for u in targets:
-            st = apply_status(u, eff.get("status"), eff.get("duration"))
-            if st:
-                (outcome["self"]["statuses"] if u is attacker
-                 else hit_entry(u)["statuses"]).append(st.name)
-                outcome["status_events"].append(
-                    {"unit": u, "name": st.name, "round": st.remaining})
-    elif op == "heal":
-        amt = int(attacker.max_hp * eff.get("pct_maxhp", 0) / 100.0)
-        for u in targets:
-            healed = min(amt, u.max_hp - u.hp)
-            u.hp += healed
-            if u is attacker:
-                outcome["self"]["heal"] += healed
-    elif op == "cleanse":
-        names = set(eff.get("statuses", []))
-        for u in targets:
-            u.statuses = [s for s in u.statuses if s.name not in names]
-    elif op == "shield":
-        for u in targets:
-            st = apply_status(u, "Shield", eff.get("duration"))
-            if st:
-                st.definition = dict(st.definition, shield_amount=eff.get("amount"))
-                outcome["status_events"].append(
-                    {"unit": u, "name": st.name, "round": st.remaining})
-    elif op == "stat_mod":
-        # a bare stat buff/debuff with no named status. HP mods change max_hp directly
-        # (statuses don't recompute max_hp); ATK/DEF/SPD ride a synthesized status;
-        # unmodelled stats (CRIT, ...) are skipped rather than applied wrong.
-        for u in targets:
-            stat = eff["stat"]
-            val = eff["pct"]
-            unit = eff.get("unit", "pct")
-            if stat == "HP":
-                delta = int(u.max_hp * val / 100.0) if unit == "pct" else int(val)
-                u.max_hp = max(1, u.max_hp + delta)
-                u.hp = max(1, min(u.max_hp, u.hp + delta))
-            elif stat in ("ATK", "DEF", "SPD"):
-                synth = {"stat_mods": [{"stat": stat, "value": val, "unit": unit}],
-                         "duration": eff.get("duration") or 1}
-                tag = f"{stat}{val:+d}%" if unit == "pct" else f"{stat}{val:+d}"
-                u.statuses.append(Status(tag, synth["duration"], synth))
-    elif op == "move_gauge":
-        # pct signed: negative drains the target's charge gauge, positive fills it.
-        for u in targets:
-            outcome["gauge"].append({"unit": u, "pct": eff.get("pct", 0)})
-    elif op == "skill_cd":
-        # delta signed: positive delays the target's skills, negative refreshes them.
-        for u in targets:
-            outcome["cd"].append({"unit": u, "delta": eff.get("delta", 0)})
-    elif op == "immunity":
-        for u in targets:
-            grant_immunity(u, eff.get("status"), eff.get("duration"))
-    elif op == "extend_status":
-        # No target field in the data; the named status is usually a self-buff ("extend
-        # Fear Nothing"), occasionally on the struck enemy. Extend it wherever it lives
-        # among {caster, primary target} -- absent elsewhere, this is a safe no-op.
-        name = eff.get("status")
-        add = eff.get("duration") or 0
-        pool = [attacker] + resolve_targets("enemy_target", attacker, primary,
-                                            allies, enemies)
-        for u in pool:
-            for s in u.statuses:
-                if s.name == name and s.remaining != "battle":
-                    s.remaining += add
+    fn = OPS.get(eff.get("op"))
+    if fn is not None:
+        fn(eff, ctx)
 
 
 def _run(effects, attacker, primary, allies, enemies, reduce, *, trusted=True):
     outcome = _new_outcome(trusted)
-    per_target = {}
+    ctx = Ctx(attacker, primary, allies, enemies, reduce, {}, outcome)
     for eff in effects:
-        _apply_op(eff, attacker, primary, allies, enemies, reduce, per_target, outcome)
-    outcome["hits"] = list(per_target.values())
+        _apply_op(eff, ctx)
+    outcome["hits"] = list(ctx.per_target.values())
     return outcome
+
+
+# Triggers that fire as part of USING the skill (in listed order). battle_start /
+# on_counter / conditional are deferred to the turn-flow layer.
+IMMEDIATE_TRIGGERS = ("on_use", "before_action", "after_action", "after_attack")
 
 
 def execute_skill(attacker, primary, allies, enemies, skill_id, *, damage_reduce=None):
@@ -387,6 +333,7 @@ def execute_skill(attacker, primary, allies, enemies, skill_id, *, damage_reduce
          "self": {"heal": int, "statuses": [...], "gauge": int},
          "gauge": [{"unit", "pct"}, ...],     # charge-gauge changes for the caller
          "cd":    [{"unit", "delta"}, ...],   # cooldown changes for the caller
+         "status_events": [{"unit", "name", "round"}, ...],  # for DamageInfo.status icons
          "deferred": [effect, ...],           # battle_start/on_counter/conditional
          "trusted": bool}                     # whether the skill was `complete`
 
