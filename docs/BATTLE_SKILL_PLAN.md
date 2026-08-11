@@ -70,17 +70,31 @@ Two files WILL bloat as we add rules; get ahead of them:
 
 ## Phased plan (ROI order)
 
-**Current status (2026-08-10): Phases 0 and 1 DONE. Next up = Phase 2 (condition system).**
-- Engine is the `battle_effects/` package (registry + core + ops); parser is the
-  `skillparse/` package. `server/test_battle_effects.py` is the committed regression
-  harness (lock-step + no-crash + starters + full battles) — run it after any change.
-- Char-referenced coverage is now **1016/2009 = 50%**.
+**Current status (2026-08-11): Phases 0–2 DONE. Next up = Phase 3 (mechanics depth).**
+- Engine is the `battle_effects/` package (registry + core + ops + conditions); parser is
+  the `skillparse/` package (+ `conditions.py` grammar). `server/test_battle_effects.py`
+  is the committed regression harness (lock-step for ops AND condition kinds + no-crash +
+  starters + evaluator semantics + full battles) — run it after any change.
+- Char-referenced coverage is now **1115/2009 = 55%**.
+- Phase 2 landed the condition system: an effect may carry `{"when": cond}` and the
+  engine evaluates the gate live (after the plain hits, so kill-gates see the outcome).
+  Cond kinds: hp, hp_vs, status (incl. `_buff/_debuff/_dot/_hot` classes + stacks),
+  cast_type (char `_job` 2/3/4 = STR/AGI/TEC, per CommonUtil.GetJobUseText →
+  GetText(job+12099)), crit (dormant: no crit model yet), kill, turn_parity, turn_cmp,
+  alive, all/any. `battle.py` passes `env={"turn": round}`; `Unit.job` carries the class.
+- The projected ~68% didn't materialize because a conditional clause now counts ONLY if
+  its gate parses (before, ops parsed + gate silently lost == "complete"). That
+  strictness reclassified ~600 previously-complete-but-wrong skills as honest work; the
+  ~2,486 gated effects that DO parse now actually fire, which was the real Phase 2 value.
+  Remaining condition texts are field-presence/named-char/stat-compare one-offs (Phase 4
+  territory); remaining effect texts in conditional clauses are revive/pursuit-retarget/
+  type-scoped-damage shapes (Phase 3/4).
 
 | Phase | Work | Effort | Coverage (char-ref) |
 |---|---|---|---|
 | **0. Architecture prep** ✅ | Op-registry engine package; parser package; committed regression harness. | S | 45% → 45% |
 | **1. Cheap pattern sweep** ✅ | "% MAX HP as damage [+ chance status]" and "ability-unlock: Base `<stat>` +N". Both use existing ops. (Deferred: "recover HP by %ATK" — heal-targeting ambiguity.) | S | 45% → **50%** |
-| **2. Condition system** ⭐ | Condition grammar in parser + evaluator in engine + fire the deferred `conditional` effects in the turn loop. Unblocks ~195 incomplete player skills AND fixes ~667 already-`complete` skills whose conditional branch never fires. Highest value: coverage + correctness. | **L** | ~52% → ~68% |
+| **2. Condition system** ✅ | Condition grammar (`skillparse/conditions.py`) + evaluator (`battle_effects/conditions.py`) + gated firing inside `execute_skill`/`run_phase`. ~2,486 effects now carry machine-readable gates that actually fire. Also: `cleanse_class`, stacks, pursuit-damage, heal-by-% matchers. | L | 50% → **55%** (honest gates; see status note) |
 | **3. Mechanics depth** | Make parsed skills actually act: DoT/HoT ticking, shield absorption, un-enforced status flags (heal_block, ability_seal, forced_target…). | M | (correctness) |
 | **4. Long-tail grind** | The ~165 flat one-off shapes, added opportunistically. Deep diminishing returns (top 20 shapes ≈ 57 skills). | M, spread | ~68% → ~90% |
 | **5. Hand-authored overrides** | `skill_overrides.json` for the un-parseable residual. Bounded manual work. | M | ~90% → 100% |
@@ -89,13 +103,16 @@ Phases 0–2 are the bulk of the value; 3–5 are a lower-intensity tail toward 
 
 ## Key facts to carry forward
 
-- Op vocabulary today: `damage` (pct_atk / pct_def / pct_target_maxhp, times), `apply_status`,
-  `heal` (pct_maxhp), `cleanse`, `shield`, `stat_mod` (ATK/DEF/SPD via status, HP direct,
+- Op vocabulary today: `damage` (pct_atk / pct_def / pct_target_maxhp, times), `apply_status`
+  (+ optional `stacks`), `heal` (pct_maxhp | pct_caster_hp), `cleanse`, `cleanse_class`
+  (`_buff/_debuff/_dot/_hot`), `shield`, `stat_mod` (ATK/DEF/SPD via status, HP direct,
   unit pct|flat, CRIT skipped), `move_gauge` (signed pct), `skill_cd` (signed delta),
   `immunity` (status | "all" | "CrowdControl"), `extend_status`.
 - Triggers: `on_use`/`before_action`/`after_action`/`after_attack` fire immediately;
   `battle_start`/`on_counter` are event-driven, fired via `run_phase` from a unit's
-  `_type==4` PASSIVE skills; `conditional` is parsed but **not yet fired** (Phase 2).
+  `_type==4` PASSIVE skills. An effect with `{"when": cond}` fires only if the gate
+  evaluates True (after the ungated effects, same ctx). A legacy `conditional` trigger
+  without `when` stays deferred/unfired.
 - Wire: status icons ride `DamageInfo.status` = `[[order, skillID, round], …]` where skillID
   is a `_type==6` STATUS skill (see `status_icons.json`, `build_status_icons.py`).
 - See memory `sevensins-battle` Steps 1–6 for the full reverse-engineering trail.
