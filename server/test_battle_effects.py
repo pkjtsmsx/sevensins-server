@@ -145,6 +145,94 @@ def test_conditions():
     check("unknown kind never fires", not ev({"kind": "someday"}, ctx))
 
 
+def test_mechanics_depth():
+    """Phase 3: DoT/HoT ticking, shield absorption, and flag enforcement."""
+    caster = MockUnit(0, "c1", atk=1000)
+    burned = MockUnit(1, "t1", hp=5000)
+    fx.apply_status(burned, "Burn", source=caster)      # 15% ATK/stack
+    fx.apply_status(burned, "Burn", source=caster)      # -> 2 stacks
+    dot, hot = fx.tick_dot_hot(burned)
+    check("DoT tick: 2 Burn stacks deal 2x150 = 300", dot == 300, f"got {dot}")
+
+    healer = MockUnit(0, "h1", hp=5000)
+    healer.hp = 2000
+    fx.apply_status(healer, "Regeneration", source=healer)   # heal_pct_maxhp 25
+    _, hot = fx.tick_dot_hot(healer)
+    check("HoT tick: Regeneration heals 25% Max HP", hot == 1250, f"got {hot}")
+
+    blocked = MockUnit(0, "h2", hp=2000)
+    fx.apply_status(blocked, "Regeneration", source=blocked)
+    fx.apply_status(blocked, "Heal Block")
+    _, hot = fx.tick_dot_hot(blocked)
+    check("HoT tick: heal_block suppresses the HoT", hot == 0, f"got {hot}")
+
+    shielded = MockUnit(1, "s1", hp=5000)
+    attacker = MockUnit(0, "a1", atk=1000)
+    fx.apply_status(shielded, "Shield", source=attacker)    # 75% of 1000 ATK = 750
+    through = fx.absorb_shield(shielded, 1000)
+    check("shield absorbs 750 of a 1000 hit", through == 250, f"got {through}")
+
+    sealed = MockUnit(0, "seal1")
+    fx.apply_status(sealed, "Silence")
+    check("ability_seal flag reads through has_flag", fx.has_flag(sealed, "ability_seal"))
+
+    blocked_cd = MockUnit(0, "cd1")
+    fx.apply_status(blocked_cd, "CD Reduction Block")
+    check("cd_reduction_block flag reads through has_flag",
+          fx.has_flag(blocked_cd, "cd_reduction_block"))
+
+    taunter = MockUnit(1, "tn1")
+    taunted = MockUnit(0, "tn2")
+    fx.apply_status(taunted, "Taunt", source=taunter)
+    st = next(s for s in taunted.statuses if s.name == "Taunt")
+    check("Taunt records its inflicter as taunt_source", st.taunt_source == "tn1",
+          f"got {st.taunt_source}")
+
+    fake = MockUnit(0, "u2")
+    from battle_effects.core import Status
+    buff_def = {"stat_mods": [{"stat": "ATK", "value": 20, "unit": "pct"}]}
+    fake.statuses.append(Status("Locked Buff", "battle",
+                                dict(buff_def, flags=["unremovable"])))
+    fake.statuses.append(Status("Plain Buff", 2, buff_def))
+    import battle_effects.ops as ops_mod
+    from types import SimpleNamespace
+    ctx = SimpleNamespace(targets=lambda tok: [fake])
+    ops_mod._cleanse_class({"cls": "_buff"}, ctx)
+    check("cleanse_class leaves an unremovable status behind",
+          any(s.name == "Locked Buff" for s in fake.statuses)
+          and not any(s.name == "Plain Buff" for s in fake.statuses))
+
+
+def test_immobilize_skips_turn():
+    b = bt.Battle(1101, [{"id": 10001}, {"id": 10011}], team_level=10)
+    victim_order = b.turn_order[1]
+    victim = b.units[victim_order]
+    fx.apply_status(victim, "Stun", source=victim)
+    b.end_turn()
+    check("a stunned unit's turn is skipped, not left waiting",
+          b.turn_order[0] != victim_order, f"front is still {b.turn_order[0]}")
+
+
+def test_forced_targeting():
+    b = bt.Battle(1101, [{"id": 10001}, {"id": 10011}], team_level=10)
+    p = next(u for u in b.units.values() if u.team == bt.TEAM_PLAYER)
+    e0, e1 = [u for u in b.units.values() if u.team == bt.TEAM_ENEMY][:2]
+    fx.apply_status(p, "Taunt", source=e0)
+    cmd = json.loads(b.attack_cmd_json(p.order, e1.order, p.skills[0]))
+    check("Taunt redirects the attack to its inflicter, not the chosen target",
+          cmd["combo"][0]["data"][0][0]["c"] == e0.order)
+
+    b2 = bt.Battle(1101, [{"id": 10001}, {"id": 10011}], team_level=10)
+    p2 = next(u for u in b2.units.values() if u.team == bt.TEAM_PLAYER)
+    ally = next(u for u in b2.units.values()
+               if u.team == bt.TEAM_PLAYER and u is not p2)
+    enemy = next(u for u in b2.units.values() if u.team == bt.TEAM_ENEMY)
+    fx.apply_status(p2, "Confuse", source=enemy)
+    cmd2 = json.loads(b2.attack_cmd_json(p2.order, enemy.order, p2.skills[0]))
+    check("Confuse redirects the attack onto the caster's own side",
+          b2.units[cmd2["combo"][0]["data"][0][0]["c"]].team == p2.team)
+
+
 def test_battle_start_and_counter():
     # Leviathan's Jealousy Vortex passive: battle_start immunity+team buffs, on_counter dmg.
     b = bt.Battle(1101, [{"id": 10001}, {"id": 10011}], team_level=10)
@@ -192,6 +280,9 @@ def main():
     test_no_crash(skills)
     test_starters(skills)
     test_conditions()
+    test_mechanics_depth()
+    test_immobilize_skips_turn()
+    test_forced_targeting()
     test_battle_start_and_counter()
     test_full_battles()
     print(f"\n{'ALL PASSED' if not _fail else f'{_fail} CHECK(S) FAILED'}")

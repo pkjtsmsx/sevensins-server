@@ -622,6 +622,30 @@ class Battle:
             u.defense * fx.stat_multiplier(u.statuses, "DEF")
             + fx.flat_bonus(u.statuses, "DEF"))
 
+    def _forced_target(self, attacker):
+        """Taunt/Charm/Confuse override the ATTACKER's own target choice -- enforced
+        here so it applies whether the target was auto-picked (enemy AI / auto-battle)
+        or tapped by the player; a client can't route around its own status by picking
+        someone else in the request. -> the forced unit, or None to leave the caller's
+        target alone.
+
+        confused_targeting (Charm/Confuse) turns the attack on the attacker's OWN side
+        (checked first: a unit can be both taunted-by-an-enemy and charmed at once, and
+        losing control of your target trumps being drawn to a specific one). forced_target
+        (Taunt) redirects to whoever inflicted it, if that unit is still alive."""
+        if fx.has_flag(attacker, "confused_targeting"):
+            own = [u for u in self.units.values()
+                  if u.team == attacker.team and u is not attacker and u.alive]
+            if own:
+                return own[0]
+            return None
+        for st in attacker.statuses:
+            if st.taunt_source and "forced_target" in st.definition.get("flags", []):
+                src = self.units.get(st.taunt_source)
+                if src and src.alive:
+                    return src
+        return None
+
     def _apply_gauge_cd(self, outcome):
         """Fold an effect outcome's charge-gauge and cooldown changes back onto the
         units. scv is the 0..100 ultimate gauge; cooldowns are per-skill-slot turns."""
@@ -741,6 +765,8 @@ class Battle:
         """
         attacker = self.units.get(attacker_order)
         target = self.units.get(defender_order)
+        if attacker and target:
+            target = self._forced_target(attacker) or target
 
         # DamageInfo shape (from HandleAttack): a hit is mode 1 with a NEGATIVE amount --
         # IsDamage is `Mode == 1 && Damage < 0`, HasHP is `Mode in (1,2) && Damage != 0`.
@@ -937,12 +963,16 @@ class Battle:
         unit = self.acting_unit()
         cds = list(unit.cooldowns) if unit else []
         cd = [cds[i] if i < len(cds) else 0 for i in (1, 2, 3)]
+        sealed = bool(unit and fx.has_flag(unit, "ability_seal"))
         # button 3 is the ultimate: locked while on cooldown OR the gauge is short
-        ult_locked = bool(cd[1]) or not (unit and unit.ultimate_ready())
-        return [0, 1 if cd[0] else 0, 1 if ult_locked else 0, cd[0], cd[1], cd[2]]
+        ult_locked = sealed or bool(cd[1]) or not (unit and unit.ultimate_ready())
+        return [0, 1 if (sealed or cd[0]) else 0, 1 if ult_locked else 0,
+                cd[0], cd[1], cd[2]]
 
     def end_turn(self):
-        """Rotate the acting unit to the back and drop anyone who died."""
+        """Rotate the acting unit to the back, drop anyone who died, then run the NEW
+        acting unit's start-of-turn housekeeping (DoT/HoT ticks, and an immobilized unit
+        auto-skips instead of waiting on an attack that will never come)."""
         acted = self.acting_unit()
         if acted:
             acted.tick_cooldowns()
@@ -957,6 +987,31 @@ class Battle:
             self._roll_turn_order()
         self.round += 1
         self.turn_open = False
+        self._start_of_turn()
+
+    def _start_of_turn(self, _depth=0):
+        """DoT/HoT ticks for whoever is now at the front of the queue, then skip its
+        turn outright if it's immobilized (Stun/Freeze/Daze/...) -- recurses (bounded by
+        unit count) so a fully-crowd-controlled lineup still resolves instead of
+        hanging. A tick that kills the unit re-prunes the order before recursing."""
+        unit = self.acting_unit()
+        if not unit or _depth > len(self.units):
+            return
+        fx.tick_dot_hot(unit)
+        if not unit.alive:
+            self.turn_order = [o for o in self.turn_order
+                               if self.units.get(o) and self.units[o].alive]
+            if not self.turn_order:
+                self._roll_turn_order()
+            self._start_of_turn(_depth + 1)
+            return
+        if fx.is_immobilized(unit.statuses):
+            unit.tick_cooldowns()
+            if unit.statuses:
+                unit.statuses = [s for s in unit.statuses if not s.tick()]
+            self.turn_order.append(self.turn_order.pop(0))
+            self.round += 1
+            self._start_of_turn(_depth + 1)
 
     def team_alive(self, team):
         return any(u.alive for u in self.units.values() if u.team == team)
@@ -1101,7 +1156,10 @@ class Battle:
 
     def usable_slots(self, unit):
         """Skill buttons currently legal for a unit: off cooldown, and for the
-        ultimate slot only with a full gauge. The basic is always available."""
+        ultimate slot only with a full gauge. The basic is always available -- UNLESS
+        ability_seal (Silence/Skill Seal/...) is active, which locks everything else."""
+        if fx.has_flag(unit, "ability_seal"):
+            return [0]
         slots = []
         for i in range(min(len(unit.skills), ULTIMATE_SLOT + 1)):
             if unit.cooldowns[i] > 0:

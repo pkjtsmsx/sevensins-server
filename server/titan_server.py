@@ -903,6 +903,11 @@ def battle_replies(battle, cmd, intargs, strargs, state=None, uid=""):
         skill_key = intargs[0] if intargs else 1
         unit = battle.units.get(attacker)
         skills = unit.skills if unit else []
+        # A locked slot (on cooldown, gauge short, or ability_seal) is normally caught
+        # by the disabled button client-side; re-check server-side so a raw/replayed
+        # request can't bypass a seal.
+        if unit and (skill_key - 1) not in battle.usable_slots(unit):
+            skill_key = 1
         skill = skills[skill_key - 1] if 0 < skill_key <= len(skills) else 0
         log(f"    -> attack {attacker} -> {defender} "
             f"(slot {skill_key} = skill {skill})")

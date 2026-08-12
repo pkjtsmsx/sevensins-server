@@ -88,15 +88,28 @@ def status_skill_id(name):
 
 # ---- status instances on a unit --------------------------------------------
 class Status:
-    """One active status on a unit: its catalog name, remaining turns and stack count."""
+    """One active status on a unit: its catalog name, remaining turns and stack count.
 
-    __slots__ = ("name", "remaining", "stacks", "definition")
+    `shield_hp`/`dot_atk`/`taunt_source` are PER-INSTANCE runtime state, not catalog
+    data (two units' Shields absorb independently even though they share `definition`):
+      shield_hp    -- remaining absorb capacity (Phase 3 shield mechanic).
+      dot_atk      -- the inflicter's ATK, snapshotted at apply time, for this status's
+                      damage-over-time tick (so a DoT still hits for the caster's power
+                      even after the caster's own buffs expire).
+      taunt_source -- the order of the unit this status forces its holder to attack
+                      (Taunt/Taunt UL -- the `forced_target` flag)."""
+
+    __slots__ = ("name", "remaining", "stacks", "definition",
+                 "shield_hp", "dot_atk", "taunt_source")
 
     def __init__(self, name, remaining, definition):
         self.name = name
         self.remaining = remaining          # int turns, or "battle" for permanent
         self.stacks = 1
         self.definition = definition or {}
+        self.shield_hp = 0
+        self.dot_atk = None
+        self.taunt_source = None
 
     def tick(self):
         """-> True if the status expired this tick."""
@@ -168,6 +181,64 @@ def is_immobilized(statuses):
     return False
 
 
+def has_flag(unit, flag):
+    """True if any of the unit's active statuses carries this catalog flag (Phase 3
+    enforcement points: heal_block, ability_seal, forced_target, confused_targeting,
+    cd_reduction_block, ...). Statuses in `.statuses` are always live -- expired ones are
+    dropped by Status.tick()'s caller -- so no remaining-turns check is needed here."""
+    return any(flag in st.definition.get("flags", []) for st in unit.statuses)
+
+
+def effective_atk(unit):
+    """The unit's ATK after its own stat_mod statuses (Keen+, Fracture-, flat bonuses).
+    Shared by damage, DoT-tick snapshotting, and shield sizing so they agree on what
+    'the caster's ATK' means at the moment of the effect."""
+    return unit.atk * stat_multiplier(unit.statuses, "ATK") + flat_bonus(unit.statuses, "ATK")
+
+
+def absorb_shield(unit, dmg):
+    """Drain the unit's Shield statuses (oldest first) against an incoming hit, ->
+    the damage that gets through. Multiple stacked shields drain in application order;
+    a shield with 0 capacity left (or no shield_hp at all) is simply skipped."""
+    for st in unit.statuses:
+        cap = st.shield_hp
+        if cap <= 0:
+            continue
+        used = min(cap, dmg)
+        st.shield_hp = cap - used
+        dmg -= used
+        if dmg <= 0:
+            break
+    return dmg
+
+
+def tick_dot_hot(unit):
+    """Apply this unit's damage/heal-over-time ticks for the START of its own turn
+    ('when a turn starts, deals/restores...' -- every DoT/HoT catalog entry reads this
+    way). -> (dot_total, hot_total). DoT ticks bypass the target's DEF and any Shield
+    (a flat ATK-scaled tick, per the catalog text) but still respect damage_taken mods
+    (Stun's +25%, etc); HoT ticks respect heal_block. Stops once the unit dies mid-tick
+    so a later HoT never revives it."""
+    dot = hot = 0
+    blocked = has_flag(unit, "heal_block")
+    for st in list(unit.statuses):
+        if not unit.alive:
+            break
+        d = st.definition
+        if d.get("tick_pct_atk"):
+            src_atk = st.dot_atk if st.dot_atk is not None else unit.atk
+            amt = max(1, int(src_atk * d["tick_pct_atk"] * st.stacks / 100.0))
+            amt = int(amt * damage_taken_multiplier(unit.statuses))
+            unit.hp = max(0, unit.hp - amt)
+            dot += amt
+        if d.get("heal_pct_maxhp") and not blocked:
+            heal = int(unit.max_hp * d["heal_pct_maxhp"] / 100.0)
+            healed = min(heal, unit.max_hp - unit.hp)
+            unit.hp += healed
+            hot += healed
+    return dot, hot
+
+
 # ---- target resolution ------------------------------------------------------
 def resolve_targets(token, attacker, primary, allies, enemies):
     """Map a parsed target token to concrete units.
@@ -231,10 +302,16 @@ def grant_immunity(unit, name, duration):
     return st
 
 
-def apply_status(unit, name, duration_override=None):
+def apply_status(unit, name, duration_override=None, *, source=None, flat_shield=None):
     """Add or refresh a status on a unit, honouring stack limits and unstackable.
     Returns the Status, or None if the name is not in the catalog OR an active immunity
-    on the unit blocks it."""
+    on the unit blocks it.
+
+    `source` is the inflicting unit (usually the caster) -- snapshotted as the DoT tick's
+    ATK and used to size a %ATK shield; self-buffs naturally pass the unit itself.
+    `flat_shield` overrides that sizing with an explicit amount (the `shield` op's
+    "open a 7000 Shield"). Re-applying a shield status always resets its pool to the
+    fresh amount, matching "open a shield" reading as a new shield, not a top-up."""
     cat = catalog()
     definition = cat.get(name)
     if definition is None:
@@ -243,6 +320,12 @@ def apply_status(unit, name, duration_override=None):
         return None                        # blocked by an active immunity
     dur = _duration(duration_override, definition)
     flags = definition.get("flags", [])
+    shield_hp = None
+    if flat_shield is not None:
+        shield_hp = flat_shield
+    elif definition.get("shield_pct_atk"):
+        shield_hp = int(effective_atk(source) * definition["shield_pct_atk"] / 100.0) \
+            if source is not None else 0
     for st in unit.statuses:
         if st.name == name:
             if "unstackable" in flags:
@@ -251,8 +334,18 @@ def apply_status(unit, name, duration_override=None):
                 st.stacks = min(st.stacks + 1,
                                 definition.get("max_stacks", st.stacks + 1))
                 st.remaining = dur
+            if shield_hp is not None:
+                st.shield_hp = shield_hp
+            if definition.get("tick_pct_atk") and source is not None:
+                st.dot_atk = effective_atk(source)
             return st
     st = Status(name, dur, definition)
+    if shield_hp is not None:
+        st.shield_hp = shield_hp
+    if definition.get("tick_pct_atk"):
+        st.dot_atk = effective_atk(source) if source is not None else unit.atk
+    if "forced_target" in flags and source is not None:
+        st.taunt_source = source.order
     unit.statuses.append(st)
     return st
 
