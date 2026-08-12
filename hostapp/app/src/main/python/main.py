@@ -17,6 +17,16 @@ itself, so before importing anything we relocate the writable paths via the envi
 (SEVENSINS_ACCOUNTS / SEVENSINS_DESIGN_CACHE / SEVENSINS_PATCH_ROOT). Those reads happen
 at MODULE IMPORT time, so the environment must be set before the first import of
 design_data or player_state on any path.
+
+HOT UPDATES. UpdateManager.java (the "Check for updates" button) extracts a newer code
+snapshot to <data_dir>/sevensins/server_update/<id>/ and points
+server_update/active.txt at it -- see tools/build_hostapp_update.py for what that
+snapshot contains (code + battle_data only, never accounts/design_cache/patch_root, so a
+hot update can never touch a save). If active.txt names a directory that actually has
+titan_server.py in it, `configure_runtime_env` puts it on sys.path AHEAD OF the
+originally-shipped package dir, so `import battle_effects` (etc.) resolves the update's
+copy first. A corrupt/missing pointer just falls back to the shipped copy -- this must
+never be the thing that stops the server from starting.
 """
 from __future__ import annotations
 
@@ -99,7 +109,34 @@ def configure_runtime_env(data_dir):
         # The modules import each other flat (`import player_state`), so the package dir
         # itself goes on the path rather than being imported as a package.
         sys.path.insert(0, pkg)
+    update_dir = active_update_dir(base)
+    if update_dir and update_dir not in sys.path:
+        # Inserted LAST so it lands at index 0, ahead of `pkg` -- both blocks insert at
+        # 0, so whichever runs second wins the front of sys.path. Import resolution is
+        # per top-level module/package name, so a PARTIAL update (only some files changed
+        # since the last one) still falls through to the shipped copy for anything the
+        # update snapshot doesn't carry. In practice build_hostapp_update.py always ships
+        # the full set, but nothing here depends on that -- a stale/incomplete update_dir
+        # degrades to "some modules come from the update, the rest from the shipped
+        # copy", never a crash.
+        sys.path.insert(0, update_dir)
     return base
+
+
+def active_update_dir(base):
+    """The applied hot-update's code directory, or None if there isn't one / it's
+    missing its own marker file (a half-written or since-deleted extraction). Never
+    raises -- a bad pointer here must fall back to the shipped copy, not break startup."""
+    pointer = os.path.join(base, "server_update", "active.txt")
+    try:
+        with open(pointer, encoding="utf-8") as f:
+            name = f.read().strip()
+    except OSError:
+        return None
+    if not name or os.sep in name or name in (os.curdir, os.pardir):
+        return None                        # never let a corrupt pointer escape the dir
+    path = os.path.join(base, "server_update", name)
+    return path if os.path.isfile(os.path.join(path, "titan_server.py")) else None
 
 
 def start_server(data_dir):
@@ -159,14 +196,17 @@ def is_running():
 
 
 def status(data_dir):
-    """One line for the UI: whether the asset pack has been imported yet."""
+    """One line for the UI: whether the asset pack has been imported yet, and whether a
+    hot-updated code snapshot is the one actually in effect."""
     base = os.path.join(data_dir, "sevensins")
     bundles = os.path.join(base, "patch_root", "bundles")
     try:
         n = len([x for x in os.listdir(bundles) if x.endswith(".ab")])
     except OSError:
         n = 0
-    return f"{n} bundle(s) imported"
+    update_dir = active_update_dir(base)
+    code = f"code: update {os.path.basename(update_dir)}" if update_dir else "code: shipped"
+    return f"{n} bundle(s) imported, {code}"
 
 
 # Asset import lives in Java (AssetImporter), not here. The archive is ~2.6 GB and the

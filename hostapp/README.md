@@ -24,8 +24,9 @@ ANDROID_SDK_ROOT=/path/to/android-sdk ./gradlew assembleDebug
 ```
 
 `stageServer` copies the server out of `../server` at build time (there is one copy of
-the truth, and it is not this directory): the five runtime modules, the warm
-`design_cache`, the design pack, the AssetBundleManifest and a seed account.
+the truth, and it is not this directory): the runtime modules/packages/data dirs listed
+in `server_files.json`, the warm `design_cache`, the design pack, the AssetBundleManifest
+and a seed account.
 
 ### "design cache was NOT built from the staged pack"
 
@@ -86,3 +87,32 @@ A flat archive of bare `.ab` files also works if extracted into `bundles/`:
 one flat set serve whatever dated CDN path a client build asks for.
 
 Stop the server before importing.
+
+## Updating server CODE without reinstalling the APK
+
+A code change to `../server` (a battle-engine fix, say) does not need a full
+`assembleDebug` + reinstall — that also used to force an uninstall (a new signing key
+wipes app storage) before the release key was pinned. Instead:
+
+```sh
+cd ..
+python3 tools/build_hostapp_update.py           # -> hostapp_update/{update.json,server_update.zip}
+python3 tools/serve_hostapp_update.py 8089      # serves that dir over plain HTTP
+```
+
+On the phone: **Check for updates**, enter `http://<dev box LAN IP>:8089/`, **Check**.
+On success it downloads, sha256-verifies, and extracts the snapshot to app storage
+without stopping the server — then offers **Restart now**, which stops the server and
+kills the app's process (Chaquopy only re-reads modules from disk on a fresh process, so
+there is no in-process hot-reload). Reopen the app from the launcher to run the new code.
+
+**What ships in the update**: exactly the CODE the app runs — the modules/packages/data
+dirs in `server_files.json` (the same list `stageServer` uses, so the two can't drift).
+**Never accounts, design_cache, or patch_root** — those stay wherever they already are in
+app storage, untouched by an update, so the account and any imported assets survive every
+update the same way they survive an ordinary `adb install -r`.
+
+If an update turns out to be bad, **long-press "Check for updates"** → **Reset to
+shipped code**. That drops the applied snapshot and falls back to whatever code the APK
+itself was built with — the one thing guaranteed to still work — without touching the
+account either.

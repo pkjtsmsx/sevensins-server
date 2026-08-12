@@ -1,16 +1,19 @@
 package com.sevensins.host;
 
 import android.Manifest;
+import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.PowerManager;
+import android.os.Process;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -18,10 +21,11 @@ import android.widget.Toast;
 import com.chaquo.python.PyObject;
 
 /**
- * One screen: start/stop the server, grant the battery exemption, launch the game.
+ * One screen: start/stop the server, grant the battery exemption, import assets, launch
+ * the game, and check for a code hot-update (see UpdateManager).
  *
- * Deliberately built in code rather than XML -- the whole UI is four widgets, and this
- * keeps the app to a handful of files.
+ * Deliberately built in code rather than XML -- the whole UI is a handful of widgets,
+ * and this keeps the app to a handful of files.
  */
 public class MainActivity extends android.app.Activity {
     private static final String GAME = "com.userjoy.sineng";
@@ -67,6 +71,29 @@ public class MainActivity extends android.app.Activity {
         launch.setText("Launch Seven Sins");
         launch.setOnClickListener(v -> launchGame());
         root.addView(launch);
+
+        Button update = new Button(this);
+        update.setText("Check for updates");
+        update.setOnClickListener(v -> promptAndCheckUpdate());
+        // Long-press = recovery, not a second everyday button: fall back to the code the
+        // APK shipped with, for the rare case a hot update turns out to be bad. It never
+        // touches the account/asset data either, same as the update path itself.
+        update.setOnLongClickListener(v -> {
+            new AlertDialog.Builder(this)
+                    .setTitle("Reset to shipped code?")
+                    .setMessage("Drops the applied update and goes back to the code this "
+                              + "APK was built with. Your account and imported assets are "
+                              + "not touched. Restart the app afterwards.")
+                    .setPositiveButton("Reset", (d, w) -> {
+                        boolean ok = UpdateManager.resetToShipped(this);
+                        Toast.makeText(this, ok ? "Reset -- restart the app"
+                                                : "Could not reset", Toast.LENGTH_LONG).show();
+                    })
+                    .setNegativeButton("Cancel", null)
+                    .show();
+            return true;
+        });
+        root.addView(update);
 
         setContentView(root);
 
@@ -192,6 +219,74 @@ public class MainActivity extends android.app.Activity {
                 refresh();
             });
         }, "asset-import").start();
+    }
+
+    /** Asks for the dev box's update-server URL (remembered after the first time, since
+     * it's normally the same LAN address every session -- see
+     * tools/serve_hostapp_update.py), then runs the check off the UI thread. */
+    private void promptAndCheckUpdate() {
+        String saved = UpdateManager.savedBaseUrl(this);
+        EditText input = new EditText(this);
+        input.setHint("http://192.168.1.x:8089/");
+        if (!saved.isEmpty()) input.setText(saved);
+        new AlertDialog.Builder(this)
+                .setTitle("Update server URL")
+                .setMessage("Where tools/serve_hostapp_update.py is running on your "
+                          + "dev machine.")
+                .setView(input)
+                .setPositiveButton("Check", (d, w) -> {
+                    String url = input.getText().toString().trim();
+                    if (url.isEmpty()) return;
+                    runUpdateCheck(url);
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void runUpdateCheck(String url) {
+        Toast.makeText(this, "Checking for updates…", Toast.LENGTH_SHORT).show();
+        new Thread(() -> {
+            UpdateManager.Result r = UpdateManager.checkAndApply(this, url);
+            runOnUiThread(() -> {
+                switch (r.outcome) {
+                    case UP_TO_DATE:
+                        Toast.makeText(this, "Already up to date (" + r.detail + ")",
+                                       Toast.LENGTH_LONG).show();
+                        break;
+                    case APPLIED:
+                        new AlertDialog.Builder(this)
+                                .setTitle("Update applied")
+                                .setMessage(r.detail + "\n\nAccount and imported assets are "
+                                          + "untouched. Restart the app now to run the new "
+                                          + "code?")
+                                .setPositiveButton("Restart now", (d, w) -> restartApp())
+                                .setNegativeButton("Later", null)
+                                .show();
+                        break;
+                    case FAILED:
+                    default:
+                        Toast.makeText(this, "Update failed: " + r.detail,
+                                       Toast.LENGTH_LONG).show();
+                }
+            });
+        }, "update-check").start();
+    }
+
+    /** Stops the server, then kills this process -- Chaquopy's interpreter only re-reads
+     * modules from disk on a fresh process, so a partial in-process module reload is not
+     * an option here (see main.py's HOT UPDATES note). The user reopens the app from the
+     * launcher; nothing auto-relaunches it, which keeps this to one well-understood step
+     * (kill) instead of AlarmManager scheduling that behaves differently across OEMs. */
+    private void restartApp() {
+        Intent stop = new Intent(this, ServerService.class);
+        stop.setAction(ServerService.ACTION_STOP);
+        startService(stop);
+        Toast.makeText(this, "Closing — reopen Seven Sins Host to run the update",
+                       Toast.LENGTH_LONG).show();
+        toggle.postDelayed(() -> {
+            finishAffinity();
+            Process.killProcess(Process.myPid());
+        }, 800);
     }
 
     private void launchGame() {

@@ -48,6 +48,9 @@ hostapp/.gradle/
 hostapp/local.properties
 hostapp/app/src/main/python/sevensins/
 
+# ---- hostapp in-app updater: build_hostapp_update.py's output, served for the app to pull
+hostapp_update/
+
 # ---- IDA MCP scratch ----
 .ida-mcp/
 

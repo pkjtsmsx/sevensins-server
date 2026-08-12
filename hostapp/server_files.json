@@ -1,0 +1,17 @@
+{
+    "_comment": "Single source of truth for which server/ files are CODE (ship in the APK's stageServer task AND in a hot-update zip from tools/build_hostapp_update.py). Keeping one list keyed off this file, instead of a hardcoded list in build.gradle, is what stopped `battle_effects`/`battle_data` from silently going stale here after the Phase 0 engine-package split -- see memory sevensins-hostapp-updater.",
+    "modules": [
+        "titan_server.py",
+        "wire.py",
+        "battle.py",
+        "design_data.py",
+        "bundle_server.py"
+    ],
+    "packages": [
+        "player_state",
+        "battle_effects"
+    ],
+    "data_dirs": [
+        "battle_data"
+    ]
+}
