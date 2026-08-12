@@ -451,6 +451,43 @@ def start_battle_msg(battle):
     return battle_msg(bt.CMD_SERVER_START, [], [battle.battle_datas_json()])
 
 
+def battle_sync_reply(st):
+    """PlayerBattle.HandleSyncCmd (cmd 0x709=1801)'s reply, driven by whether this
+    account has a saved in-progress battle (ps.saved_battle) -- decompiled from
+    PlayerBattle.HandleSyncCmd (0x168a81c, 2.2.7):
+
+        intargs[0] = reconnectCase (this->fields.reconnectCase). != 2 dispatches the
+                     ordinary SERVER_SYNC event immediately and stops there.
+        intargs[1] = battleType, read only if intargs.size >= 2 -- picks which confirm-
+                     dialog string AskBattleReconnect shows (indexed battleType-1 into
+                     a 5-entry table; out of range falls back to a generic string).
+                     We only ever resume a stage/campaign fight, so a fixed 1 is fine.
+        reconnectCase == 2 ADDITIONALLY requires (every one throws
+        ArgumentOutOfRangeException if absent -- this is not an optional tail):
+          intargs[2] = CurStageID
+          intargs[3] = CurRuneIndex
+          strargs[0] = a JSON List<BackpackItemData> (DeserializeRuneList) -- "[]"
+                       deserializes fine (0 iterations), so an empty rune list is a
+                       legitimate, safe answer when we have no rune-pick state.
+          strargs[1] = CurPriceList, a JSON List<int> -- "[]" is likewise safe.
+        Both intargs[2:] and strargs must be present TOGETHER, or DeserializeRuneList
+        throws before the SERVER_SYNC event ever dispatches -- reconnectCase would be
+        set but AskBattleReconnect's prompt would never actually fire. Getting either
+        half wrong is worse than not offering reconnect at all.
+
+    AskBattleReconnect (0x168b67c) is what turns reconnectCase>=1 into the "rejoin your
+    battle?" confirm dialog, shown from the post-login panel queue
+    (PanelLoginBonus.DoOpenPanelReconnectMsg); accepting sends REQ_RECONNECT (0x2BD),
+    which battle_replies() already answers by replaying the SAME start_battle_msg
+    handoff a fresh stage entry uses.
+    """
+    saved = ps.saved_battle(st) if st else None
+    if not saved:
+        return [sint_msg(0xFBC2FA08, 1801, [0], [])]
+    return [sint_msg(0xFBC2FA08, 1801,
+                     [2, 1, saved["stage_id"], 0], ["[]", "[]"])]
+
+
 def build_sync_replies(st):
     """Sync payloads are rendered from the persisted account state so that
     currency, stamina, characters and progress survive restarts and can be
@@ -465,10 +502,10 @@ def build_sync_replies(st):
                            [backpack_msg(83, [], [ps.backpack_info_json(st)])] +
                            [backpack_msg(cmd, [1], [ps.backpack_json(st, cmd - 83)])
                             for cmd in (84, 85, 86, 87)]),
-        # PlayerBattle.HandleSyncCmd (cmd 0x709=1801) dispatches BattleEventType.SERVER_SYNC
-        # =1 immediately as long as intargs[0] != 2; 2 is the "reconnect into a live battle"
-        # path, which additionally demands a stage id, rune list and price list.
-        (0xFA6D759E, 801): ("PlayerBattle", [sint_msg(0xFBC2FA08, 1801, [0], [])]),
+        # PlayerBattle.HandleSyncCmd (cmd 0x709=1801) -- see battle_sync_reply for the
+        # reconnectCase==2 wire contract this advertises whenever ps.saved_battle(st)
+        # has something to offer.
+        (0xFA6D759E, 801): ("PlayerBattle", battle_sync_reply(st)),
         # PlayerCurrency.HandleSyncCmd (cmd 512) deserializes strargs[0] into
         # Dictionary<CurrencyType,uint> and then raises CurrencyEventType.CURRENCY_SYNCED=1.
         (0xBD2055EA, 256): ("PlayerCurrency", [sint_msg(0xBC8FDA7C, 512, [], [ps.currency_json(st)])]),
@@ -992,10 +1029,20 @@ def battle_replies(battle, cmd, intargs, strargs, state=None, uid=""):
         log(f"    -> rune select {pick}")
         return [battle_msg(bt.CMD_SELECT_RUNE, [pick], [])]
     if cmd == bt.REQ_RECONNECT:
-        # CB_Reconnect sends intargs=[1] after the player confirms the "rejoin your
-        # battle?" prompt (which AskBattleReconnect raises off the heartbeat's
-        # reconnect flag). We still hold the Battle object, so replaying the same
-        # BattleDatas handoff the fight started with is the natural resume.
+        # Same cmd for BOTH buttons on the "rejoin your battle?" prompt --
+        # CB_Reconnect sends intargs=[1] on accept, CB_ReconnectCancel sends [0] on
+        # decline. Accept: replay the same BattleDatas handoff the fight started with
+        # (we hold the live Battle -- reconstructed at login if this is a fresh
+        # process, see handle()'s LOGIN branch). Decline: send nothing back (forcing
+        # the player into a battle they just said no to would be worse than the
+        # prompt itself) -- the caller drops the saved snapshot for a decline the
+        # same way it does for an explicit retreat, so the prompt does not nag again
+        # on the next login.
+        accept = bool(intargs) and intargs[0] == 1
+        if not accept:
+            log(f"    -> reconnect DECLINED (stage {battle.stage_id}) -- dropping "
+                "the saved battle")
+            return []
         log(f"    -> reconnect to stage {battle.stage_id}, wave "
             f"{battle.wave}/{battle.wave_max}")
         battle.turn_open = False
@@ -1086,6 +1133,23 @@ def handle(conn, addr):
                 if ps.maybe_reset_tutorial_casts(state):
                     ps.save(state)
                 log(f"    state loaded for player {pid} from {ps.path_for(pid)}")
+                # Rebuild a saved in-progress battle so it can actually answer
+                # REQ_RECONNECT (which needs a live Battle to replay), not just
+                # advertise reconnectCase=2 in the sync reply. A save that no longer
+                # reconstructs (a stage pulled from design data, say) drops itself
+                # rather than crashing the login -- an offer to resume that then
+                # throws on acceptance is worse than no offer at all.
+                saved = ps.saved_battle(state)
+                if saved:
+                    try:
+                        cur_battle = bt.restore_battle(saved)
+                        log(f"    -> resumed in-progress battle: stage "
+                            f"{cur_battle.stage_id}, wave "
+                            f"{cur_battle.wave}/{cur_battle.wave_max}")
+                    except Exception:                             # noqa: BLE001
+                        log("    -> saved battle could not be restored, dropping it")
+                        ps.clear_battle(state)
+                        ps.save(state)
                 # TITAN_LOGIN_FAIL=<errno> replies failure instead -- a probe to prove
                 # the client really parses our S2C stream (it should surface the errno).
                 fail = os.environ.get("TITAN_LOGIN_FAIL")
@@ -2275,6 +2339,11 @@ def handle(conn, addr):
                                                state.get("team_star"),
                                                state.get("team_super_star", 0),
                                                int(state.get("book_rank", 0)))
+                        # Persist immediately: a server restart between this and the
+                        # FIRST attack must still have something to resume, not just
+                        # ones after the player's first action.
+                        ps.save_battle(state, cur_battle)
+                        ps.save(state)
                         log(f"    -> start battle: wave 1/{cur_battle.wave_max}, "
                             f"units {sorted(cur_battle.units)}")
                         send(MSG_RPC, start_battle_msg(cur_battle))
@@ -2282,6 +2351,21 @@ def handle(conn, addr):
                         for body in battle_replies(cur_battle, cmd, intargs, strargs,
                                                    state, ps.uid(state)):
                             send(MSG_RPC, body)
+                        # Persist after EVERY battle RPC (attacks, wave transitions,
+                        # auto-toggle, ...) so a killed/restarted server always has
+                        # something to resume -- except the cmds that mean the fight
+                        # is genuinely OVER (won/lost, retreated, or the player just
+                        # declined the "rejoin?" prompt), which must drop the
+                        # snapshot rather than re-save a finished battle as live.
+                        declined_reconnect = (cmd == bt.REQ_RECONNECT
+                                             and not (intargs and intargs[0] == 1))
+                        if state:
+                            if cmd in (bt.REQ_BATTLE_END, bt.REQ_RETREAT) \
+                                    or declined_reconnect:
+                                ps.clear_battle(state)
+                            else:
+                                ps.save_battle(state, cur_battle)
+                            ps.save(state)
                     elif state and (index, cmd) in build_sync_replies(state):
                         # Rebuild per request rather than caching at login: the payloads
                         # are rendered from `state`, so a table built once at login goes

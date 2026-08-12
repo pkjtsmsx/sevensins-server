@@ -489,12 +489,67 @@ class Unit:
         """BattleUnitManager.SyncData reads exactly [MaxHP, HP, Scv, SPD]."""
         return [self.max_hp, self.hp, self.scv, self.spd]
 
+    def to_state(self):
+        """Only the fields that ever change after __init__ (see Battle.to_state's
+        docstring) -- atk/defense/spd/skills are re-derived identically on
+        reconstruction, so freezing them here would be redundant, not safer."""
+        return {
+            "hp": self.hp, "max_hp": self.max_hp, "scv": self.scv,
+            "cooldowns": self.cooldowns,
+            "dmg_done": self.dmg_done, "dmg_taken": self.dmg_taken,
+            "healed": self.healed,
+            "statuses": [_status_to_state(s) for s in self.statuses],
+        }
+
+    def restore_state(self, saved):
+        self.hp = saved["hp"]
+        self.max_hp = saved["max_hp"]
+        self.scv = saved["scv"]
+        self.cooldowns = list(saved["cooldowns"])
+        self.dmg_done = saved.get("dmg_done", 0)
+        self.dmg_taken = saved.get("dmg_taken", 0)
+        self.healed = saved.get("healed", 0)
+        self.statuses = [_status_from_state(s) for s in saved.get("statuses", [])]
+
+
+def _status_to_state(st):
+    """A catalog-backed status (the overwhelming majority) re-links to
+    fx.catalog()[name] on restore rather than freezing its `definition` -- so a later
+    catalog/status-data fix is picked up by an in-progress fight too. Only a
+    SYNTHESIZED status (the `stat_mod` op's ad-hoc ATK/DEF/SPD buffs, built inline as
+    `Status(tag, ..., synth)` with no catalog entry under that exact tag) carries its
+    own definition, since there is nothing to re-link to."""
+    d = {"name": st.name, "remaining": st.remaining, "stacks": st.stacks,
+        "shield_hp": st.shield_hp, "dot_atk": st.dot_atk,
+        "taunt_source": st.taunt_source}
+    if st.name not in fx.catalog():
+        d["definition"] = st.definition
+    return d
+
+
+def _status_from_state(d):
+    definition = d.get("definition")
+    if definition is None:
+        definition = fx.catalog().get(d["name"], {})
+    st = fx.Status(d["name"], d["remaining"], definition)
+    st.stacks = d.get("stacks", 1)
+    st.shield_hp = d.get("shield_hp", 0)
+    st.dot_atk = d.get("dot_atk")
+    st.taunt_source = d.get("taunt_source")
+    return st
+
 
 class Battle:
     """One run of one stage: a list of waves, each a mob group from the design data."""
 
     def __init__(self, stage_id, team_char_ids, team_level=1, team_star=None,
                  team_super_star=0, book_rank=0):
+        # Stashed verbatim (not re-derived from the account at resume time) so
+        # to_state()/restore_battle() reconstruct the EXACT battle a killed/restarted
+        # server was running, even if the player's roster/soulbook changed since --
+        # see restore_battle().
+        self._ctor_args = (int(stage_id), team_char_ids, team_level, team_star,
+                           team_super_star, book_rank)
         self.book_bonus = soulbook_bonus(book_rank)
         self.stage_id = int(stage_id)
         self.stage = dd.row("stage", self.stage_id) or {}
@@ -1168,3 +1223,65 @@ class Battle:
                 continue
             slots.append(i)
         return slots or [0]
+
+    # -- persistence: resume a fight across a server restart ----------------------
+    # Only HP/max_hp/scv/cooldowns/statuses/dmg totals ever change after Unit.__init__
+    # (atk/defense/spd/skills are fixed at construction from char_id+lv+star+book_bonus,
+    # never mutated -- grep confirms it), so to_state() only needs those, plus enough of
+    # the Battle-level bookkeeping to know which wave/turn/round it stopped at. Nothing
+    # here is design-row-derived data (skills, wave_groups, avg lists, base stats) --
+    # restore_battle() re-derives all of that by reconstructing fresh and replaying
+    # wave advances, so a later design-data fix is picked up automatically instead of
+    # being frozen into whatever was true when the save happened.
+    def to_state(self):
+        """-> a JSON-safe dict a killed/restarted server can hand back to
+        restore_battle() to pick this fight back up exactly where it left off."""
+        stage_id, team_char_ids, team_level, team_star, team_super_star, book_rank = \
+            self._ctor_args
+        return {
+            "stage_id": stage_id, "team_char_ids": team_char_ids,
+            "team_level": team_level, "team_star": team_star,
+            "team_super_star": team_super_star, "book_rank": book_rank,
+            "wave": self.wave, "round": self.round, "damage_sum": self.damage_sum,
+            "auto": self.auto, "enemy_totals": self.enemy_totals,
+            "turn_order": self.turn_order,
+            "units": {o: u.to_state() for o, u in self.units.items()},
+        }
+
+
+def restore_battle(saved):
+    """The inverse of Battle.to_state(): reconstruct fresh (deterministic from the
+    stashed constructor args -- same char rosters, same stage), fast-forward through
+    the waves already cleared (advance_wave() faithfully replays each wave's own
+    battle-start passives and turn roll, exactly as the original run experienced
+    them), then patch in the dynamic per-unit/per-battle state that has since
+    diverged from a fresh construction. -> a live Battle, ready to answer the next
+    request as if the server had never restarted.
+
+    Raises on a genuinely unreconstructable save (e.g. the stage was removed from
+    design data) -- the caller decides what "give up on this save" means, this
+    function never silently returns a half-built battle."""
+    battle = Battle(saved["stage_id"], saved["team_char_ids"], saved["team_level"],
+                    saved["team_star"], saved["team_super_star"], saved["book_rank"])
+    for _ in range(max(0, saved["wave"] - battle.wave)):
+        battle.advance_wave()
+    battle.round = saved["round"]
+    battle.damage_sum = saved["damage_sum"]
+    battle.auto = saved["auto"]
+    battle.enemy_totals = saved["enemy_totals"]
+    # wave_begun/turn_open stay False (advance_wave's default, and __init__'s for
+    # wave 1) regardless of what they were at save time: the reconnect handoff always
+    # re-sends WaveBegin/StartTurn fresh, so the client's own FSM re-enters cleanly
+    # rather than trusting a mid-request flag from a connection that no longer exists.
+    for order, u_state in saved["units"].items():
+        unit = battle.units.get(order)
+        if unit:
+            unit.restore_state(u_state)
+    # Overwrite the freshly-rolled order with the exact saved one -- a fresh roll on
+    # full-HP units could differ from the saved order once dead units (0 HP, just
+    # patched in above) are excluded, and turn_order is otherwise never recomputed
+    # from HP changes mid-wave.
+    battle.turn_order = [o for o in saved["turn_order"] if o in battle.units]
+    if not battle.turn_order:
+        battle._roll_turn_order()
+    return battle

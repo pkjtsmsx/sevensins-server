@@ -17,6 +17,7 @@ from .ofa import *  # noqa: F401,F403
 from .mail import *  # noqa: F401,F403
 from .loginbonus import *  # noqa: F401,F403
 from .karma import *  # noqa: F401,F403
+from .battle_resume import *  # noqa: F401,F403
 from .shop import *  # noqa: F401,F403
 from .gacha import *  # noqa: F401,F403
 
