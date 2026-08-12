@@ -92,19 +92,29 @@ Stop the server before importing.
 
 A code change to `../server` (a battle-engine fix, say) does not need a full
 `assembleDebug` + reinstall — that also used to force an uninstall (a new signing key
-wipes app storage) before the release key was pinned. Instead:
+wipes app storage) before the release key was pinned. Instead, **Check for updates** in
+the app pulls it straight from GitHub, over any network the phone has (WiFi or cellular
+data — this is not LAN-only):
 
 ```sh
 cd ..
-python3 tools/build_hostapp_update.py           # -> hostapp_update/{update.json,server_update.zip}
-python3 tools/serve_hostapp_update.py 8089      # serves that dir over plain HTTP
+python3 tools/publish_hostapp_update.py         # builds + publishes a GitHub Release
 ```
 
-On the phone: **Check for updates**, enter `http://<dev box LAN IP>:8089/`, **Check**.
-On success it downloads, sha256-verifies, and extracts the snapshot to app storage
-without stopping the server — then offers **Restart now**, which stops the server and
-kills the app's process (Chaquopy only re-reads modules from disk on a fresh process, so
-there is no in-process hot-reload). Reopen the app from the launcher to run the new code.
+That's it — no dev machine needs to stay online or reachable afterwards. It publishes to
+a small, DEDICATED public repo
+([SEVENSINS_UPDATE_REPO](https://github.com/SEVENSINS_UPDATE_REPO)),
+never this project's own repo, because the update zip (code + battle_data only, per
+`server_files.json`) is the only thing meant to be public — the reverse-engineering side
+stays wherever it already is. `UpdateManager.UPDATE_URL` is hardcoded to that repo's
+`releases/latest/download/` path, which GitHub always keeps pointed at whichever release
+was published most recently, so there's nothing to type on the phone.
+
+On the phone: tap **Check for updates**. On success it downloads, sha256-verifies, and
+extracts the snapshot to app storage without stopping the server — then offers **Restart
+now**, which stops the server and kills the app's process (Chaquopy only re-reads
+modules from disk on a fresh process, so there is no in-process hot-reload). Reopen the
+app from the launcher to run the new code.
 
 **What ships in the update**: exactly the CODE the app runs — the modules/packages/data
 dirs in `server_files.json` (the same list `stageServer` uses, so the two can't drift).
@@ -113,6 +123,24 @@ app storage, untouched by an update, so the account and any imported assets surv
 update the same way they survive an ordinary `adb install -r`.
 
 If an update turns out to be bad, **long-press "Check for updates"** → **Reset to
-shipped code**. That drops the applied snapshot and falls back to whatever code the APK
-itself was built with — the one thing guaranteed to still work — without touching the
-account either.
+shipped code**. That drops the applied snapshot's ACTIVE pointer (not the extraction
+itself) and falls back to whatever code the APK itself was built with — the one thing
+guaranteed to still work — without touching the account either. Because the extraction is
+left in place, checking again afterwards reactivates it instantly rather than
+re-downloading; "up to date" is always read from that pointer, never a separately-cached
+flag, so it can't drift out of sync with what a restart will actually run.
+
+### Testing against a local dev server instead
+
+`tools/serve_hostapp_update.py` (LAN-only, needs `adb reverse` if the phone can't reach
+the dev box's IP directly — some WiFi APs isolate clients from each other) still works
+for iterating without publishing a release every time:
+
+```sh
+python3 tools/build_hostapp_update.py
+python3 tools/serve_hostapp_update.py 8089
+```
+
+then temporarily point `UpdateManager.UPDATE_URL` at `http://<dev box IP>:8089/` and
+rebuild, or (for a one-off check) `adb reverse tcp:8089 tcp:8089` and use
+`http://127.0.0.1:8089/`.

@@ -1,7 +1,6 @@
 package com.sevensins.host;
 
 import android.content.Context;
-import android.content.SharedPreferences;
 import android.util.Log;
 
 import org.json.JSONObject;
@@ -19,11 +18,11 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 /**
- * Pulls a code-only hot-update (tools/build_hostapp_update.py's output, served by
- * tools/serve_hostapp_update.py) over plain HTTP and applies it WITHOUT reinstalling the
- * APK. See main.py's "HOT UPDATES" doc comment for how the next server start picks the
- * applied snapshot up (it shadows the shipped copy on sys.path; a bad/missing snapshot
- * falls back to the shipped copy automatically).
+ * Pulls a code-only hot-update (tools/build_hostapp_update.py's output, published by
+ * tools/publish_hostapp_update.py as a GitHub Release) over HTTPS and applies it WITHOUT
+ * reinstalling the APK. See main.py's "HOT UPDATES" doc comment for how the next server
+ * start picks the applied snapshot up (it shadows the shipped copy on sys.path; a
+ * bad/missing snapshot falls back to the shipped copy automatically).
  *
  * ACCOUNT SAFETY: every path this class writes lives under its own
  * <filesDir>/sevensins/server_update/ directory, never inside accounts/, design_cache/ or
@@ -35,9 +34,14 @@ import java.util.zip.ZipInputStream;
  */
 class UpdateManager {
     private static final String TAG = "SevenSinsHost";
-    private static final String PREFS = "host";
-    private static final String KEY_SHA = "update_sha256";
-    private static final String KEY_URL = "update_base_url";
+
+    /** Release-asset host for update.json + server_update.zip -- a small, DEDICATED
+     * public repo (never the main project repo: this one carries only the compiled
+     * server code the update zip contains, nothing from the reverse-engineering side).
+     * "latest" always resolves to whatever tools/publish_hostapp_update.py published
+     * most recently, regardless of tag. */
+    static final String UPDATE_URL =
+            "https://github.com/SEVENSINS_UPDATE_REPO/releases/latest/download/";
 
     enum Outcome { UP_TO_DATE, APPLIED, FAILED }
 
@@ -51,23 +55,32 @@ class UpdateManager {
         }
     }
 
-    static String savedBaseUrl(Context ctx) {
-        return ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_URL, "");
-    }
-
-    static void saveBaseUrl(Context ctx, String url) {
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-           .edit().putString(KEY_URL, url).apply();
-    }
-
     private static File updateRoot(Context ctx) {
         return new File(new File(ctx.getFilesDir(), "sevensins"), "server_update");
+    }
+
+    /** The short-hash name of whatever snapshot is currently wired up, or null if there
+     * isn't one (shipped code, or a corrupt/unreadable pointer -- either way "not
+     * active" is the safe reading, never a crash). This is checkAndApply's ONLY source
+     * of "am I up to date" -- not a separately-tracked preference, so it can never drift
+     * from what main.py will actually load on the next start (in particular: resetting
+     * clears this too, since resetToShipped deletes the very file this reads). */
+    private static String readActiveHash(File root) {
+        File active = new File(root, "active.txt");
+        try (java.io.BufferedReader r = new java.io.BufferedReader(
+                new java.io.FileReader(active))) {
+            String line = r.readLine();
+            return line == null ? null : line.trim();
+        } catch (IOException e) {
+            return null;
+        }
     }
 
     /** Drops the active.txt pointer so the next server start falls back to the code the
      * APK shipped with -- the recovery path for a hot update that turns out to be bad.
      * Never touches accounts/design_cache/patch_root; those are siblings, not children,
-     * of server_update/. */
+     * of server_update/. The already-extracted snapshot directory is left in place (not
+     * deleted), so re-applying the SAME update later is instant -- see checkAndApply. */
     static boolean resetToShipped(Context ctx) {
         File active = new File(updateRoot(ctx), "active.txt");
         return !active.exists() || active.delete();
@@ -75,7 +88,6 @@ class UpdateManager {
 
     static Result checkAndApply(Context ctx, String baseUrl) {
         String base = baseUrl.endsWith("/") ? baseUrl : baseUrl + "/";
-        SharedPreferences prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         File root = updateRoot(ctx);
         File zipFile = new File(root, "_download.zip");
         try {
@@ -83,38 +95,42 @@ class UpdateManager {
             String sha256 = manifest.getString("sha256");
             long size = manifest.optLong("size", 0);
             String file = manifest.optString("file", "server_update.zip");
+            String shortHash = sha256.substring(0, 16);
 
-            if (sha256.equalsIgnoreCase(prefs.getString(KEY_SHA, ""))) {
+            if (shortHash.equalsIgnoreCase(readActiveHash(root))) {
                 return new Result(Outcome.UP_TO_DATE,
-                        "already on " + sha256.substring(0, 12));
+                        "already active: " + sha256.substring(0, 12));
             }
             if (!root.isDirectory() && !root.mkdirs()) {
                 return new Result(Outcome.FAILED, "cannot create " + root);
             }
 
-            downloadTo(base + file, zipFile, size);
-
-            String actualSha = sha256Hex(zipFile);
-            if (!actualSha.equalsIgnoreCase(sha256)) {
-                zipFile.delete();
-                return new Result(Outcome.FAILED,
-                        "checksum mismatch (expected " + sha256.substring(0, 12)
-                        + ", got " + actualSha.substring(0, 12) + ") -- download corrupted?");
-            }
-
-            // Directory name = the content hash, so re-applying the same update is a
-            // no-op past the KEY_SHA check above, and a fresh sha256 can never collide
-            // with a leftover extraction from a different build.
-            String shortHash = sha256.substring(0, 16);
+            // A snapshot for this exact hash may already sit on disk from a PRIOR apply
+            // that was later reset (reset only clears the pointer, not the extraction) --
+            // reactivate it instantly instead of re-downloading identical bytes.
             File extractDir = new File(root, shortHash);
-            deleteRecursive(extractDir);          // any stale partial under this name
-            extractZip(zipFile, extractDir, root);
-            zipFile.delete();
+            boolean reused = new File(extractDir, "titan_server.py").isFile();
+            if (!reused) {
+                downloadTo(base + file, zipFile, size);
 
-            if (!new File(extractDir, "titan_server.py").isFile()) {
-                deleteRecursive(extractDir);
-                return new Result(Outcome.FAILED,
-                        "extracted update is missing titan_server.py -- not activating");
+                String actualSha = sha256Hex(zipFile);
+                if (!actualSha.equalsIgnoreCase(sha256)) {
+                    zipFile.delete();
+                    return new Result(Outcome.FAILED,
+                            "checksum mismatch (expected " + sha256.substring(0, 12)
+                            + ", got " + actualSha.substring(0, 12)
+                            + ") -- download corrupted?");
+                }
+
+                deleteRecursive(extractDir);      // any stale partial under this name
+                extractZip(zipFile, extractDir, root);
+                zipFile.delete();
+
+                if (!new File(extractDir, "titan_server.py").isFile()) {
+                    deleteRecursive(extractDir);
+                    return new Result(Outcome.FAILED,
+                            "extracted update is missing titan_server.py -- not activating");
+                }
             }
 
             // Atomic write-then-rename: main.py reads active.txt at server-start time and
@@ -128,12 +144,13 @@ class UpdateManager {
                 return new Result(Outcome.FAILED, "could not activate the new snapshot");
             }
 
-            prefs.edit().putString(KEY_SHA, sha256).apply();
-            saveBaseUrl(ctx, baseUrl);
             pruneOldSnapshots(root, shortHash);
+            String verb = reused ? "reactivated (already had this build)"
+                                 : "downloaded and applied";
             return new Result(Outcome.APPLIED,
                     manifest.optInt("file_count", 0) + " files (" + size + " bytes), "
-                    + sha256.substring(0, 12) + " -- restart the app to run it");
+                    + sha256.substring(0, 12) + " -- " + verb
+                    + "; restart the app to run it");
         } catch (Exception e) {
             Log.e(TAG, "update check/apply failed", e);
             zipFile.delete();

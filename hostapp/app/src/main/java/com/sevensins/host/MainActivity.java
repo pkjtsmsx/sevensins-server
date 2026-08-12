@@ -13,7 +13,6 @@ import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
-import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -74,7 +73,7 @@ public class MainActivity extends android.app.Activity {
 
         Button update = new Button(this);
         update.setText("Check for updates");
-        update.setOnClickListener(v -> promptAndCheckUpdate());
+        update.setOnClickListener(v -> runUpdateCheck());
         // Long-press = recovery, not a second everyday button: fall back to the code the
         // APK shipped with, for the rare case a hot update turns out to be bad. It never
         // touches the account/asset data either, same as the update path itself.
@@ -221,32 +220,10 @@ public class MainActivity extends android.app.Activity {
         }, "asset-import").start();
     }
 
-    /** Asks for the dev box's update-server URL (remembered after the first time, since
-     * it's normally the same LAN address every session -- see
-     * tools/serve_hostapp_update.py), then runs the check off the UI thread. */
-    private void promptAndCheckUpdate() {
-        String saved = UpdateManager.savedBaseUrl(this);
-        EditText input = new EditText(this);
-        input.setHint("http://192.168.1.x:8089/");
-        if (!saved.isEmpty()) input.setText(saved);
-        new AlertDialog.Builder(this)
-                .setTitle("Update server URL")
-                .setMessage("Where tools/serve_hostapp_update.py is running on your "
-                          + "dev machine.")
-                .setView(input)
-                .setPositiveButton("Check", (d, w) -> {
-                    String url = input.getText().toString().trim();
-                    if (url.isEmpty()) return;
-                    runUpdateCheck(url);
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
-    }
-
-    private void runUpdateCheck(String url) {
+    private void runUpdateCheck() {
         Toast.makeText(this, "Checking for updates…", Toast.LENGTH_SHORT).show();
         new Thread(() -> {
-            UpdateManager.Result r = UpdateManager.checkAndApply(this, url);
+            UpdateManager.Result r = UpdateManager.checkAndApply(this, UpdateManager.UPDATE_URL);
             runOnUiThread(() -> {
                 switch (r.outcome) {
                     case UP_TO_DATE:
