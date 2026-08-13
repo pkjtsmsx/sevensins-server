@@ -311,10 +311,58 @@ SOULMIRROR_GACHA_GRADES = ((5, GACHA_RATE_5), (4, GACHA_RATE_4))
 SOULMIRROR_GACHA_FALLBACK_GRADE = 3
 
 
+def _mirror_owning_chars():
+    """-> {charId: alignment} for every character that owns a Soulmirror.
+
+    **Only characters with a real `char` row.** Six `_param3` values own mirrors but have
+    no row at all -- 0 (60 mirrors that are not character-bound) plus 20851/20861/20911/
+    20931/20951 -- and granting one would hand the client a character it cannot look up:
+    the Soulmirror panel filters every list by the cast being viewed, and
+    GetTransmutePredictText does DesignCharForm.GetRow(charId) outright. They were
+    excluded before only as a side effect of matching on the char form; that is now the
+    stated rule.
+    """
+    owners = {}
+    for _iid, row in (bt.dd.rows("item") or {}).items():
+        if row.get("_action") not in SOULFRAG_ACTION_RANGE:
+            continue
+        cid = int(row.get("_param3") or 0)
+        if cid in owners:
+            continue
+        char = bt.dd.row("char", cid) or {}
+        if char:
+            owners[cid] = char.get("_alignment")
+    return owners
+
+
+_shared_mirror_chars_cache = None
+
+
+def soulmirror_shared_chars():
+    """Characters whose mirrors ride on EVERY banner.
+
+    The three boxes are keyed to the three ★5 casts, which leaves the ★4 (alignment 103,
+    34 characters) and ★3 (alignment 104, 15) casts owning mirrors with no banner of
+    their own -- 49 characters whose Soulmirrors were unobtainable by any route. Rather
+    than invent three more banners for casts that never had one, their mirrors are added
+    to all three pools, so any banner can produce them.
+    """
+    global _shared_mirror_chars_cache
+    if _shared_mirror_chars_cache is None:
+        banner_casts = set(SOULMIRROR_GACHA_BOXES.values())
+        _shared_mirror_chars_cache = {
+            cid for cid, alignment in _mirror_owning_chars().items()
+            if alignment not in banner_casts}
+    return _shared_mirror_chars_cache
+
+
 def _soulmirror_gacha_pool(alignment):
-    """{grade: [item id, ...]} for every mirror belonging to that alignment's cast."""
-    chars = {int(cid) for cid, row in (bt.dd.rows("char") or {}).items()
-             if row.get("_alignment") == alignment}
+    """{grade: [item id, ...]} drawable from the banner for `alignment`.
+
+    That cast's own mirrors plus the shared ones (see soulmirror_shared_chars).
+    """
+    chars = {cid for cid, a in _mirror_owning_chars().items() if a == alignment}
+    chars |= soulmirror_shared_chars()
     pool = {}
     for iid, row in (bt.dd.rows("item") or {}).items():
         if row.get("_action") in SOULFRAG_ACTION_RANGE and row.get("_param3") in chars:
