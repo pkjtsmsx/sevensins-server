@@ -56,3 +56,6 @@ hostapp_update/
 
 # ---- Local proxy certs / private keys ----
 certs/
+
+# Release payloads built by hand (APKs + 2.5 GB asset tar)
+dist/
