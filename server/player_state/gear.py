@@ -404,6 +404,95 @@ def upgrade_soulmirror(state, uid, levels):
     return entry, to_lv - before, coins, sum(mats.values())
 
 
+def _soulmirror_tier(entry):
+    """-> (rarity, sfType) for a stored mirror. sfType 0 means "not a Soulmirror"."""
+    row = bt.dd.row("item", int(entry["iid"])) or {}
+    action = int(row.get("_action") or 0)
+    return (int(row.get("_param2") or 1),
+            1 if 101 <= action <= 103 else
+            2 if 104 <= action <= 106 else
+            3 if 107 <= action <= 109 else 0)
+
+
+def soulmirror_refund(rarity, sf_type, lv):
+    """What one mirror gives back. -> (item id, amount).
+
+    `Formula.GetDustCountDecomposeSoulFrag` (0x18F7770):
+
+        base  = (int)(Decimal(10) * Decimal(2**(rarity-1)))
+        spent = sum(GetSoulFragDustCost(rarity, l, charId, sfType) for l in 0..lv-1)
+        return (int)(spent * 0.8 + base)      -- spent term is 0 when lv < 1
+
+    So it is a flat base plus **80% of the material actually sunk into levelling it**,
+    truncated once at the end rather than per level. The same helpers that price the
+    upgrade price the refund, so the two can never drift apart.
+
+    The client's other half, `GetItemCountDecomposeSoulFrag` (0x18F78EC), adds a second
+    payout read from `PlayerGeneral`'s decompose dictionary plus 80% of
+    `GetRangeSoulFragItemCost`. **Both of those are empty in our game-rule sync** -- for
+    rarity <= 4 the upgrade spends no items at all, only dust and coin -- so that half
+    evaluates to nothing and the popup we produce matches what the panel previewed.
+    Populating the decompose dictionary later means teaching this function about it too.
+    """
+    base = 10 * (2 ** (max(1, int(rarity)) - 1))
+    if sf_type == 3:
+        # Apoc. mirrors are priced from formula.json and eat a different material, so
+        # refund the one that was actually spent -- see soulfrag_ultra_cost.
+        _, mats = soulfrag_ultra_cost(0, lv)
+        item = SOULFRAG_ULTRA_MATERIAL
+        spent = mats.get(item, 0)
+    else:
+        item = SOULFRAG_ENHANCE_MATERIAL
+        spent = soulfrag_material_cost(rarity, sf_type, 0, lv)
+    return item, int(spent * 0.8 + base)
+
+
+def dismantle_soulmirrors(state, uids):
+    """Dismantle Soulmirrors for their material. -> ([[item id, amount], ...], [sid]).
+
+    `SendDecomposeSoulFragReq` (0x18E9100) sends cmd 119 with `strargs` = the uids and
+    **no intargs**, and opens a `PanelWaitingBlock` first -- so an unanswered request is
+    not a no-op, it is a hard freeze with a modal blocker over the whole UI and no way
+    out but restarting the app. That is exactly the symptom this fixes.
+
+    Refuses the whole batch rather than silently skipping, because a partial dismantle
+    would leave the client's selection and our storage disagreeing about what still
+    exists. A locked mirror is refused too: the panel's AUTO SELECT already excludes
+    them, so a locked uid arriving here means the request did not come from that path.
+    """
+    per_item = {}
+    removed = []
+    seen = set()
+    for uid in uids:
+        if uid in seen:
+            raise ValueError(f"Soulmirror {uid!r} listed twice")
+        seen.add(uid)
+        sid, entry = find_soulmirror(state, uid)
+        if entry is None:
+            raise LookupError(f"no Soulmirror {uid!r} in storage {BP_STORAGE_SOULFRAG}")
+        attr = entry.get("attr", {})
+        if int(attr.get(EQUIP_LOCK_ATTR, 0)):
+            raise ValueError(f"Soulmirror {uid!r} is locked")
+        rarity, sf_type = _soulmirror_tier(entry)
+        if not sf_type:
+            raise ValueError(f"item {entry['iid']} is not a Soulmirror")
+        item, amount = soulmirror_refund(rarity, sf_type,
+                                         int(attr.get(RUNE_ATTR_LEVEL, 0)))
+        per_item[item] = per_item.get(item, 0) + amount
+        # A worn mirror has to come off the cast as well, or its equips slot keeps
+        # pointing at a uid that no longer exists.
+        for _u, other in state["roster"].items():
+            cur = char_equips(other)
+            if uid in cur:
+                other["equips_list"] = [("" if u == uid else u) for u in cur]
+        del state["backpack"][str(BP_STORAGE_SOULFRAG)][sid]
+        removed.append(sid)
+    for item, amount in per_item.items():
+        if amount:
+            grant_item(state, item, amount)
+    return [[item, amount] for item, amount in per_item.items()], removed
+
+
 def grant_rune(state, item_id, slot, level=0, enhance=0, rng=None):
     """Put a starshard in storage 2. -> the stored entry."""
     bag = state["backpack"].setdefault(str(BP_STORAGE_EQUIPMENT), {})

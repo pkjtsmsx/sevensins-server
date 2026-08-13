@@ -412,6 +412,12 @@ BACKPACK_REQ_MIX_BLOODPACT, BACKPACK_RPLY_MIX_BLOODPACT = 260, 261
 # Dismantle. Reply is DATA-carrying: strargs[0] is a List<List<uint>> of [itemId, amount]
 # pairs that HandleDecomposeBloodpactRply turns into the reward popup.
 BACKPACK_REQ_DECOMPOSE_BLOODPACT, BACKPACK_RPLY_DECOMPOSE_BLOODPACT = 262, 263
+# Soulmirror dismantle -- the SOULMIRRORS panel's Recycle button. Same idea as the
+# bloodpact one but a DIFFERENT reply shape: 120 carries its reward list in **intargs**,
+# not a JSON strarg. SendDecomposeSoulFragReq (0x18E9100) opens a PanelWaitingBlock and
+# only HandleDecomposeSoulFragRply closes it, so an unanswered 119 freezes the game
+# behind a modal blocker -- restart is the only way out.
+BACKPACK_REQ_DECOMPOSE_SOULFRAG, BACKPACK_RPLY_DECOMPOSE_SOULFRAG = 119, 120
 # The padlock, shared by every equipment family (runes / soulmirrors / bloodpacts).
 BACKPACK_REQ_EQUIP_LOCK, BACKPACK_RPLY_EQUIP_LOCK = 105, 106
 BACKPACK_CHANGE = 145
@@ -2106,6 +2112,45 @@ def handle(conn, addr):
                                  ps.backpack_info_json(state)]))
                             send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
                                                    [ps.currency_json(state)]))
+                    elif (index == BACKPACK_SERVER
+                          and cmd == BACKPACK_REQ_DECOMPOSE_SOULFRAG):
+                        # SendDecomposeSoulFragReq(uid_list): strargs = the mirror uids,
+                        # no intargs. ALWAYS answer -- the request opened a
+                        # PanelWaitingBlock and only cmd 120 closes it.
+                        try:
+                            reward, gone = ps.dismantle_soulmirrors(
+                                state, list(strargs))
+                        except (LookupError, ValueError) as exc:
+                            log(f"    !! soulmirror dismantle refused: {exc}")
+                            # intargs[0] != 1 skips the popup and falls straight through
+                            # to PanelWaitingBlock.Close(), which is the clean way to
+                            # unblock the UI on a refusal.
+                            send(MSG_RPC, backpack_msg(
+                                BACKPACK_RPLY_DECOMPOSE_SOULFRAG, [0], []))
+                        else:
+                            ps.save(state)
+                            log(f"    -> dismantled {len(strargs)} soulmirror(s) "
+                                f"-> {reward}")
+                            # HandleDecomposeSoulFragRply (0x18EBD60): intargs[0] must
+                            # be 1, then it RemoveAt(0)s that flag and walks whatever is
+                            # left in PAIRS -- [itemId, amount, itemId, amount, ...] --
+                            # building one ItemStruct each for the reward popup. The
+                            # pairs ride in intargs; unlike the bloodpact reply there is
+                            # no JSON strarg at all, and it takes `size >> 1` pairs so a
+                            # trailing odd element would be dropped silently.
+                            flat = [n for pair in reward for n in pair]
+                            send(MSG_RPC, backpack_msg(
+                                BACKPACK_RPLY_DECOMPOSE_SOULFRAG, [1] + flat, []))
+                            # 145 MERGES, so the dismantled slots need iid-0 tombstones
+                            # or their icons stay on screen; storage 1 carries the
+                            # refunded material.
+                            send(MSG_RPC, backpack_msg(
+                                BACKPACK_CHANGE, [0],
+                                [ps.backpacks_all_json(
+                                    state, {ps.BP_STORAGE_SOULFRAG,
+                                            ps.BP_STORAGE_NORMAL},
+                                    {ps.BP_STORAGE_SOULFRAG: gone}),
+                                 ps.backpack_info_json(state)]))
                     elif (index == BACKPACK_SERVER
                           and cmd == BACKPACK_REQ_MIX_BLOODPACT):
                         # SendMixBloodpactReq(fromUID, toUID, fromIndex, toIndex):
