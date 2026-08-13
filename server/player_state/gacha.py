@@ -68,6 +68,10 @@ SPR_BANNER_DEBUT, SPR_TAB_DEBUT = 763, 773
 SPR_BANNER_ANGEL, SPR_TAB_ANGEL = 765, 775             # Virtue Soulmirrors
 SPR_BANNER_SOULMIRROR, SPR_TAB_SOULMIRROR = 764, 774   # Sin Soulmirrors
 SPR_BANNER_DEBUT_ALT = 768                             # unidentified art
+# Reused for the Rider Soulmirror banner. There is no Riders-only art in the pack (see
+# above), so this is the only unclaimed pair that has real `sprite` rows -- better a
+# generic banner than a missing one, which is what 761/771 and 766/776 produced.
+SPR_BANNER_RIDER, SPR_TAB_RIDER = 768, 778
 SPR_BANNER_BIGTHREE = 769                              # 御三家 100-pull limited
 
 # All banner sprites identified (via SEVENSINS_BANNER_PREVIEW=1, which publishes one
@@ -218,6 +222,14 @@ REGULAR_BOXES = [
      "Sin Soulmirrors", False, 1400430, 0),
     (1005, SPR_BANNER_ANGEL, SPR_TAB_ANGEL,
      "Virtue Soulmirrors", False, 1400414, 0),
+    # The Riders. Bought with **5829 "Soulmirror Scroll"**, the generic scroll-shop one,
+    # because the Riders never had a standing soulmirror banner and so there is no
+    # "Rider Soulmirror Scroll (Revisited)" to match 1400430/1400414 -- the 1400400 block
+    # has Sin and Virtue entries and nothing for 102. (213 "Rider Summon Orb" looks
+    # tempting but is `_class 2`, a BOX item that opens on tap, not a currency.) Gems
+    # are on every banner anyway, so the scroll is not the only way in.
+    (1006, SPR_BANNER_RIDER, SPR_TAB_RIDER,
+     "Rider Soulmirrors", False, 5829, 0),
 ]
 
 
@@ -286,7 +298,12 @@ GACHA_OBJ_ITEM = 2
 # The two Soulmirror banners are ITEM gachas (魂鏡 are items, see
 # [[sevensins-soulmirrors]]), split by the OWNING character's `_alignment`:
 # 100 Sins / 101 Virtues / 102 Riders. A mirror's `_param3` names its character.
-SOULMIRROR_GACHA_BOXES = {1004: 100, 1005: 101}
+#
+# **All three ★5 casts need a box, not just two.** Alignment 102 (the Riders -- ESMIRA,
+# CHINO, SUTALR and both THYRZA rows) is rarity 5 exactly like the Sins and Virtues and
+# owns a full set of mirrors at every grade 1..5, but with only 1004/1005 published
+# there was no way to obtain any of them at all. 1006 closes that.
+SOULMIRROR_GACHA_BOXES = {1004: 100, 1005: 101, 1006: 102}
 # Mirror grade (`_param2`): 1 普通 N / 2 優良 R / 3 稀有 SR / 4 史詩 UR / 5 傳說 LR.
 # Weighted to match the published char rates so the banner's advertised odds stay
 # coherent; the real per-banner table was live-ops data we do not have.
