@@ -879,6 +879,21 @@ def battle_replies(battle, cmd, intargs, strargs, state=None, uid=""):
         # cmd 100 (Ready) is only sent on the auto-battle path -- so both mean "the
         # scene is up, give me something to do". The wave has to be opened first:
         # HandleWaveBegin is what runs SyncData and the wave-1 unit FX pass.
+        if cmd == bt.REQ_READY and intargs:
+            # **Ready's intargs[0] is the client's REMEMBERED auto-battle setting, and
+            # ignoring it is why auto switched itself off every fight.**
+            # `ServerRPCReady` (0x1687340) reads `ClientPrefs.GAME_SETTING.BattleAuto`
+            # -- a client-side persisted preference, not per-battle state -- and sends
+            # it here; it only forces 0 for PVP and BattleType 2/4, which is the game's
+            # own rule that those modes may not auto. So the client remembers across
+            # fights and TELLS us, and a fresh Battle defaulting to auto=False silently
+            # overrode it: the player toggled auto on, the next battle's Ready said
+            # `int=[1]`, we dropped it, and nothing auto-played until they toggled
+            # again. Seen in the log as 501 int=[1] followed by 100 int=[1].
+            #
+            # Only REQ_READY carries this. REQ_START_TURN's intargs mean something
+            # else entirely, so it must not touch `auto`.
+            battle.auto = bool(intargs[0])
         if battle.turn_open:
             # TurnEnd re-asks while the previous answer is still being played out.
             # Answering again restarts the turn and makes the skill bar flicker.
