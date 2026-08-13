@@ -454,38 +454,39 @@ def start_battle_msg(battle):
 def battle_sync_reply(st):
     """PlayerBattle.HandleSyncCmd (cmd 0x709=1801)'s reply, driven by whether this
     account has a saved in-progress battle (ps.saved_battle) -- decompiled from
-    PlayerBattle.HandleSyncCmd (0x168a81c, 2.2.7):
+    PlayerBattle.HandleSyncCmd (0x168a81c) AND AskBattleReconnect (0x168b67c), 2.2.7.
 
-        intargs[0] = reconnectCase (this->fields.reconnectCase). != 2 dispatches the
-                     ordinary SERVER_SYNC event immediately and stops there.
-        intargs[1] = battleType, read only if intargs.size >= 2 -- picks which confirm-
-                     dialog string AskBattleReconnect shows (indexed battleType-1 into
-                     a 5-entry table; out of range falls back to a generic string).
-                     We only ever resume a stage/campaign fight, so a fixed 1 is fine.
-        reconnectCase == 2 ADDITIONALLY requires (every one throws
-        ArgumentOutOfRangeException if absent -- this is not an optional tail):
-          intargs[2] = CurStageID
-          intargs[3] = CurRuneIndex
-          strargs[0] = a JSON List<BackpackItemData> (DeserializeRuneList) -- "[]"
-                       deserializes fine (0 iterations), so an empty rune list is a
-                       legitimate, safe answer when we have no rune-pick state.
-          strargs[1] = CurPriceList, a JSON List<int> -- "[]" is likewise safe.
-        Both intargs[2:] and strargs must be present TOGETHER, or DeserializeRuneList
-        throws before the SERVER_SYNC event ever dispatches -- reconnectCase would be
-        set but AskBattleReconnect's prompt would never actually fire. Getting either
-        half wrong is worse than not offering reconnect at all.
+    reconnectCase (intargs[0]) has THREE meanings, not two -- easy to misread on a
+    first pass (an earlier version of this function did, and shipped it, before a
+    live device test showed no dialog ever appeared and this got re-checked):
 
-    AskBattleReconnect (0x168b67c) is what turns reconnectCase>=1 into the "rejoin your
-    battle?" confirm dialog, shown from the post-login panel queue
-    (PanelLoginBonus.DoOpenPanelReconnectMsg); accepting sends REQ_RECONNECT (0x2BD),
-    which battle_replies() already answers by replaying the SAME start_battle_msg
-    handoff a fresh stage entry uses.
+      0 : no reconnect state. Ordinary sync.
+      1 : "you have a LIVE battle -- rejoin?" AskBattleReconnect shows the actual
+          interactive confirm dialog here, wired to CB_Reconnect (sends
+          REQ_RECONNECT/0x2BD with intargs=[1]) and CB_ReconnectCancel (same RPC,
+          intargs=[0]) -- battle_replies() already answers accept by replaying the
+          start_battle_msg handoff a fresh stage entry uses. HandleSyncCmd's early
+          return path (`if (v16 != 2) { dispatch SERVER_SYNC; return; }`) covers
+          this case too, so it needs NOTHING beyond intargs[0]/[1] -- no stage id,
+          no rune list, no strargs at all.
+      2 : "a battle you were in already RESOLVED while you were gone." NOT a rejoin
+          prompt -- AskBattleReconnect calls `PanelUtil.LaunchPanel("battle/
+          panel_battle_result")` directly and clears reconnectCase back to 0, no
+          confirm, no CB_Reconnect involved. THIS is the case that needs
+          intargs[2]=CurStageID, intargs[3]=CurRuneIndex, strargs=[rune list JSON,
+          price list JSON] -- they populate the result screen, not a live rejoin.
+          We have no use for this case (we never let a battle "resolve while the
+          player was gone" -- REQ_BATTLE_END only fires from a connected client).
+
+    intargs[1] = battleType, read whenever intargs.size >= 2 -- picks which confirm-
+    dialog string case 1's prompt shows (indexed battleType-1 into a 5-entry table;
+    out of range falls back to a generic string 10064). We only ever resume a stage/
+    campaign fight, so a fixed 1 is fine either way.
     """
     saved = ps.saved_battle(st) if st else None
     if not saved:
         return [sint_msg(0xFBC2FA08, 1801, [0], [])]
-    return [sint_msg(0xFBC2FA08, 1801,
-                     [2, 1, saved["stage_id"], 0], ["[]", "[]"])]
+    return [sint_msg(0xFBC2FA08, 1801, [1, 1], [])]
 
 
 def build_sync_replies(st):
@@ -503,9 +504,11 @@ def build_sync_replies(st):
                            [backpack_msg(cmd, [1], [ps.backpack_json(st, cmd - 83)])
                             for cmd in (84, 85, 86, 87)]),
         # PlayerBattle.HandleSyncCmd (cmd 0x709=1801) -- see battle_sync_reply for the
-        # reconnectCase==2 wire contract this advertises whenever ps.saved_battle(st)
-        # has something to offer.
-        (0xFA6D759E, 801): ("PlayerBattle", battle_sync_reply(st)),
+        # reconnectCase wire contract this advertises whenever ps.saved_battle(st)
+        # has something to offer. REQ_BATTLE_SYNC's own docstring explains why the
+        # dispatch loop must never route this (index, cmd) pair to battle_replies.
+        (bt.BATTLE_SERVER_INDEX, bt.REQ_BATTLE_SYNC): ("PlayerBattle",
+                                                       battle_sync_reply(st)),
         # PlayerCurrency.HandleSyncCmd (cmd 512) deserializes strargs[0] into
         # Dictionary<CurrencyType,uint> and then raises CurrencyEventType.CURRENCY_SYNCED=1.
         (0xBD2055EA, 256): ("PlayerCurrency", [sint_msg(0xBC8FDA7C, 512, [], [ps.currency_json(st)])]),
@@ -1135,7 +1138,7 @@ def handle(conn, addr):
                 log(f"    state loaded for player {pid} from {ps.path_for(pid)}")
                 # Rebuild a saved in-progress battle so it can actually answer
                 # REQ_RECONNECT (which needs a live Battle to replay), not just
-                # advertise reconnectCase=2 in the sync reply. A save that no longer
+                # advertise reconnectCase=1 in the sync reply. A save that no longer
                 # reconstructs (a stage pulled from design data, say) drops itself
                 # rather than crashing the login -- an offer to resume that then
                 # throws on acceptance is worse than no offer at all.
@@ -2347,7 +2350,8 @@ def handle(conn, addr):
                         log(f"    -> start battle: wave 1/{cur_battle.wave_max}, "
                             f"units {sorted(cur_battle.units)}")
                         send(MSG_RPC, start_battle_msg(cur_battle))
-                    elif index == bt.BATTLE_SERVER_INDEX and cur_battle:
+                    elif (index == bt.BATTLE_SERVER_INDEX and cur_battle
+                          and cmd != bt.REQ_BATTLE_SYNC):
                         for body in battle_replies(cur_battle, cmd, intargs, strargs,
                                                    state, ps.uid(state)):
                             send(MSG_RPC, body)

@@ -61,6 +61,16 @@ WAVE_RESULT_WIN, WAVE_RESULT_LOSE = 1, 2
 REQ_READY, REQ_START_TURN = 100, 101
 REQ_JUDGE, REQ_ATTACK = 200, 201
 REQ_NEXT_WAVE, REQ_BATTLE_END = 502, 505
+# PlayerBattle's login-sync request -- SHARES BATTLE_SERVER_INDEX with every real
+# in-fight cmd above (attack, judge, retreat, ...), so the dispatch loop must route
+# this one to build_sync_replies()/battle_sync_reply(), never to battle_replies(): once
+# a resumed Battle exists at login time (see restore_battle), the two would otherwise
+# collide on the very first request the client sends, and HandleSyncCmd -- the ONLY
+# thing that can ever set reconnectCase and let the "rejoin?" prompt fire -- gets
+# silently swallowed by battle_replies' "no handler for this cmd" catch-all instead of
+# answered. Caught by an actual device test: the client hung at a fixed % on load,
+# waiting forever on a sync reply that was being routed to the wrong handler.
+REQ_BATTLE_SYNC = 801
 # Menu -> Retreat. `PlayerBattle.Retreat` sends this with NO args, but only after
 # `BattleData.BattleResultType >= 2` -- which passes normally because BattleDatas..ctor
 # seeds that field with 0xFF ("no result yet"); HandleWaveEnd only overwrites it on the
