@@ -418,6 +418,12 @@ BACKPACK_REQ_DECOMPOSE_BLOODPACT, BACKPACK_RPLY_DECOMPOSE_BLOODPACT = 262, 263
 # only HandleDecomposeSoulFragRply closes it, so an unanswered 119 freezes the game
 # behind a modal blocker -- restart is the only way out.
 BACKPACK_REQ_DECOMPOSE_SOULFRAG, BACKPACK_RPLY_DECOMPOSE_SOULFRAG = 119, 120
+# Soulmirror fuse ("transmute"). SendTransmuteSoulFragReq (0x18E913C) is the same
+# uids-in-strargs, PanelWaitingBlock-first shape as 119 -- so this one freezes the client
+# too when unanswered. 118 is NOT 120 though: it reads intargs[1]/[2] for ONE item and
+# throws ArgumentOutOfRange if fewer than 3 ints arrive, where 120 loops over pairs and
+# tolerates an empty list.
+BACKPACK_REQ_TRANSMUTE_SOULFRAG, BACKPACK_RPLY_TRANSMUTE_SOULFRAG = 117, 118
 # The padlock, shared by every equipment family (runes / soulmirrors / bloodpacts).
 BACKPACK_REQ_EQUIP_LOCK, BACKPACK_RPLY_EQUIP_LOCK = 105, 106
 BACKPACK_CHANGE = 145
@@ -2151,6 +2157,38 @@ def handle(conn, addr):
                                             ps.BP_STORAGE_NORMAL},
                                     {ps.BP_STORAGE_SOULFRAG: gone}),
                                  ps.backpack_info_json(state)]))
+                    elif (index == BACKPACK_SERVER
+                          and cmd == BACKPACK_REQ_TRANSMUTE_SOULFRAG):
+                        # SendTransmuteSoulFragReq(uid_list): strargs = the mirrors to
+                        # fuse, no intargs. PanelWaitingBlock again -- always answer.
+                        try:
+                            new, gone, coins = ps.fuse_soulmirrors(
+                                state, list(strargs))
+                        except (LookupError, ValueError) as exc:
+                            log(f"    !! soulmirror fuse refused: {exc}")
+                            send(MSG_RPC, backpack_msg(
+                                BACKPACK_RPLY_TRANSMUTE_SOULFRAG, [0], []))
+                        else:
+                            ps.save(state)
+                            log(f"    -> fused {len(strargs)} soulmirror(s) for "
+                                f"{coins} coins -> item {new['iid']} ({new['uid']})")
+                            # HandleTransmuteSoulFragRply (0x18EBF9C): intargs[0] == 1,
+                            # then it reads intargs[1] as the item id and intargs[2] as
+                            # the amount -- ONE ItemStruct, no loop. **All three ints
+                            # must be present**: it indexes [1] and [2] behind explicit
+                            # size checks that throw ArgumentOutOfRange, unlike 120
+                            # which tolerates a bare [1].
+                            send(MSG_RPC, backpack_msg(
+                                BACKPACK_RPLY_TRANSMUTE_SOULFRAG,
+                                [1, int(new["iid"]), 1], []))
+                            send(MSG_RPC, backpack_msg(
+                                BACKPACK_CHANGE, [0],
+                                [ps.backpacks_all_json(
+                                    state, {ps.BP_STORAGE_SOULFRAG},
+                                    {ps.BP_STORAGE_SOULFRAG: gone}),
+                                 ps.backpack_info_json(state)]))
+                            send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
+                                                   [ps.currency_json(state)]))
                     elif (index == BACKPACK_SERVER
                           and cmd == BACKPACK_REQ_MIX_BLOODPACT):
                         # SendMixBloodpactReq(fromUID, toUID, fromIndex, toIndex):

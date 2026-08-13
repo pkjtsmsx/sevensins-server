@@ -21,8 +21,10 @@ from .core import (
     SUPER_LIMIT_DEFINE,
     char_equips,
     grant_item,
+    grant_soulmirror,
     item_count,
     make_rune,
+    make_soulmirror,
     rune_uid,
     soulfrag_slot,
     spend_item,
@@ -493,6 +495,173 @@ def dismantle_soulmirrors(state, uids):
     return [[item, amount] for item, amount in per_item.items()], removed
 
 
+# ---- fuse / transmute (Backpack 117 -> 118) --------------------------------
+#
+# Rarity 4 is the ONLY fusable rarity: `DesignTransmuteForm.CheckSoulfragTransmuteLegal`
+# (0x1719BD0) walks `SoulfragTransmuteDic[sfType][rarity][charId][action]`, and the
+# design form only carries `_param1` (rarity) == 4 -- 336 rows for sfType 1 and 336 for
+# sfType 2, i.e. 112 characters x 3 slots each. Apoc. (sfType 3) cannot be fused at all.
+SOULFRAG_TRANSMUTE_RARITY = 4
+# **Read out of the panel prefab, not the binary.** `_uiSoulFragTransmuteIconList` in
+# PanelSoulFrag (ngui_prefabs_panels_inventory) is a list of exactly 3 icons, and
+# InitTransmuteInfo only fills slots that exist, so 3 is the hard ceiling on a fuse --
+# see the memory note about reading [SerializeField] values from the bundle.
+SOULFRAG_TRANSMUTE_NUM = 3
+
+
+def soulfrag_transmute_cost():
+    """Coin cost of one fuse, shown by InitTransmuteInfo as "-<cost>".
+
+    Ours to author (it rides in the game-rule sync, not any design file). Taken off the
+    same curve `soulfrag_enhance_coin_cost` uses at the fusable rarity, so it stays in
+    proportion with everything else the tier costs instead of being an invented number.
+    """
+    return SOULFRAG_ENHANCE_COIN_BASE * (2 ** (SOULFRAG_TRANSMUTE_RARITY - 1))
+
+
+_transmute_pool_cache = None
+
+
+def transmute_pool():
+    """-> {sfType: {charId: {action, ...}}} of everything legally fusable.
+
+    Straight out of the `transmute` design form, whose rows are
+    `_type`=sfType, `_param1`=rarity, `_param2`=charId, `_param3`=action -- exactly the
+    four keys CheckSoulfragTransmuteLegal indexes with. Types 11/12 belong to a
+    different transmute family (their actions are 4/5/6, not 101..106) and are skipped.
+    """
+    global _transmute_pool_cache
+    if _transmute_pool_cache is None:
+        pool = {}
+        for r in (bt.dd.rows("transmute") or {}).values():
+            if not isinstance(r, dict):
+                continue
+            sf_type, rarity = r.get("_type"), r.get("_param1")
+            if sf_type not in (1, 2) or rarity != SOULFRAG_TRANSMUTE_RARITY:
+                continue
+            pool.setdefault(sf_type, {}).setdefault(int(r["_param2"]), set()).add(
+                int(r["_param3"]))
+        _transmute_pool_cache = pool
+    return _transmute_pool_cache
+
+
+def soulmirror_items_for(rarity, char_id, action):
+    """-> the item ids of every Soulmirror matching that cell, newest-agnostic.
+
+    Several distinct mirrors can share (rarity, char, slot) -- they differ only by
+    `_param1`, the equipment_bonus group that decides which stats they roll -- so this
+    returns all of them and the caller picks. Ones `make_soulmirror` would reject (no
+    usable bonus rows) are filtered out here rather than blowing up at grant time.
+    """
+    out = []
+    for iid, row in (bt.dd.rows("item") or {}).items():
+        if not isinstance(row, dict):
+            continue
+        if (int(row.get("_action") or 0) == action
+                and int(row.get("_param3") or 0) == char_id
+                and int(row.get("_param2") or 0) == rarity):
+            try:
+                make_soulmirror(None, int(iid))
+            except ValueError:
+                continue
+            out.append(int(iid))
+    return sorted(out)
+
+
+def fuse_soulmirrors(state, uids, rng=None):
+    """Fuse Soulmirrors into one. -> (new entry, [consumed sid], coins spent).
+
+    The OUTCOME RULE is read off `PanelSoulFrag.GetTransmutePredictText` (0x163F248),
+    which is what the player is shown before confirming and therefore what the server
+    has to honour. It tallies the selection by charId and by action and picks its
+    wording from how uniform they are:
+
+      * all three share a charId -> the text is String.Format'd with that character's
+        Title and Name, i.e. **the output is that character's mirror**;
+      * charIds differ -> the text names nobody, i.e. **a random character**;
+      * likewise for action: all three share one -> that slot; otherwise a random slot.
+
+    (sfType picks which block of text ids is used -- 121900+action / 122008 for Break,
+    +7/+11 and 122018/122014 for EX Break -- but the uniformity logic is identical, and
+    the two tiers never mix because a mirror's action determines its tier.)
+
+    So a uniform selection is deterministic and a mixed one is a gamble, which is the
+    whole point of the feature. Everything else is validation.
+    """
+    import random as _r
+    rng = rng or _r
+    if len(uids) != SOULFRAG_TRANSMUTE_NUM:
+        raise ValueError(f"a fuse takes exactly {SOULFRAG_TRANSMUTE_NUM} Soulmirrors, "
+                         f"got {len(uids)}")
+    if len(set(uids)) != len(uids):
+        raise ValueError("the same Soulmirror was listed more than once")
+
+    pool = transmute_pool()
+    picked = []
+    sf_types, char_ids, actions = set(), set(), set()
+    for mirror_uid in uids:
+        sid, entry = find_soulmirror(state, mirror_uid)
+        if entry is None:
+            raise LookupError(f"no Soulmirror {mirror_uid!r} in storage {BP_STORAGE_SOULFRAG}")
+        if int(entry.get("attr", {}).get(EQUIP_LOCK_ATTR, 0)):
+            raise ValueError(f"Soulmirror {mirror_uid!r} is locked")
+        row = bt.dd.row("item", int(entry["iid"])) or {}
+        rarity, action = int(row.get("_param2") or 0), int(row.get("_action") or 0)
+        char_id = int(row.get("_param3") or 0)
+        _, sf_type = _soulmirror_tier(entry)
+        if action not in pool.get(sf_type, {}).get(char_id, ()) \
+                or rarity != SOULFRAG_TRANSMUTE_RARITY:
+            raise ValueError(f"Soulmirror {mirror_uid!r} (item {entry['iid']}, rarity "
+                             f"{rarity}) is not fusable")
+        picked.append((sid, entry, mirror_uid))
+        sf_types.add(sf_type)
+        char_ids.add(char_id)
+        actions.add(action)
+    if len(sf_types) != 1:
+        raise ValueError(f"a fuse cannot mix tiers (got sfTypes {sorted(sf_types)})")
+    sf_type = sf_types.pop()
+
+    coins = soulfrag_transmute_cost()
+    have = int(state["currency"].get(str(CURRENCY_COIN), 0))
+    if have < coins:
+        raise ValueError(f"a fuse costs {coins} coins, holding {have}")
+
+    # Uniform -> keep it; mixed -> roll. The action is drawn from the CHOSEN character's
+    # own legal set, so a random pick can never produce a combination the design form
+    # does not list.
+    tier = pool[sf_type]
+    out_char = next(iter(char_ids)) if len(char_ids) == 1 else rng.choice(sorted(tier))
+    legal_actions = sorted(tier[out_char])
+    if len(actions) == 1:
+        only = next(iter(actions))
+        out_action = only if only in tier[out_char] else rng.choice(legal_actions)
+    else:
+        out_action = rng.choice(legal_actions)
+    candidates = soulmirror_items_for(SOULFRAG_TRANSMUTE_RARITY, out_char, out_action)
+    if not candidates:
+        raise ValueError(f"no Soulmirror item for char {out_char} action {out_action}")
+    out_item = rng.choice(candidates)
+
+    # **Grant BEFORE freeing the inputs.** grant_soulmirror allocates `max(sid) + 1`, so
+    # removing the inputs first would let the new mirror land on a slot id that is also
+    # in `removed` -- and backpacks_all_json writes tombstones AFTER the live entries,
+    # so the iid-0 tombstone would overwrite the reward and the fuse would look like it
+    # consumed three mirrors and produced nothing. Allocating first makes the collision
+    # impossible rather than merely unlikely.
+    new = grant_soulmirror(state, out_item, rng=rng)
+    removed = []
+    for sid, _entry, mirror_uid in picked:
+        for _u, other in state["roster"].items():
+            cur = char_equips(other)
+            if mirror_uid in cur:
+                other["equips_list"] = [("" if u == mirror_uid else u) for u in cur]
+        del state["backpack"][str(BP_STORAGE_SOULFRAG)][sid]
+        removed.append(sid)
+    assert str(new["sid"]) not in {str(s) for s in removed}
+    state["currency"][str(CURRENCY_COIN)] = have - coins
+    return new, removed, coins
+
+
 def grant_rune(state, item_id, slot, level=0, enhance=0, rng=None):
     """Put a starshard in storage 2. -> the stored entry."""
     bag = state["backpack"].setdefault(str(BP_STORAGE_EQUIPMENT), {})
@@ -788,8 +957,17 @@ def game_rule_json():
     # null guard -- leaving it out is a NullReferenceException out of
     # PanelSoulFrag.InitTransmuteInfo the moment the transmute tab opens (seen on device
     # 2026-08-08). One entry per rarity keyed by rarity string.
-    d["soulfrag_transmute_num"] = {str(r): 1 for r in SOULFRAG_RARITIES}
-    d["soulfrag_transmute_cost"] = 0
+    # **The client only ever reads key "4".** get_SoulfragTransmuteDefaultNum
+    # (0x1902370) indexes this dictionary with the literal string "4" -- rarity 4 being
+    # the only rarity the transmute design form carries -- so every other key here is
+    # inert padding kept only so the shape stays obvious. The value is how many mirrors
+    # a fuse consumes, and InitTransmuteInfo enables Confirm on
+    # `_selectSoulfragDataList.size == num`; the panel prefab has exactly
+    # SOULFRAG_TRANSMUTE_NUM icon slots, so a larger number here is unreachable and
+    # would leave Confirm permanently dead.
+    d["soulfrag_transmute_num"] = {str(r): SOULFRAG_TRANSMUTE_NUM
+                                   for r in SOULFRAG_RARITIES}
+    d["soulfrag_transmute_cost"] = soulfrag_transmute_cost()
     d.update(bloodpact_game_rule())
     return json.dumps(d, separators=(",", ":"))
 

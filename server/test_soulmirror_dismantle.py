@@ -140,9 +140,149 @@ def test_unequips():
     print("unequip OK")
 
 
+# ---- fuse / transmute (Backpack 117) ---------------------------------------
+
+
+def fusable(sf_type=1):
+    """-> (charId, [action, ...]) for a character the transmute form lists."""
+    tier = ps.transmute_pool()[sf_type]
+    char_id = sorted(tier)[0]
+    return char_id, sorted(tier[char_id])
+
+
+def a_fusable_mirror(state, char_id, action):
+    items = ps.soulmirror_items_for(ps.SOULFRAG_TRANSMUTE_RARITY, char_id, action)
+    assert items, (char_id, action)
+    return ps.grant_soulmirror(state, items[0])
+
+
+def test_transmute_pool():
+    pool = ps.transmute_pool()
+    assert sorted(pool) == [1, 2], sorted(pool)          # Apoc. is not fusable
+    for sf_type in (1, 2):
+        assert len(pool[sf_type]) == 112, len(pool[sf_type])
+        acts = {a for actions in pool[sf_type].values() for a in actions}
+        assert acts == ({101, 102, 103} if sf_type == 1 else {104, 105, 106}), acts
+    # The panel prefab has 3 icon slots; a larger number would leave Confirm dead.
+    assert 1 <= ps.SOULFRAG_TRANSMUTE_NUM <= 3, ps.SOULFRAG_TRANSMUTE_NUM
+    print("transmute pool OK")
+
+
+def test_fuse_uniform_is_deterministic():
+    """All three sharing a char AND a slot -> exactly that mirror, per the predict text."""
+    state = fresh_state()
+    char_id, actions = fusable(1)
+    uids = [a_fusable_mirror(state, char_id, actions[0])["uid"]
+            for _ in range(ps.SOULFRAG_TRANSMUTE_NUM)]
+    coins_before = int(state["currency"][str(ps.CURRENCY_COIN)])
+
+    new, gone, coins = ps.fuse_soulmirrors(state, uids)
+
+    row = __import__("battle").dd.row("item", int(new["iid"]))
+    assert int(row["_param3"]) == char_id, row
+    assert int(row["_action"]) == actions[0], row
+    assert int(row["_param2"]) == ps.SOULFRAG_TRANSMUTE_RARITY, row
+    assert coins == ps.soulfrag_transmute_cost()
+    assert int(state["currency"][str(ps.CURRENCY_COIN)]) == coins_before - coins
+    assert len(gone) == ps.SOULFRAG_TRANSMUTE_NUM
+
+    # Inputs consumed, output present -- net one mirror fewer than we started with.
+    bag = state["backpack"][str(ps.BP_STORAGE_SOULFRAG)]
+    assert all(sid not in bag for sid in gone)
+    assert any(e["uid"] == new["uid"] for e in bag.values())
+    assert len(bag) == 1
+
+    # The reward must NOT land on a slot the same push tombstones -- tombstones are
+    # written after the live entries, so a collision would silently delete it.
+    import json
+    slots = json.loads(ps.backpacks_all_json(
+        state, {ps.BP_STORAGE_SOULFRAG},
+        {ps.BP_STORAGE_SOULFRAG: gone}))["backpack_type"][
+            str(ps.BP_STORAGE_SOULFRAG)]["sid"]
+    assert slots[str(new["sid"])]["iid"] == int(new["iid"]), slots[str(new["sid"])]
+    for sid in gone:
+        assert slots[str(sid)]["iid"] == 0, slots[str(sid)]
+    print("uniform fuse OK -> item", new["iid"])
+
+
+def test_fuse_mixed_stays_legal():
+    """A mixed selection rolls, but never off the design form's legal list."""
+    import random
+    pool = ps.transmute_pool()[1]
+    chars = sorted(pool)[:3]
+    for seed in range(12):
+        state = fresh_state()
+        uids = [a_fusable_mirror(state, c, sorted(pool[c])[i % 3])["uid"]
+                for i, c in enumerate(chars)]
+        new, _gone, _coins = ps.fuse_soulmirrors(state, uids,
+                                                 rng=random.Random(seed))
+        row = __import__("battle").dd.row("item", int(new["iid"]))
+        char_id, action = int(row["_param3"]), int(row["_action"])
+        assert action in pool.get(char_id, ()), (seed, char_id, action)
+        assert int(row["_param2"]) == ps.SOULFRAG_TRANSMUTE_RARITY
+    print("mixed fuse stays legal OK")
+
+
+def test_fuse_refusals():
+    state = fresh_state()
+    char_id, actions = fusable(1)
+    good = [a_fusable_mirror(state, char_id, actions[0])["uid"]
+            for _ in range(ps.SOULFRAG_TRANSMUTE_NUM)]
+
+    cases = [
+        (good[:-1], ValueError),                  # too few
+        (good + [good[0]], ValueError),           # too many
+        ([good[0]] * ps.SOULFRAG_TRANSMUTE_NUM, ValueError),   # duplicates
+        (["nope"] + good[1:], LookupError),       # unknown uid
+    ]
+    for uids, exc in cases:
+        try:
+            ps.fuse_soulmirrors(state, uids)
+        except exc:
+            pass
+        else:
+            raise AssertionError(f"{uids} should have raised {exc.__name__}")
+
+    # Mixing tiers is refused (sfType 1 with sfType 2).
+    ex = a_fusable_mirror(state, *(lambda c, a: (c, a[0]))(*fusable(2)))
+    try:
+        ps.fuse_soulmirrors(state, good[:-1] + [ex["uid"]])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("mixing Break with EX Break should be refused")
+
+    # Too poor, and nothing is consumed on the way out.
+    held = len(state["backpack"][str(ps.BP_STORAGE_SOULFRAG)])
+    state["currency"][str(ps.CURRENCY_COIN)] = 0
+    try:
+        ps.fuse_soulmirrors(state, good)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("a fuse with no coins should be refused")
+    assert len(state["backpack"][str(ps.BP_STORAGE_SOULFRAG)]) == held
+    print("fuse refusals OK")
+
+
+def test_game_rule_advertises_the_count():
+    """get_SoulfragTransmuteDefaultNum reads the literal string key "4"."""
+    import json
+    d = json.loads(ps.game_rule_json())
+    assert d["soulfrag_transmute_num"]["4"] == ps.SOULFRAG_TRANSMUTE_NUM, \
+        d["soulfrag_transmute_num"]
+    assert d["soulfrag_transmute_cost"] == ps.soulfrag_transmute_cost()
+    print("game-rule sync OK")
+
+
 if __name__ == "__main__":
     test_refund_formula()
     test_dismantle()
     test_refusals()
     test_unequips()
+    test_transmute_pool()
+    test_fuse_uniform_is_deterministic()
+    test_fuse_mixed_stays_legal()
+    test_fuse_refusals()
+    test_game_rule_advertises_the_count()
     print("all OK")
