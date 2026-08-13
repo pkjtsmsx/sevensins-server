@@ -2155,7 +2155,8 @@ def handle(conn, addr):
                                 [ps.backpacks_all_json(
                                     state, {ps.BP_STORAGE_SOULFRAG,
                                             ps.BP_STORAGE_NORMAL},
-                                    {ps.BP_STORAGE_SOULFRAG: gone}),
+                                    {ps.BP_STORAGE_SOULFRAG: gone},
+                                    only={ps.BP_STORAGE_SOULFRAG: []}),
                                  ps.backpack_info_json(state)]))
                     elif (index == BACKPACK_SERVER
                           and cmd == BACKPACK_REQ_TRANSMUTE_SOULFRAG):
@@ -2185,7 +2186,8 @@ def handle(conn, addr):
                                 BACKPACK_CHANGE, [0],
                                 [ps.backpacks_all_json(
                                     state, {ps.BP_STORAGE_SOULFRAG},
-                                    {ps.BP_STORAGE_SOULFRAG: gone}),
+                                    {ps.BP_STORAGE_SOULFRAG: gone},
+                                    only={ps.BP_STORAGE_SOULFRAG: [new["sid"]]}),
                                  ps.backpack_info_json(state)]))
                             send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
                                                    [ps.currency_json(state)]))

@@ -11,7 +11,7 @@ import design_data as dd
 from .core import (
     CHAR_BUYCOUNT_MAX,
     CHAR_SORT_SLOTS,
-    DEFAULT_CHAR_SORT,
+    char_sort_list,
     EMPTY_SLOT,
     FORMATION_SLOTS,
     TUTORIAL_CASTS,
@@ -308,10 +308,8 @@ def set_char_sort(state, index, sort_type, down):
     `sort_list` is CHAR_SORT_SLOTS entries of "<type>_<down>"; `index` selects the slot
     (one per cast-list context).
     """
-    slots = state.setdefault(
-        "sort_list", [DEFAULT_CHAR_SORT] * CHAR_SORT_SLOTS)
-    while len(slots) < CHAR_SORT_SLOTS:
-        slots.append(DEFAULT_CHAR_SORT)
+    slots = char_sort_list(state)
+    state["sort_list"] = slots
     if 0 <= index < CHAR_SORT_SLOTS:
         slots[index] = f"{int(sort_type)}_{int(down)}"
     return slots

@@ -11,6 +11,7 @@ from .core import (
     BP_STORAGE_EQUIPMENT,
     BP_STORAGE_SOULFRAG,
     CURRENCY_COIN,
+    GAME_RULE_DECOMPOSE_MAGNIFICATION_KEYS,
     GAME_RULE_EMPTY_DICTS,
     GAME_RULE_MAGNIFICATION_KEYS,
     RUNE_ATTR_LEVEL,
@@ -713,7 +714,7 @@ def backpack_json(state, cbp_type):
 _BACKPACKS_DATA_KEY = "backpack_type"
 
 
-def backpacks_all_json(state, storages=None, removed=None):
+def backpacks_all_json(state, storages=None, removed=None, only=None):
     """strargs[0] for cmd 145 -- BackpacksData over `storages` (default: all).
 
     **cmd 145 MERGES; it never deletes by omission.** `HandleBackpackChagne` does
@@ -728,9 +729,21 @@ def backpacks_all_json(state, storages=None, removed=None):
     NullReference if it is null -- but `amount: 0` keeps it out of RefreshEquipAttribute.
 
     `removed` is `{storage int: [sid, ...]}`.
+
+    `only` is `{storage int: [sid, ...]}` -- emit just those LIVE slots of that storage
+    instead of all of them. Since 145 merges, resending untouched slots is pure work for
+    the client: every entry of an equipment storage costs a `ChangeEquip`, which does a
+    `FindIndex` over `_equipList` and then `SetEquipment`. Deleting one Soulmirror out of
+    26 meant 26 of those, 25 of which changed nothing. Narrow the push and the client
+    touches only what actually moved.
     """
-    inner = {sid: {"sid": dict(items)} for sid, items in state["backpack"].items()
-             if storages is None or int(sid) in storages}
+    inner = {}
+    for sid, items in state["backpack"].items():
+        if storages is not None and int(sid) not in storages:
+            continue
+        keep = (only or {}).get(int(sid))
+        inner[sid] = {"sid": dict(items) if keep is None else
+                      {k: v for k, v in items.items() if k in {str(s) for s in keep}}}
     for storage, sids in (removed or {}).items():
         bag = inner.setdefault(str(storage), {"sid": {}})["sid"]
         for sid in sids:
@@ -951,6 +964,9 @@ def game_rule_json():
               "soulfrag_enhance_dust_char_rarity_magnification",
               "soulfrag_enhance_item_char_rarity_magnification"):
         d[k] = ["1"] * 6                    # indexed by char rarity - 1
+    # INTs here, unlike the string decimals above -- see the note on the constant.
+    for k in GAME_RULE_DECOMPOSE_MAGNIFICATION_KEYS:
+        d[k] = [1] * 6
     d["soulfrag_enhance_item_dic"] = soulfrag_enhance_item_dic()
     d["soulfrag_enhance_show_item_id_dic"] = soulfrag_enhance_show_item_dic()
     # PlayerGeneral.get_SoulfragTransmuteDefaultNum dereferences this dictionary with no

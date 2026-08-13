@@ -9,8 +9,7 @@ import design_data as dd
 
 from .core import (
     CHAR_BUYCOUNT_MAX,
-    CHAR_SORT_SLOTS,
-    DEFAULT_CHAR_SORT,
+    char_sort_list,
     SHOWGIRL_OFFSET_DEFAULT,
     _char_data_json,
     _char_id_json,
@@ -295,6 +294,6 @@ def char_json(state):
         "helper": helper_uid(state),
         "book_rank": 0, "book_xp": 0,
         "orgArenaTeam": [],
-        "sort_list": state.get("sort_list") or [DEFAULT_CHAR_SORT] * CHAR_SORT_SLOTS,
+        "sort_list": char_sort_list(state),
         "act_collection": [],
     }, separators=(",", ":"))

@@ -265,6 +265,97 @@ def test_fuse_refusals():
     print("fuse refusals OK")
 
 
+def test_push_carries_only_what_changed():
+    """The 145 push must NOT resend untouched slots of an equipment storage.
+
+    Resending all of storage 3 to delete one mirror made the client run ChangeEquip
+    once per slot, and `RemoveEquipment` (0x18EE8A0) then looked the item up a SECOND
+    time in the per-type list from GetItemSpace and called `RemoveAt(Index)` with **no
+    -1 check**. After a mass update that lookup missed, RemoveAt(-1) threw
+    ArgumentOutOfRangeException, and the removal aborted half-done: the item was gone
+    from _equipList but its icon stayed on screen. Verified on device -- narrowing the
+    push to the tombstone alone made both the exception and the stuck icon disappear.
+    """
+    import json
+    state = fresh_state()
+    iid = a_mirror(4, 1)
+    keep = [ps.grant_soulmirror(state, iid)["uid"] for _ in range(3)]
+    doomed = ps.grant_soulmirror(state, iid)["uid"]
+    _reward, gone = ps.dismantle_soulmirrors(state, [doomed])
+
+    blob = json.loads(ps.backpacks_all_json(
+        state, {ps.BP_STORAGE_SOULFRAG, ps.BP_STORAGE_NORMAL},
+        {ps.BP_STORAGE_SOULFRAG: gone},
+        only={ps.BP_STORAGE_SOULFRAG: []}))["backpack_type"]
+
+    slots = blob[str(ps.BP_STORAGE_SOULFRAG)]["sid"]
+    assert set(slots) == {str(s) for s in gone}, slots
+    assert all(v["iid"] == 0 for v in slots.values()), slots
+    assert len(keep) == 3 and len(gone) == 1
+
+    # A fuse pushes the tombstones PLUS the one new mirror, and nothing else.
+    state = fresh_state()
+    char_id, actions = fusable(1)
+    uids = [a_fusable_mirror(state, char_id, actions[0])["uid"]
+            for _ in range(ps.SOULFRAG_TRANSMUTE_NUM)]
+    a_fusable_mirror(state, char_id, actions[0])          # a bystander
+    new, gone, _coins = ps.fuse_soulmirrors(state, uids)
+    slots = json.loads(ps.backpacks_all_json(
+        state, {ps.BP_STORAGE_SOULFRAG},
+        {ps.BP_STORAGE_SOULFRAG: gone},
+        only={ps.BP_STORAGE_SOULFRAG: [new["sid"]]}))[
+            "backpack_type"][str(ps.BP_STORAGE_SOULFRAG)]["sid"]
+    assert set(slots) == {str(s) for s in gone} | {str(new["sid"])}, slots
+    assert slots[str(new["sid"])]["iid"] == int(new["iid"])
+    print("145 push carries only the changed slots OK")
+
+
+def test_game_rule_carries_the_unguarded_keys():
+    """Keys the client dereferences BEFORE any null/ContainsKey guard.
+
+    `Formula.GetItemCountDecomposeSoulFrag` (0x18F78EC) touches SoulfragDecomposeItemDic
+    with no null check at all, so omitting it is a NullReferenceException out of
+    PanelSoulFrag.GetBrowsableDecomposeItemList the moment a mirror is selected on the
+    DISMANTLE tab -- seen on device. The char-rarity multipliers are the same pattern one
+    step further in, reached once the dictionary is non-empty.
+    """
+    import json
+    d = json.loads(ps.game_rule_json())
+
+    assert "soulfrag_decompose_item_dic" in d, sorted(d)
+    assert isinstance(d["soulfrag_decompose_item_dic"], dict)
+
+    for key in ps.GAME_RULE_DECOMPOSE_MAGNIFICATION_KEYS:
+        vals = d.get(key)
+        assert isinstance(vals, list), (key, vals)
+        # Indexed by charRarity - 1, and the function bails unless that is 0..4.
+        assert len(vals) >= 5, (key, len(vals))
+        # **List<int>, not the List<string> decimals the enhance tables use** -- read
+        # with a 4-byte stride and then tested `< 1`.
+        assert all(isinstance(v, int) and not isinstance(v, bool) and v >= 1
+                   for v in vals), (key, vals)
+
+    # The enhance side really is strings; keeping both shapes straight is the point.
+    for key in ("soulfrag_enhance_coin_char_rarity_magnification",
+                "soulfrag_enhance_dust_char_rarity_magnification",
+                "soulfrag_enhance_item_char_rarity_magnification"):
+        assert all(isinstance(v, str) for v in d[key]), (key, d[key])
+    print("game-rule null-guard keys OK")
+
+
+def test_char_sort_list_is_long_enough():
+    """PanelSoulFrag.ResetSoulShardComparer indexes sort_list at 14 for the FUSE tab."""
+    st = fresh_state()
+    assert len(ps.char_sort_list(st)) >= 15, len(ps.char_sort_list(st))
+    # An account saved before the count went up must be padded on READ, or the login
+    # sync keeps publishing the short list and only new accounts get fixed.
+    st["sort_list"] = ["0_1"] * 14
+    assert len(ps.char_sort_list(st)) == ps.CHAR_SORT_SLOTS >= 15
+    import json
+    assert len(json.loads(ps.char_json(st))["sort_list"]) >= 15
+    print("sort_list padding OK")
+
+
 def test_game_rule_advertises_the_count():
     """get_SoulfragTransmuteDefaultNum reads the literal string key "4"."""
     import json
@@ -284,5 +375,8 @@ if __name__ == "__main__":
     test_fuse_uniform_is_deterministic()
     test_fuse_mixed_stays_legal()
     test_fuse_refusals()
+    test_push_carries_only_what_changed()
+    test_game_rule_carries_the_unguarded_keys()
+    test_char_sort_list_is_long_enough()
     test_game_rule_advertises_the_count()
     print("all OK")

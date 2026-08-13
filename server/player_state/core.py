@@ -57,7 +57,16 @@ EMPTY_SLOT = ""
 # _panelActionType (0->0, 7->1, 1->2, 2->3, 3->4, 4->5, 10->8, 9/16/17->13) and reads
 # [0] as the sort type and [1] as the direction -- so the list must have at least
 # FOURTEEN entries or the formation screen dies in that getter before it ever draws.
-CHAR_SORT_SLOTS = 14
+#
+# **FIFTEEN, not fourteen: the cast list is not the only reader.**
+# `PanelSoulFrag.ResetSoulShardComparer` (0x1638D78) indexes the SAME list by its own
+# _panelActionType -- case 0 -> 10, case 5 -> 11, case 1 -> 12 and **case 6 -> index
+# 14**, each behind a size check that throws. Case 6 is the Soulmirror FUSE tab, so at
+# 14 entries tapping FUSE threw ArgumentOutOfRangeException out of
+# OnSoulFragTransmuteIn and the panel silently kept showing the upgrade view -- the tab
+# highlighted, nothing else changed. Fourteen was right for every screen that had been
+# exercised and wrong for the one that had not.
+CHAR_SORT_SLOTS = 15
 CHAR_BUYCOUNT_MAX = 50      # CharDefine.CharBuycountMax -> capacity 100 + 5*50 = 350
 DEFAULT_CHAR_SORT = "0_1"
 
@@ -541,6 +550,21 @@ def char_star(rarity):
 # state other than 0 or 3 is forced back to 0 and the offsets are discarded. Our patched
 # libil2cpp returns true, so the state we send is kept -- see [[sevensins-break-skins]].
 SHOWGIRL_OFFSET_DEFAULT = ""
+
+
+def char_sort_list(state):
+    """The `sort_list` to publish, padded to CHAR_SORT_SLOTS.
+
+    **Padding on READ is the point, not just on write.** Accounts created before a slot
+    count went up carry a shorter list on disk, and the login sync would happily send
+    that stale length -- so raising CHAR_SORT_SLOTS alone fixes only brand-new accounts
+    and leaves every existing save crashing the panel that needed the extra slot. This
+    is cheap and idempotent; call it anywhere the list goes out or gets written.
+    """
+    slots = list(state.get("sort_list") or [])
+    if len(slots) < CHAR_SORT_SLOTS:
+        slots += [DEFAULT_CHAR_SORT] * (CHAR_SORT_SLOTS - len(slots))
+    return slots
 
 
 def helper_uid(state):
@@ -1167,6 +1191,30 @@ GAME_RULE_EMPTY_DICTS = (
     "special_plus_up_material",
     "super_rank_up_material",
     "super_rank_up_cost",
+    # **Omitting this one is a NullReferenceException, not an empty preview.**
+    # `Formula.GetItemCountDecomposeSoulFrag` (0x18F78EC) dereferences
+    # SoulfragDecomposeItemDic BEFORE any ContainsKey guard, so a key we never sent
+    # left it null and selecting a mirror on the DISMANTLE tab threw out of
+    # PanelSoulFrag.GetBrowsableDecomposeItemList -> UpdateSelectRelateInfo. Sending
+    # `{}` is both safe and correct: the very next line is
+    # `if (!dic.ContainsKey(rarity)) return empty`, so an empty dictionary short-
+    # circuits to "no bonus items", which is exactly what our refund grants.
+    "soulfrag_decompose_item_dic",
+)
+
+# Char-rarity multipliers on the DISMANTLE payout. **These are List<int>, not the
+# List<string> decimals the *enhance* magnifications use** -- GetItemCountDecomposeSoulFrag
+# indexes them with a 4-byte stride and then tests `< 1`, so a "1" string would be read
+# as garbage. Indexed by charRarity - 1, and the function bails unless that is 0..4, so
+# five entries are the minimum; six matches the enhance lists.
+#
+# The first is only reached once soulfrag_decompose_item_dic is non-empty (the dic's
+# ContainsKey returns first today), but it is dereferenced with NO null guard the moment
+# it is -- so it ships now rather than becoming the next crash. The ultrabreak one is
+# the sfType-3 path, which does guard, but there is no reason to treat it differently.
+GAME_RULE_DECOMPOSE_MAGNIFICATION_KEYS = (
+    "soulfrag_decompose_item_char_rarity_magnification",
+    "soulfrag_ultrabreak_decompose_item_char_rarity_magnification",
 )
 
 
