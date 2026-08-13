@@ -5,6 +5,7 @@ Split out of the former monolithic core.py; depends only on .core.
 
 
 import json
+import re
 import battle as bt
 
 from .core import (
@@ -13,8 +14,105 @@ from .core import (
     SP_QUEST_COMPLETE,
     UNSUPPORTED_QUEST_TYPES,
     _quest_is_sp,
+    add_char,
     grant_reward,
 )
+
+
+# ---- character rewards ("boxes" that are really casts) ---------------------
+#
+# **A quest whose `_item_id` is `_action 2` pays a CHARACTER, not a bag item.** Quest
+# 31015 pays item 930 "★4勇進之隸魔 卡蓮" -- `_class 2`, `_action 2`, `_param1 2930` --
+# and dropping that in the backpack is wrong twice over:
+#
+#   * `PlayerBackpack.GetItemSpace` (0x18EE554) has no case for `_action 2`, so
+#     AddStorage files it in `_storageList` and NO category list. UIPrepareInventory
+#     renders one category list per tab, so the item is INVISIBLE in game -- it cannot
+#     be seen, tapped or opened. An item the client cannot file was never meant to be
+#     held.
+#   * `_param1` resolves to nothing in the pack (all 55 forms checked), because box
+#     contents were live-ops server data -- which is exactly why the client has to ASK
+#     for them (Backpack cmd 129).
+#
+# Live footage settles what should happen: claiming plays the single-pull character
+# reveal and the cast is granted. So the item is a DISPLAY row for the reward popup and
+# the character is the real payload.
+#
+# **`_action 1` is the real character item and its `_param1` IS the char id** -- 709 of
+# the 710 such rows point at a genuine `char` row. `_action 2` is an indirection whose
+# `_param1` (2930) resolves to nothing we hold, but the two rows carry the IDENTICAL
+# Chinese `_itemName`, so the box maps onto the character item by name alone -- no fuzzy
+# matching, no guessing which of the duplicate cast rows is playable:
+#
+#     930  action 2  param1 2930   CN '★4勇進之隸魔 卡蓮'  EN '★4 Caillen of Braveheart'
+#  110984  action 1  param1 10981  CN '★4勇進之隸魔 卡蓮'  EN '★4 Braveheart Caillen'
+#
+# Match on the CHINESE name: the EN strings are assembled differently ("Caillen of
+# Braveheart" vs "Braveheart Caillen") and would not join up. Live footage shows the
+# reveal card reading "★4 Braveheart Caillen" -- item 110984's name, NOT 930's -- so the
+# original server paid the character item, and the quest row's own `_item_id` is just
+# the design-side stand-in. We return the resolved item id so the reward popup shows the
+# same card the real game did.
+#
+# Name-matching by title+name against the `char` form was the first approach and is
+# WRONG: Caillen has the playable 10981 plus rarity-5 AVG rows (166046) and rarity-1
+# duplicates (3000891, 4000002, ...) sharing the title, and any tie-break over those is
+# a guess. `_param1` is the answer the data already carries.
+_CHAR_ITEM_ACTION = 1
+_CHAR_BOX_ACTION = 2
+_STAR_PREFIX = re.compile(r"^★(\d+)")
+
+
+def _char_item_index():
+    """{CN item name: item id} over every `_action 1` item that names a real cast."""
+    idx = {}
+    for iid, row in (bt.dd.rows("item") or {}).items():
+        if row.get("_action") != _CHAR_ITEM_ACTION:
+            continue
+        if not bt.dd.row("char", row.get("_param1")):
+            continue
+        name = (row.get("_itemName") or "").strip()
+        if name:
+            idx.setdefault(name, int(iid))
+    return idx
+
+
+_char_item_index_cache = None
+
+
+def char_reward_of(item_id):
+    """-> (char id, star, display item id) if this reward is a cast, else None.
+
+    Accepts either the character item itself or the box that shares its name. `star` is
+    the ★N the item is sold as (110984/5/6 are the same cast at ★4/★5/★6), which is what
+    the cast should be granted at -- NOT the char row's own `_rarity`.
+    """
+    global _char_item_index_cache
+    row = bt.dd.row("item", int(item_id)) or {}
+    action = row.get("_action")
+    if action not in (_CHAR_ITEM_ACTION, _CHAR_BOX_ACTION):
+        return None
+    name = (row.get("_itemName") or "").strip()
+
+    if action == _CHAR_BOX_ACTION:
+        if _char_item_index_cache is None:
+            _char_item_index_cache = _char_item_index()
+        resolved = _char_item_index_cache.get(name)
+        if resolved is None:
+            return None
+        return char_reward_of(resolved)
+
+    char_id = row.get("_param1")
+    if not bt.dd.row("char", char_id):
+        return None
+    m = _STAR_PREFIX.match(name)
+    if not m:
+        # 10 of the 710 carry no ★N; fall back to the cast's own rarity rather than
+        # dropping the reward on the floor.
+        star = int((bt.dd.row("char", char_id) or {}).get("_rarity") or 1)
+    else:
+        star = int(m.group(1))
+    return int(char_id), star, int(item_id)
 
 
 
@@ -59,9 +157,12 @@ def complete_quests(state, quest_ids):
     ids; only that turns into a real completion. Doing it server-side at stage-clear
     time skips the claim the newbie tutorial is waiting on.
 
-    Returns [(quest_id, item_id, item_cnt), ...] for the reward popup (cmd 513).
+    Returns ([(quest_id, item_id, item_cnt), ...], [new char uid, ...]) -- the first for
+    the reward popup (cmd 513), the second so the caller can push Char `create` (529),
+    which is what actually puts the cast in charDic and plays the reveal.
     """
     rewards = []
+    new_chars = []
     rows = bt.dd.rows("quest")
     for qid in quest_ids:
         row = rows.get(int(qid))
@@ -80,12 +181,24 @@ def complete_quests(state, quest_ids):
         else:
             state["quests"].setdefault(key, 1)
         item_id, cnt = row.get("_item_id") or 0, row.get("_item_cnt") or 0
-        if item_id and cnt:
+        char = char_reward_of(item_id) if item_id else None
+        if char:
+            # **A cast reward is granted, never bagged.** The design row's item is a
+            # display stand-in the client cannot even file into an inventory tab; the
+            # payload is the character. Report the RESOLVED item id so the popup shows
+            # the card the live game showed.
+            char_id, star, display_item = char
+            for _ in range(max(1, int(cnt))):
+                new_chars.append(add_char(state, char_id, star=star))
+            rewards.append((int(qid), display_item, cnt))
+        elif item_id and cnt:
             # routed by _action -- 21001 pays 10000x item 2, which is Mira, not a
             # 10000-deep backpack stack
             grant_reward(state, item_id, cnt)
-        rewards.append((int(qid), item_id, cnt))
-    return rewards
+            rewards.append((int(qid), item_id, cnt))
+        else:
+            rewards.append((int(qid), item_id, cnt))
+    return rewards, new_chars
 
 
 def complete_stage_quests(state, stage_id):

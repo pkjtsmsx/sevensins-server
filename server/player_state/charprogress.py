@@ -684,3 +684,17 @@ def char_data_json(state, uid):
     if not entry:
         return "{}"
     return json.dumps(_char_data_json(uid, entry), separators=(",", ":"))
+
+
+def char_create_json(state, uids):
+    """strargs[0] for Char `create` (529) -- `Dictionary<uid, CharData>`.
+
+    `receivedCreateChar` (0x16992F0) walks the dictionary and AddChar's each entry, so
+    the KEY is the roster uid and the value is the same CharData shape every other
+    single-cast reply uses. Unknown uids are skipped rather than emitting a null the
+    deserialiser would choke on.
+    """
+    return json.dumps(
+        {uid: _char_data_json(uid, state["roster"][uid])
+         for uid in uids if uid in state["roster"]},
+        separators=(",", ":"))

@@ -323,6 +323,14 @@ JSAGENT_ULTRA_TRANSCEND = 290
 # with intargs [index + 1, support, 1] and the five slot uids as strargs; the reply
 # is receivedFormation at cmd 530, which does formations[intargs[0] - 1] = <the
 # FormationData in strargs[0]> and, when intargs[1] == 1, pops confirm message 19.
+# CharRpcClientCmd.create -- "you have received these casts". Server-initiated: there
+# is no matching request. `receivedCreateChar` (0x16992F0) deserialises strargs[0] as a
+# **Dictionary<uid, CharData>**, AddChar's every entry into charDic, rebuilds the group
+# record and dispatches CharEvent 4. It is both the real grant and the trigger for the
+# single-pull reveal, and it is the only way a cast can arrive outside gacha -- the
+# quest reward reply (513) builds an ItemPopupInfo whose CharDatas it never sets, so
+# that path can only ever show an item card.
+CHAR_RPLY_CREATE = 529
 CHAR_REQ_FORMATION, CHAR_RPLY_FORMATION = 274, 530
 # CharRpcServerCmd.sync_id_data / CharRpcClientCmd.sync_id_data -- the Soulpedia.
 CHAR_REQ_SYNC_ID_DATA, CHAR_RPLY_SYNC_ID_DATA = 310, 567
@@ -1418,7 +1426,7 @@ def handle(conn, addr):
                                                    [ps.energy_json(state)]))
                     elif index == PLAYER_QUEST_SERVER and cmd == QUEST_REQ_COMPLETED:
                         # intargs = the quest ids being claimed.
-                        rewards = ps.complete_quests(state, intargs)
+                        rewards, new_chars = ps.complete_quests(state, intargs)
                         ps.save(state)
                         log(f"    -> quests claimed: {rewards}")
                         # Claiming the last newbie quest ends the tutorial -> revert the
@@ -1428,6 +1436,21 @@ def handle(conn, addr):
                             log("    -> tutorial complete: starter casts reset to base")
                             send(MSG_RPC, uint_msg(0x771EA36E, 528, [1, 1],
                                                    [ps.char_json(state)]))
+                        # **A cast reward arrives through Char `create` (529), not the
+                        # reward popup.** receivedCreateChar (0x16992F0) deserialises
+                        # strargs[0] as Dictionary<uid, CharData>, AddChar's each one
+                        # into charDic and dispatches CharEvent 4 -- that is what both
+                        # grants the character and drives the single-pull reveal the
+                        # live game plays on claim. The quest reply (513) only ever
+                        # builds an ItemPopupInfo, so it cannot deliver a cast: its
+                        # CharDatas field is never set on that path.
+                        # Sent BEFORE the reward reply so the reveal leads and the item
+                        # popup follows, which is the order the footage shows.
+                        if new_chars:
+                            log(f"    -> cast reward: granted {new_chars}")
+                            send(MSG_RPC, uint_msg(
+                                PLAYER_CHAR, CHAR_RPLY_CREATE, [],
+                                [ps.char_create_json(state, new_chars)]))
                         triples = [v for r in rewards for v in r]
                         send(MSG_RPC, uint_msg(PLAYER_QUEST, QUEST_RPLY_REWARD,
                                                triples, []))
