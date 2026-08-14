@@ -663,19 +663,26 @@ def fuse_soulmirrors(state, uids, rng=None):
     return new, removed, coins
 
 
-def roll_rune(state, item_id, slot, level=0, enhance=0, rng=None):
+def roll_rune(state, item_id, slot, level=0, enhance=0, rng=None, reserved=()):
     """Roll a starshard WITHOUT storing it -> an entry with its sid/uid reserved.
 
     The Starshard Temple shows the player two candidates and keeps only the one they
     pick, so the attributes have to be rolled up front (the panel prints them) while the
     grant waits on the selection. Rolling again at selection time would hand over a
     different shard from the one on screen.
+
+    **`reserved` must carry the candidates already rolled in this batch.** Nothing is in
+    the bag yet, so without it every candidate reserves the SAME sid and uid -- and the
+    client keys BackpackItemData by those, so a panel showing two of them is showing one
+    id twice.
     """
     bag = state["backpack"].setdefault(str(BP_STORAGE_EQUIPMENT), {})
-    sid = max((int(k) for k in bag), default=0) + 1
-    n = len(bag) + 1
+    taken_sids = {int(k) for k in bag} | {int(e["sid"]) for e in reserved if e.get("sid")}
+    taken_uids = {e.get("uid") for e in bag.values()} | {e.get("uid") for e in reserved}
+    sid = max(taken_sids, default=0) + 1
+    n = len(bag) + len(reserved) + 1
     uid = rune_uid(state, n)
-    while any(e.get("uid") == uid for e in bag.values()):
+    while uid in taken_uids:
         n += 1
         uid = rune_uid(state, n)
     entry = make_rune(state, item_id, slot, level, enhance, rng)

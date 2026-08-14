@@ -549,6 +549,28 @@ def test_starshard_temple_drops():
     check("Drop Info matches what every stage actually rolls", not wrong,
           str(wrong[:2]))
 
+    # ---- candidates must be DISTINCT records ------------------------------
+    # The client keys BackpackItemData by sid/uid. Rolling both against a bag that has
+    # neither stored yet gave them the SAME sid and uid, so the panel was handed one id
+    # twice -- which is what crashed Claim.
+    import player_state as _ps
+    from player_state.core import _default as _mk, _seed_roster as _seed
+    st4 = _mk(1000001)
+    _seed(st4)
+    rolled = []
+    for iid, slot in ((205113, 1), (202213, 2)):
+        rolled.append(_ps.roll_rune(st4, iid, slot, reserved=rolled))
+    check("rolled candidates get distinct sids",
+          len({e["sid"] for e in rolled}) == len(rolled), str([e["sid"] for e in rolled]))
+    check("and distinct uids",
+          len({e["uid"] for e in rolled}) == len(rolled), str([e["uid"] for e in rolled]))
+    check("none of them is in the bag yet",
+          not st4["backpack"].get("2"), str(st4["backpack"].get("2")))
+    _ps.store_rune(st4, rolled[1])
+    check("storing one keeps only that one",
+          [e["iid"] for e in st4["backpack"]["2"].values()] == [rolled[1]["iid"]],
+          str(st4["backpack"]["2"]))
+
     # An ordinary stage must be untouched by any of this.
     check("a main-story stage drops no shards", bt.starshard_temple_drops(1101) == [])
     check("and still previews coins",

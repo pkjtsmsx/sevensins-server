@@ -823,7 +823,8 @@ def battle_end_reward(battle, state):
                 # keeps ONE. Roll now (the panel prints the attributes) and hold the
                 # grant until cmd 508 says which.
                 if rune_pick is not None:
-                    e = ps.roll_rune(state, d.item_id, d.slot, d.level, d.enhance)
+                    e = ps.roll_rune(state, d.item_id, d.slot, d.level, d.enhance,
+                                     reserved=rune_pick)
                     rune_pick.append(e)
                     continue
                 r = ps.grant_rune(state, d.item_id, d.slot, d.level, d.enhance)
@@ -873,8 +874,16 @@ def battle_end_reward(battle, state):
         if rune_pick:
             state["_rune_pick"] = {"stage": battle.stage_id,
                                    "cands": [dict(e) for e in rune_pick]}
+            # **intargs[0] is CurRuneIndex and it is 1-BASED.** OnPanelEnable computes
+            # `_curSelectRune = base[count-1] + CurRuneIndex - 1`, where base is 1/2/4
+            # for 1/2/3 candidates (dword_37037B4). Sending 0 with two candidates gives
+            # slot 1 -- the SINGLE-rune layout's slot, which is not active in a two-rune
+            # panel: the countdown then writes to a dead label (the button reads "(-s)")
+            # and Claim operates on a slot that is not there. 1 selects the first real
+            # candidate. The index the client sends BACK is 0-based over the candidates
+            # (TransIdx, dword_37037A0), which is what the 508 handler indexes with.
             msgs.append(battle_msg(
-                bt.CMD_RUNE_LIST, [0],
+                bt.CMD_RUNE_LIST, [1],
                 [json.dumps(rune_pick, separators=(",", ":")),
                  json.dumps([0] * len(rune_pick), separators=(",", ":"))]))
             log(f"    -> starshard select: {len(rune_pick)} candidates "
@@ -1126,11 +1135,21 @@ def battle_replies(battle, cmd, intargs, strargs, state=None, uid=""):
         held = (state or {}).get("_rune_pick") or {}
         cands = held.get("cands") or []
         if not cands:
-            log(f"    -> rune select {pick} with no candidates held")
-            return [battle_msg(bt.CMD_SELECT_RUNE, [0, 0], [])]
+            # **508 ARRIVES TWICE.** The panel's countdown auto-fires
+            # ServerRPCRuneSelect on expiry (GetRuneTimer's MoveNext, 0x16BB658), so a
+            # manual Claim followed by the timer running out sends it a second time.
+            # Answering [0, 0] made the panel render item id 0. Replay the same grant
+            # instead -- idempotent, and it keeps the reply honest.
+            last = (state or {}).get("_rune_last")
+            if not last:
+                log(f"    -> rune select {pick}: nothing held, ignoring")
+                return []
+            log(f"    -> rune select {pick}: repeat, re-answering item {last[0]}")
+            return [battle_msg(bt.CMD_SELECT_RUNE, [int(last[0]), int(last[1])], [])]
         entry = cands[pick] if 0 <= pick < len(cands) else cands[0]
         ps.store_rune(state, entry)
         state.pop("_rune_pick", None)
+        state["_rune_last"] = [int(entry["iid"]), 1]
         ps.save(state)
         log(f"    -> starshard kept: item {entry['iid']} uid {entry['uid']} "
             f"(of {len(cands)} offered)")
