@@ -688,8 +688,21 @@ def test_auto_play_sweep():
     import titan_server as _ts
     from player_state.core import _default as _mk, _seed_roster as _seed
 
+    # **Every helper the auto-play dispatcher branch names must exist.** The tests
+    # below call the payout functions directly, so a missing name in the branch itself
+    # (auto_sync_msg went missing in a refactor) sailed past them and only showed up as
+    # a NameError killing the connection in game.
+    for fn in ("auto_sync_msg", "stage_sync_msg", "autorun_settle", "autorun_payout"):
+        check(f"titan_server.{fn} exists", callable(getattr(_ts, fn, None)))
+    for fn in ("autorun_start", "autorun_cancel", "autorun_due",
+               "autorun_runs_elapsed", "stage_json", "record_stage_turns"):
+        check(f"player_state.{fn} exists", callable(getattr(_ps, fn, None)))
+
     st = _mk(1000001)
     _seed(st)
+    # Both sync builders must actually render, not just resolve.
+    check("auto_sync_msg renders", len(_ts.auto_sync_msg(st)) > 0)
+    check("stage_sync_msg renders", len(_ts.stage_sync_msg(st)) > 0)
     _ps.grant_reward(st, 19, 50)          # Transcend Corridor passes
     _ps.grant_reward(st, 30064, 20)       # Quick Battle Coupons
 

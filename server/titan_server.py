@@ -373,6 +373,17 @@ def autorun_settle(state, now):
                        [stage_id, count], [])] + msgs
 
 
+def auto_sync_msg(st):
+    """Push StageSyncData through **HandleAutoSync (cmd 24)**, not the general sync.
+
+    Both carry the same payload, but only 24 dispatches StageEvent 1 -- the event the
+    auto-play UI redraws on. Sending the state via cmd 17 alone left the client holding
+    a perfectly good running sweep with nothing telling it to draw, so the panel closed
+    and the sweep looked like it had finished instantly.
+    """
+    return uint64_msg(PLAYER_STAGE, STAGE_RPLY_AUTO_SYNC, [], [ps.stage_json(st)])
+
+
 def stage_sync_msg(st):
     """Re-push StageSyncData. HandleSyncReplyCmd assigns tempJsonStr outright on
     chunk 1 and replaces PlayerStage.SyncData wholesale, so this is idempotent --
