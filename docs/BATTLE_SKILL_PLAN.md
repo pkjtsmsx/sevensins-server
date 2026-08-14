@@ -163,4 +163,30 @@ Phases 0–3 are the bulk of the value; 4–5 are a lower-intensity tail toward 
   without `when` stays deferred/unfired.
 - Wire: status icons ride `DamageInfo.status` = `[[order, skillID, round], …]` where skillID
   is a `_type==6` STATUS skill (see `status_icons.json`, `build_status_icons.py`).
+- **HOW MANY UNITS A SKILL HITS IS DESIGN DATA, NOT PROSE.** The row states it, and the
+  skill panel already renders it as the "Range 2 enemies" line:
+
+      DesignSkillRow.GetTargetGroup()  =  _target / 100      (RVA 0x1AACCA4)
+      DesignSkillRow.GetTargetRange()  =  _target % 100      (RVA 0x1AACCC4)
+      the panel label                  =  text 23000 + _target
+
+  group 0 = enemies, 1 = allies. Range: 1 → 1, **2 → ALL**, 6 → 2, 7 → 3, 8 → 4,
+  9–12 → 1–4 RANDOM, 13/14 → highest/lowest HP, 15/16 → DEF, 17/18 → ATK, 19 → SPD.
+
+  Do not try to read the count out of the description — it cannot be done. Phantom Star
+  Ring III (2081113) reads "inflicts Confuse on the target" while its row says 2
+  enemies. By this field 5681 enemy-group skills are multi-target (2454 at 2, 1998 at 3,
+  831 at ALL); before reading it, 309 were spreading and everything else hit one unit,
+  `complete` skills included. `Ctx.targets()` prefers the row whenever the parsed token
+  is the singular default, and leaves an explicit `all_enemies`/`self`/`highest_hp_enemy`
+  alone as the more specific answer.
+
+  **Ally-group ranges (`_target` 1xx) are still prose-driven** — heals and buffs on
+  "3 allies" have the same gap and nobody has reported it yet.
+
+- The client holds NO mechanics: it draws whatever `DamageInfo` rows arrive and asks no
+  questions. It does hold all the DESIGN data (skill ranges/CDs/text, char stats, stage
+  layout, item routing), which is why a panel can show the right number over a wrong
+  outcome. When in-game display and behaviour disagree, suspect a design field the
+  server has not read yet before suspecting the client.
 - See memory `sevensins-battle` Steps 1–6 for the full reverse-engineering trail.
