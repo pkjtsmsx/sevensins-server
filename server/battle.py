@@ -888,13 +888,25 @@ class Battle:
                             ch["target"].dmg_taken += ch["damage"]
                     self._apply_gauge_cd(c_out)
         elif attacker and target:
-            # Fallback: the original single-hit simple-damage path.
-            damage = self.damage(attacker, target, skill_id)
-            target.hp = max(0, target.hp - damage)
-            self.damage_sum += damage
-            attacker.dmg_done += damage
-            target.dmg_taken += damage
-            rows.append(dmg_info(target, damage))
+            # Fallback: the simple-damage path, for a skill whose parse is incomplete.
+            # **It still has to respect AoE.** This branch used to hit exactly one unit
+            # no matter what the skill said, so every AoE whose parse fell short landed
+            # on a single enemy -- 226 skills whose record had already identified the
+            # AoE, against 114 that reached the effect engine and worked.
+            victims = [target]
+            if fx.aoe_damage(skill_id):
+                live = [u for u in self.units.values()
+                        if u.team != attacker.team and u.alive]
+                victims = live or [target]
+            for victim in victims:
+                # Rolled per target: `damage` reads the victim's own DEF, so a shared
+                # number would over-hit the tanky and under-hit the frail.
+                damage = self.damage(attacker, victim, skill_id)
+                victim.hp = max(0, victim.hp - damage)
+                self.damage_sum += damage
+                attacker.dmg_done += damage
+                victim.dmg_taken += damage
+                rows.append(dmg_info(victim, damage))
         if not rows and target:
             rows.append(dmg_info(target, 0))    # never send an empty combo
         # Attach status icons to the lead DamageInfo. Each entry is [order, skillID,

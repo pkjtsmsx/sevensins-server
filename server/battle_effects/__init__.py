@@ -25,6 +25,7 @@ from .core import (                                                     # noqa: 
     flat_bonus,
     grant_immunity,
     has_flag,
+    aoe_damage,
     is_complete,
     is_immobilized,
     resolve_targets,

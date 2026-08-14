@@ -285,9 +285,56 @@ def main():
     test_forced_targeting()
     test_battle_start_and_counter()
     test_full_battles()
+    test_fallback_aoe()
     print(f"\n{'ALL PASSED' if not _fail else f'{_fail} CHECK(S) FAILED'}")
     sys.exit(1 if _fail else 0)
 
+
+
+def test_fallback_aoe():
+    """An AoE skill must spread even when its parse is INCOMPLETE.
+
+    Only `complete` skills reach the effect engine; everything else falls to Battle's
+    simple damage path, which hit exactly one unit no matter what the description said.
+    That silently single-targeted 226 skills whose parse had already identified the AoE
+    (against 114 that worked), which is why "AoE skills all seem to hit one target".
+    """
+    AOE = 100001611     # incomplete: "Deals 80% ATK as damage to all enemies 3 times"
+    SINGLE = 2009111    # complete: opens single-target, "all enemies" only later on
+
+    check("the AoE case really is an incomplete parse", not fx.is_complete(AOE))
+    check("and aoe_damage still sees the AoE", fx.aoe_damage(AOE))
+    # The FIRST damage op is what the fallback models. A skill that opens single-target
+    # and adds an AoE clause later must NOT splash, or every follow-up hits the team.
+    check("a single-target opener is not treated as AoE", not fx.aoe_damage(SINGLE))
+    check("an unknown skill id is not AoE", not fx.aoe_damage(999999999))
+
+    b = bt.Battle(1101, [{"id": 10001}, {"id": 10011}], team_level=60)
+    foes = [u for u in b.units.values() if u.team != bt.TEAM_PLAYER and u.alive]
+    me = [u for u in b.units.values() if u.team == bt.TEAM_PLAYER][0]
+    check("the test stage fields more than one enemy", len(foes) > 1, str(len(foes)))
+
+    before = {u.order: u.hp for u in foes}
+    out = json.loads(b.attack_cmd_json(me.order, foes[0].order, AOE))
+    rows = out["combo"][0]["data"][0]
+    hurt = [u.order for u in foes if u.hp < before[u.order]]
+    check("every enemy takes damage", len(hurt) == len(foes), str(hurt))
+    # The client draws one number per DamageInfo, so the wire has to carry them all.
+    check("one DamageInfo row per struck enemy", len(rows) == len(foes), str(len(rows)))
+    check("each row names its own unit",
+          sorted(r["c"] for r in rows) == sorted(u.order for u in foes), str(rows))
+    # damage() reads the victim's own DEF, so rolling once and reusing it would
+    # over-hit the tanky and under-hit the frail.
+    check("damage is rolled per target, not shared",
+          all(r["dmg"] < 0 for r in rows), str([r["dmg"] for r in rows]))
+
+    b2 = bt.Battle(1101, [{"id": 10001}, {"id": 10011}], team_level=60)
+    foes2 = [u for u in b2.units.values() if u.team != bt.TEAM_PLAYER and u.alive]
+    me2 = [u for u in b2.units.values() if u.team == bt.TEAM_PLAYER][0]
+    before2 = {u.order: u.hp for u in foes2}
+    json.loads(b2.attack_cmd_json(me2.order, foes2[0].order, SINGLE))
+    hurt2 = [u.order for u in foes2 if u.hp < before2[u.order]]
+    check("a single-target skill still hits exactly one", len(hurt2) == 1, str(hurt2))
 
 if __name__ == "__main__":
     main()

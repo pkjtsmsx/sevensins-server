@@ -71,6 +71,29 @@ def is_complete(skill_id):
     return bool(rec and rec.get("complete"))
 
 
+def aoe_damage(skill_id):
+    """True if this skill's FIRST damage op strikes every enemy.
+
+    Deliberately readable from an INCOMPLETE record. Only `complete` skills go through
+    the effect engine; everything else falls to Battle's simple single-hit path, which
+    could not spread damage however plainly the description said "to all enemies". That
+    is 226 skills whose parse already found the AoE and got it thrown away, against 114
+    that work -- so the fallback consulting just this one field roughly triples AoE
+    coverage without trusting the rest of a parse we know is partial.
+
+    The FIRST damage op is the one to read: a skill often opens with an AoE hit and then
+    adds a single-target follow-up ("...then deals 200% ATK to the enemy with the
+    highest HP"), and the fallback models only that opening hit. Taking any-op-is-AoE
+    would splash the follow-ups across the whole enemy team.
+    """
+    rec = skill_effects(skill_id) or {}
+    for block in rec.get("blocks") or []:
+        for eff in block.get("effects") or []:
+            if eff.get("op") == "damage":
+                return eff.get("target") == "all_enemies"
+    return False
+
+
 def status_skill_id(name):
     """The DesignSkillForm row id the client's DamageInfo.status needs to draw `name`'s
     icon, or None if we have no graphic for it (built by tools/build_status_icons.py --
