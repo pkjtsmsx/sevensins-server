@@ -36,6 +36,27 @@ The candidate list is `List<BackpackItemData>` — the same `{sid, iid, amount, 
 shape the backpack sync already emits, converted through
 `BackpackItemDataToItemStructGem`.
 
+### Three things that are easy to get wrong
+
+**`CurRuneIndex` (1507's `intargs[0]`) is 1-BASED.** `OnPanelEnable` computes
+`_curSelectRune = base[count-1] + CurRuneIndex - 1`, where base is 1/2/4 for 1/2/3
+candidates (`dword_37037B4`). Sending 0 with two candidates selects slot 1 — the
+*single*-rune layout's slot, which is not active in a two-rune panel. The countdown then
+writes its label to a dead object (the button reads `(-s)`) and Claim operates on a slot
+that is not there. The index the client sends BACK is 0-based over the candidates
+(`TransIdx` / `dword_37037A0`).
+
+**508 arrives TWICE.** The countdown auto-fires `ServerRPCRuneSelect` on expiry
+(`GetRuneTimer`'s `MoveNext`, 0x16BB658), so a manual Claim followed by the timer
+running out sends it again. Answering `[0, 0]` hands the panel item id 0 to render.
+Replay the same grant instead — idempotent, and truthful.
+
+**The item list and the item COUNT are different messages.** Cmd 84-87 carries the list
+and raises BackpackEvent 4; the "Inventory n/999" figure comes from the backpack INFO
+rows, which only cmd 83 and `BACKPACK_CHANGE` (145) carry. Pushing the list alone drew
+the new shard over a stale counter. `BACKPACK_CHANGE` sends both and raises event 1, the
+one an already-open panel refreshes on.
+
 The panel lays out **1, 2 or 3** candidates (`_rune1_Middle_Info`,
 `_rune2_Left_Info`/`_rune2_Right_Info`, `_rune3_*`), chosen by a `count-1` lookup. We
 send 2, which is what live footage shows.
