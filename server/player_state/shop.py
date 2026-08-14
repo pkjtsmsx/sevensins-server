@@ -145,6 +145,10 @@ COST_MEDAL = 9              # "Medal of Pride" -- a plain bag item, not a curren
 COST_GUILD_PT = 4           # CurrencyType.Guild
 COST_PAID_DIAMOND = 11      # CurrencyType 32 -- the $-marked gem, a separate balance
 COST_HOLY_BLOOD = 3         # "Holy Blood of Saint" -- the Soul Altar's own currency
+# Unsummoning a cast pays out Mana Crystals; the Soul Altar spends them back. The rare
+# grade (Prime) buys the Bunrei selector boxes, the common grade the ★5 Awaker Orb.
+COST_MANA_CRYSTAL = 501
+COST_PRIME_MANA_CRYSTAL = 502
 
 # **Storefront bundles are `_action 2` BOX items with no contents in the pack.** They
 # carry the art and the name the footage shows ("Deluxe Coin Box (1,500,000)"), so we
@@ -483,9 +487,13 @@ DEFAULT_SHOP_GOODS = {
     # costs that Gremlin's PIECES, a shard costs that shard's TICKET.
     "3": [
         # ---- Holy Blood (bought with Holy Blood of Saint, item 3) --------------
-        # The footage's first two cards -- "Sin/Virtue Bunrei Selector Box" -- are
-        # OMITTED: they are `_action 7` selectors ("You may select 1 Bunrei ... as
-        # prefer"), the same class that left an undismissable overlay over the game.
+        # The tab's first two cards are the Bunrei SELECTORS, bought with Prime Mana
+        # Crystal (the rare grade you get from unsummoning). Their prices are cropped
+        # in the footage -- the ids, the currency and the contents are not.
+        _goods(3107, 1432, 1, COST_PRIME_MANA_CRYSTAL, 1, filt=FILTER_HOLY_BLOOD,
+               sort=1, limit=1, reset=RESET_MONTHLY, once_max=1),
+        _goods(3108, 1500002, 1, COST_PRIME_MANA_CRYSTAL, 1, filt=FILTER_HOLY_BLOOD,
+               sort=2, limit=1, reset=RESET_MONTHLY, once_max=1),
         _goods(3101, 533, 1, COST_HOLY_BLOOD, 12000, filt=FILTER_HOLY_BLOOD, sort=3,
                limit=1, reset=RESET_MONTHLY, once_max=1),
         _goods(3102, 534, 1, COST_HOLY_BLOOD, 7500, filt=FILTER_HOLY_BLOOD, sort=4,
@@ -516,20 +524,26 @@ DEFAULT_SHOP_GOODS = {
         # ---- Summoning Orbs ---------------------------------------------------
         # Orbs are `_action 2` and summon "a random cast of ★N or better", so they
         # resolve to a real cast through CHAR_ORB_BUNDLES.
+        # The tab's first card is a second ★5 Awaker Orb bought with Mana Crystal (the
+        # common grade) rather than with Orb Fragments -- 70 of them. The cost ICON was
+        # unreadable in the footage and is now identified.
+        _goods(3301, 212, 1, COST_MANA_CRYSTAL, 70, filt=FILTER_ORBS, sort=1,
+               limit=5, reset=RESET_WEEKLY, once_max=5),
         _goods(3302, 212, 1, 300003, 100, filt=FILTER_ORBS, sort=2,
                limit=5, reset=RESET_WEEKLY, once_max=5),
         _goods(3303, 211, 1, 300002, 100, filt=FILTER_ORBS, sort=3,
                limit=5, reset=RESET_WEEKLY, once_max=5),
         _goods(3304, 210, 1, 300001, 100, filt=FILTER_ORBS, sort=4,
                limit=20, reset=RESET_DAILY, once_max=20),
-        # Transcender Gremlins are `_action 1` CASTS bought with their own Pieces.
-        # The footage crops the reset strip on these five, so the caps below are a
-        # guess -- the ids, costs and prices are not.
-        _goods(3305, 115, 1, 120, 1, filt=FILTER_ORBS, sort=5),
-        _goods(3306, 114, 1, 119, 1, filt=FILTER_ORBS, sort=6),
-        _goods(3307, 113, 1, 118, 1, filt=FILTER_ORBS, sort=7),
-        _goods(3308, 112, 1, 117, 1, filt=FILTER_ORBS, sort=8),
-        _goods(3309, 111, 1, 116, 1, filt=FILTER_ORBS, sort=9),
+        # Transcender Gremlins are `_action 1` CASTS bought with their own Pieces, and
+        # they carry NO purchase cap -- buy as many as you have Pieces for. limit=0 is
+        # what says that: `buy_shop_goods` treats 0 as uncapped, and the card renders
+        # no cap strip.
+        _goods(3305, 115, 1, 120, 1, filt=FILTER_ORBS, sort=5, limit=0),
+        _goods(3306, 114, 1, 119, 1, filt=FILTER_ORBS, sort=6, limit=0),
+        _goods(3307, 113, 1, 118, 1, filt=FILTER_ORBS, sort=7, limit=0),
+        _goods(3308, 112, 1, 117, 1, filt=FILTER_ORBS, sort=8, limit=0),
+        _goods(3309, 111, 1, 116, 1, filt=FILTER_ORBS, sort=9, limit=0),
 
         # ---- Summon Star Shards -----------------------------------------------
         # Reset strip is cropped here too, so these are uncapped for now.
@@ -558,15 +572,55 @@ def find_shop_goods(state, goods_id):
     return None, None
 
 
-# `_action 7` is a SELECTOR: a choose-your-reward box delivered through the mailbox.
-# The client opens its own selection flow for these -- it does not even ask the server
-# what is inside -- and with no flow behind it the panel leaves an undismissable modal
-# overlay. Until selectors are implemented, no shop may list one.
+# ---- selectors (`_action 7`) ----------------------------------------------
+# A SELECTOR is a choose-your-reward box: "Choose 1 Bunrei of Limited Event Casts as
+# you prefer." Two facts out of the binary explain everything about them:
+#
+#  1. `PanelItemInfo.OnPanelDirty` (0x15AA038) branches on `_action` when the Drop Info
+#     popup opens. `_action 2` asks the BACKPACK (`RequesQueryBoxList`, cmd 129); but
+#     `_action 7` asks the SHOP -- `PlayerShop.RequesQueryCouponList` (0x18058E8),
+#     **ShopRpcServerCmd 0x111 = 273**, intargs [itemID]. We answered 129 and not 273,
+#     so tapping a selector's magnifier sent a request nothing replied to and left the
+#     modal overlay up with no way to dismiss it. That was the "I clicked display on
+#     the awaker soulmirror+ selector box and the screen went dark" bug.
+#     The reply is `HandleQueryCouponRply`, **ShopRpcClientCmd 0x211 = 529**, whose
+#     strargs[0] is the same `List<List<uint>>` the box list uses.
+#  2. `PlayerBackpack.GetItemSpace` (0x18EE554) has NO case for `_action 7`. A selector
+#     can never occupy an inventory list, so it is never HELD -- which is why every one
+#     of their descriptions ends "Remember to claim your reward from your mailbox".
+#     There is therefore no in-client "use it now and pick" panel to drive: the choice
+#     is resolved off-client. We resolve it at grant time instead (see grant_goods).
 SELECTOR_ACTION = 7
+
+# The seven Sins and the seven Virtues, in design order. `_action 1` character items
+# whose char row is alignment 100 / 101 -- these are the ORIGINALS, not the costume
+# variants (520xxx), which is what the live Drop Info for 1432 lists.
+SIN_BUNREI = [510000, 510010, 510020, 510030, 510040, 510050, 510060]
+VIRTUE_BUNREI = [510100, 510110, 510120, 510130, 510140, 510150, 510160]
+
+# item id -> what the box lets you choose between. Only the selectors we actually sell
+# need an entry; anything else answers with an empty list, which still RETURNS and so
+# still dismisses the popup cleanly.
+SELECTOR_POOLS = {
+    1432: SIN_BUNREI,                       # ★5 Sin Bunrei Selector Box
+    1500002: VIRTUE_BUNREI,                 # Virtue Bunrei Selector Box
+    1500013: SIN_BUNREI + VIRTUE_BUNREI,    # Sin/Virtue Bunrei Selector Box
+}
+
+
+def selector_pool(item_id):
+    """The item ids a selector offers, or [] if we do not model that one."""
+    return list(SELECTOR_POOLS.get(int(item_id)) or ())
+
+
+def is_selector(item_id):
+    return (bt.dd.row("item", int(item_id)) or {}).get("_action") == SELECTOR_ACTION
 
 
 def is_sellable(item_id):
-    return (bt.dd.row("item", int(item_id)) or {}).get("_action") != SELECTOR_ACTION
+    """A selector may only be listed once we know what it offers -- selling one with an
+    empty pool would take the currency and hand back nothing."""
+    return not is_selector(item_id) or bool(selector_pool(item_id))
 
 
 def buy_shop_goods(state, goods_id, count):
@@ -617,6 +671,21 @@ def grant_goods(state, item_id, amount, rng=None):
         char_id, star, _display = char
         uids = [add_char(state, char_id, star=star) for _ in range(max(1, amount))]
         return uids, item_id, amount
+
+    # A SELECTOR. It can never be held (`GetItemSpace` files no `_action 7`), and the
+    # client has no panel that offers the choice -- in the live game the pick happens
+    # off-client and the prize arrives by mail. Resolve it here instead: draw one of
+    # the offered items and hand that over, reporting the real prize so the reveal
+    # popup plays. Random rather than chosen, which is the honest limit of what the
+    # client will let us do today; see SELECTOR_POOLS.
+    if action == SELECTOR_ACTION:
+        pool = selector_pool(item_id)
+        if pool:
+            uids, got = [], None
+            for _ in range(max(1, amount)):
+                got = rng.choice(pool)
+                uids.extend(grant_goods(state, got, 1, rng)[0])
+            return uids, got, max(1, amount)
 
     # A random STARSHARD box: roll a real shard so the player gets something they can
     # actually equip, and report the one they got.
@@ -766,6 +835,8 @@ def box_contents(item_id):
     scroll view is for.
     """
     item_id = int(item_id)
+    if is_selector(item_id):
+        return [[int(i), 1] for i in selector_pool(item_id)]
     payout = BUNDLE_PAYOUT.get(item_id)
     if payout:
         return [[int(i), int(c)] for i, c in payout]

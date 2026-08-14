@@ -213,6 +213,14 @@ SHOP_SERVER, SHOP_CLIENT = 0x94357119, 0x959AFE8F
 SHOP_REQ_BUY, SHOP_RPLY_BUY = 258, 513
 SHOP_REQ_SYNC, SHOP_RPLY_SYNC = 259, 515
 SHOP_REQ_SYNC_GOODS, SHOP_RPLY_SYNC_GOODS = 260, 516
+# Drop Info for a SELECTOR (`_action 7`). PanelItemInfo.OnPanelDirty (0x15AA038) sends
+# the box-list request to the BACKPACK for `_action 2` but to the SHOP for `_action 7`:
+# PlayerShop.RequesQueryCouponList (0x18058E8) is ShopRpcServerCmd 0x111, intargs
+# [itemID]. The reply is HandleQueryCouponRply (0x1804D98, jumptable case 0x211), which
+# reads strargs[0] as List<List<uint>> exactly like the box list and calls
+# ShowCouponItemInfoPopup -- the variant that turns ON the footer label (text 108806,
+# "Select and acquire 1 Item or Cast.").
+SHOP_REQ_QUERY_COUPON, SHOP_RPLY_QUERY_COUPON = 273, 529
 # PlayerOFA. 1 -> 257 static banners, 2 -> 258 event banners, 3 -> 259 banner CONTENT.
 OFA_SERVER, OFA_CLIENT = 0xAE866295, 0xAF29ED03
 OFA_REQ_CONTENT, OFA_RPLY_CONTENT = 3, 259
@@ -2456,6 +2464,19 @@ def handle(conn, addr):
                             # from the login sync like everything else.
                             send(MSG_RPC, uint_msg(0xAE487D79, 512, [],
                                                    [ps.energy_json(state)]))
+                    elif index == SHOP_SERVER and cmd == SHOP_REQ_QUERY_COUPON:
+                        # Drop Info on a selector. UNANSWERED THIS LOCKS THE CLIENT:
+                        # the popup is already open behind a modal overlay and only
+                        # the reply builds its contents, so the player is left with an
+                        # undismissable dark screen. Reply even when we do not model
+                        # that selector -- an empty list opens the popup with the
+                        # item's own name and an empty grid, which closes normally.
+                        item_id = intargs[0] if intargs else 0
+                        contents = ps.box_contents(item_id)
+                        log(f"    -> selector {item_id}: {len(contents)} choices")
+                        send(MSG_RPC, uint_msg(
+                            SHOP_CLIENT, SHOP_RPLY_QUERY_COUPON, [item_id],
+                            [json.dumps(contents, separators=(",", ":"))]))
                     elif index == SHOP_SERVER and cmd == SHOP_REQ_SYNC_GOODS:
                         # Opening a store tab. Without this the panel calls
                         # PanelWaitingBlock.Open(-1.0, 0) -- an indefinite, input-blocking
