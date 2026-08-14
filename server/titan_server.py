@@ -2391,10 +2391,12 @@ def handle(conn, addr):
                         # SendBuyCmd(goodsID, count) -- no shop id, goods ids are global.
                         gid = intargs[0] if intargs else 0
                         cnt = intargs[1] if len(intargs) > 1 else 1
-                        ok, shop_id, why = ps.buy_shop_goods(state, gid, cnt)
+                        ok, shop_id, why, new_chars = ps.buy_shop_goods(
+                            state, gid, cnt)
                         if ok:
                             ps.save(state)
-                            log(f"    -> bought {cnt}x goods {gid} from shop {shop_id}")
+                            log(f"    -> bought {cnt}x goods {gid} from shop {shop_id}"
+                                + (f", cast reward {new_chars}" if new_chars else ""))
                         else:
                             log(f"    -> buy REFUSED goods {gid} x{cnt} -- {why}")
                         # Reply 513 (case 513 in PlayerShop.OnClientCmdReceived):
@@ -2418,6 +2420,18 @@ def handle(conn, addr):
                             send(MSG_RPC, backpack_msg(
                                 84, [1],
                                 [ps.backpack_json(state, ps.BP_STORAGE_NORMAL)]))
+                            # A ★5 card on the Medal of Pride tab is an `_action 1`
+                            # CAST, so it arrives the same way a quest cast reward
+                            # does -- Char `create`, which stores it and plays the
+                            # single-pull reveal. See CHAR_RPLY_CREATE.
+                            if new_chars:
+                                send(MSG_RPC, uint_msg(
+                                    PLAYER_CHAR, CHAR_RPLY_CREATE, [],
+                                    [ps.char_create_json(state, new_chars)]))
+                            # Stamina bundles pay ENERGY, which the client caches
+                            # from the login sync like everything else.
+                            send(MSG_RPC, uint_msg(0xAE487D79, 512, [],
+                                                   [ps.energy_json(state)]))
                     elif index == SHOP_SERVER and cmd == SHOP_REQ_SYNC_GOODS:
                         # Opening a store tab. Without this the panel calls
                         # PanelWaitingBlock.Open(-1.0, 0) -- an indefinite, input-blocking
