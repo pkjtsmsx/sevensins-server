@@ -15,6 +15,7 @@ from .core import (
     UNSUPPORTED_QUEST_TYPES,
     _quest_is_sp,
     add_char,
+    bump_quest_counter,
     grant_reward,
 )
 
@@ -210,6 +211,87 @@ def complete_quests(state, quest_ids):
         else:
             rewards.append((int(qid), item_id, cnt))
     return rewards, new_chars
+
+
+# ---- case 5: "clear any stage of category N" ------------------------------
+# `_case_id` 5 counts stage clears by DUNGEON FAMILY, with `_case_v1` naming the family.
+# Read straight off the rows' own English text:
+#     0  main story     1  Kizuna Tower     2  Starshard Temple    7  ANY stage
+#     8  Guild Boss    21  Trainers Gym    22  Rank Up Abyss
+#    23  Transcend Corridor               24  Treasure Raiders
+# Nothing bumped this at all, which is why "Complete any Kizuna Quest 1 time" stayed at
+# 0/1 however many Kizuna stages were cleared.
+#
+# A stage's family is its dmap's ROOT: `dmap._link`, or the dmap itself when `_link` is
+# 0 (the daily dungeons are their own roots; story chapters and tower floors point up).
+QUEST_CASE_CLEAR_CATEGORY = 5
+CATEGORY_ANY = 7
+STAGE_CATEGORY_ROOTS = {
+    0: (1001, 1002, 1003, 1004, 1005, 1006),   # the six story chapters
+    2: (40011,),                               # Starshard Railway, incl. the Temple
+    21: (30004, 31004),                        # Trainers Gym (+ its "Double" variant)
+    22: (30002, 31002),                        # Rank Up / Evolution Abyss
+    23: (30014,),                              # Transcend Corridor
+    24: (30003,),                              # Treasure Raiders
+    # 8 (Guild Boss) has no dmap -- the guild subsystem does not exist yet.
+}
+# **A "Kizuna Quest" is NOT the Kizuna Tower.** The in-game panel titled "Kizuna
+# Quests" lists one entry per cast ("Cupid's Envoy: Ravinia", "The Undaunted: Marilu",
+# 0/4 CLEAR each), and those are dmaps 22001..22076 -- 57 of them, every one `_type 1`
+# with `_link 0`, so each is its own root -- holding 564 stages numbered dmap*100 + n.
+# The 24 dmaps actually NAMED "Kizuna Tower" (41001, 41101, … 43501) hold a separate
+# 1440-stage stat grind ("Bond of TEC") that does not appear in the EN build at all.
+# Both are credited here: the towers cost nothing to include and cannot fire while they
+# are unreachable, and quest 51007 ("Complete any Kizuna Stage") reads as covering both.
+KIZUNA_CATEGORY = 1
+KIZUNA_QUEST_DMAP_LO, KIZUNA_QUEST_DMAP_HI = 22000, 23000
+KIZUNA_TOWER_ROOT_NAME = "Kizuna Tower"
+
+_root_category_cache = None
+
+
+def _root_category_index():
+    global _root_category_cache
+    if _root_category_cache is None:
+        idx = {}
+        for cat, roots in STAGE_CATEGORY_ROOTS.items():
+            for r in roots:
+                idx[int(r)] = cat
+        for did, row in (bt.dd.rows("dmap") or {}).items():
+            did = int(did)
+            if KIZUNA_QUEST_DMAP_LO <= did < KIZUNA_QUEST_DMAP_HI:
+                idx[did] = KIZUNA_CATEGORY
+            # The towers need a NAME test, not a range: 41401/41404/41407… sit in the
+            # same span but are event maps ("The Deathblow", "Beauty Pageant").
+            elif (row.get("_type") == 2
+                    and (row.get("_name_en") or "").strip() == KIZUNA_TOWER_ROOT_NAME):
+                idx[did] = KIZUNA_CATEGORY
+        _root_category_cache = idx
+    return _root_category_cache
+
+
+def stage_category(stage_id):
+    """Which case-5 family a stage belongs to, or None if we do not model it."""
+    row = bt.dd.row("stage", int(stage_id)) or {}
+    dmap_id = int(row.get("_dmap_id") or 0)
+    dmap = bt.dd.row("dmap", dmap_id) or {}
+    return _root_category_index().get(int(dmap.get("_link") or dmap_id))
+
+
+def bump_stage_category_quests(state, stage_id):
+    """Credit the case-5 counters a clear of `stage_id` satisfies. -> keys touched.
+
+    Every clear advances the ANY family (`_case_v1` 7) as well as its own, which is
+    what the "[Daily] Clear any stages N times" rows count. Bumping is all the server
+    owes: the client rebuilds its claimable list from the counters and the player still
+    claims through Quest cmd 257.
+    """
+    touched = list(bump_quest_counter(state, QUEST_CASE_CLEAR_CATEGORY,
+                                      case_v1=CATEGORY_ANY))
+    cat = stage_category(stage_id)
+    if cat is not None and cat != CATEGORY_ANY:
+        touched += bump_quest_counter(state, QUEST_CASE_CLEAR_CATEGORY, case_v1=cat)
+    return touched
 
 
 def complete_stage_quests(state, stage_id):

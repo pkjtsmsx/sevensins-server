@@ -853,6 +853,14 @@ def battle_end_reward(battle, state):
         # Record the clear so progress persists -- and so the forced newbie tutorial
         # does not run again on a replay (bTutorial keys off this stage's rating).
         state["stages"][str(battle.stage_id)] = 15
+        # Credit the "clear any stage of <family> N times" goals (`_case_id` 5). The
+        # client cannot re-derive these -- GetQuestValue reads a server counter -- so
+        # nothing bumping them left "Complete any Kizuna Quest 1 time" stuck at 0/1 no
+        # matter how many Kizuna stages were cleared. quest_sync_msg below carries it.
+        cat = ps.stage_category(battle.stage_id)
+        touched = ps.bump_stage_category_quests(state, battle.stage_id)
+        if touched:
+            log(f"    -> stage family {cat}: quest counters {touched}")
         ps.save(state)
         # The client caches StageSyncData at login, so without this push it does not
         # learn about the clear until the next relaunch -- which is what made the
