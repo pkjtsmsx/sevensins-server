@@ -13,6 +13,7 @@ Guards the invariants from docs/BATTLE_SKILL_PLAN.md:
 Stdlib only; exits non-zero on failure so it can gate a commit.
 """
 import json
+import collections
 import random
 import os
 import sys
@@ -440,12 +441,40 @@ def test_starshard_temple_drops():
         check(f"{d.item_id}'s _action matches its slot",
               int(row.get("_action") or 0) - 110 == d.slot, str(row.get("_action")))
 
-    # The ladder has to ascend, or the temple pays the same thing for 41 stages.
-    first = bt.starshard_temple_drops(1600001, random.Random(1))[0]
-    last = bt.starshard_temple_drops(1600041, random.Random(1))[0]
-    star = lambda d: int((bt.dd.row("item", d.item_id) or {}).get("_itemName_en", " ")[1])
-    check("a late stage pays a higher star than the first",
-          star(last) > star(first), f"{star(first)} -> {star(last)}")
+    # STAR is the axis the ladder moves; it must ascend or 41 stages pay the same.
+    check("star climbs with depth",
+          bt.starshard_temple_tier(1600041) > bt.starshard_temple_tier(1600001),
+          f"{bt.starshard_temple_tier(1600001)} -> {bt.starshard_temple_tier(1600041)}")
+    check("and tops out at the cap",
+          bt.starshard_temple_tier(1600041) == bt.STARSHARD_MAX_STAR)
+
+    # **RARITY is deliberately NOT tied to depth** -- one table everywhere, so a lucky
+    # early run can pay an LR and a late one can still pay a plain. Assert the shape
+    # rather than exact frequencies, which would make this a flaky test.
+    def rank_of(iid):
+        parts = ((bt.dd.row("item", iid) or {}).get("_itemName_en") or "").split()
+        return parts[1] if len(parts) > 1 and parts[1] in ("R", "SR", "UR", "LR") else "N"
+
+    seen = {}
+    for stage in (1600001, 1600041):
+        got = collections.Counter()
+        rng2 = random.Random(4)
+        for _ in range(3000):
+            for d in bt.starshard_temple_drops(stage, rng2):
+                got[rank_of(d.item_id)] += 1
+        seen[stage] = got
+    check("every rarity can drop on the FIRST stage",
+          len(seen[1600001]) == 5, str(sorted(seen[1600001])))
+    check("every rarity can still drop on the LAST stage",
+          len(seen[1600041]) == 5, str(sorted(seen[1600041])))
+    # The two distributions should look alike -- rarity does not shift with depth.
+    tot1 = sum(seen[1600001].values()); tot2 = sum(seen[1600041].values())
+    drift = max(abs(seen[1600001][r] / tot1 - seen[1600041][r] / tot2)
+                for r in ("N", "R", "SR", "UR", "LR"))
+    check("the rarity spread does not shift with depth", drift < 0.05, f"drift {drift:.3f}")
+    check("the weights still sum to 100",
+          sum(w for w, _r in bt.STARSHARD_RANK_CHANCE) == 100,
+          str(bt.STARSHARD_RANK_CHANCE))
 
     # ---- the PREVIEW must agree with the payout ---------------------------
     # These drifted once already: drops() learned to pay shards while the Drop Info
