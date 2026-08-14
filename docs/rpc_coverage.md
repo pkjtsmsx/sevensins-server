@@ -21,6 +21,12 @@ General 339 `DeviceInfo` (acked — it has no reply cmd in the client enum).
 > `(battle: no handler for cmd N)` — different wording from the dispatcher's
 > `(no handler for index=0x… cmd=N)`. Grep for both when ranking gaps.
 
+Closed 2026-08-13 (Battle): **508 `ServerRPCRuneSelect`**, with its server-side pair
+**1507 RuneList** and **1508 SelectRune**. The Starshard Temple's "Starshards Select"
+flow — 1507 carries the candidates AND launches the panel, 508 is the player's pick,
+1508 answers `[itemID, itemCount]` (not the index) and is what finally ends the results
+sequence. Unanswered, a Temple clear hangs the client. See docs/STARSHARD_TEMPLE.md.
+
 ## Tier 1 — Reachable from the main UI — an unanswered cmd here can HANG or lock the client
 
 ### Char  (18/37)
