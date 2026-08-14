@@ -286,6 +286,7 @@ def main():
     test_battle_start_and_counter()
     test_full_battles()
     test_fallback_aoe()
+    test_enemy_multi_target()
     print(f"\n{'ALL PASSED' if not _fail else f'{_fail} CHECK(S) FAILED'}")
     sys.exit(1 if _fail else 0)
 
@@ -357,6 +358,41 @@ def test_fallback_aoe():
     hurt3, n3 = strike(PAIR)
     check("a '2 enemies' skill hits exactly two", len(hurt3) == 2, str(hurt3))
     check("...and does not hit the whole field", n3 > 2, str(n3))
+
+
+def test_enemy_multi_target():
+    """Targeting is SYMMETRIC: an enemy's multi-target skill hits several party members.
+
+    `attack_cmd_json` builds `enemies` relative to the ATTACKER's team, so the design
+    row drives enemy turns the same way it drives the player's -- enemy turns and player
+    auto-battle share the same path (play_turn_msgs -> auto_move -> attack_cmd_json).
+    This is a real difficulty change: across the early stages, 9 of 16 distinct enemy
+    skills are multi-target by their rows and every one of them used to hit one unit.
+    """
+    team = [{"id": c} for c in (10001, 10011, 10021, 10031, 10041)]
+
+    def enemy_strike(sid):
+        b = bt.Battle(1101, team, team_level=60)
+        party = [u for u in b.units.values() if u.team == bt.TEAM_PLAYER and u.alive]
+        foes = [u for u in b.units.values() if u.team != bt.TEAM_PLAYER and u.alive]
+        before = {u.order: u.hp for u in party}
+        out = json.loads(b.attack_cmd_json(foes[0].order, party[0].order, sid))
+        rows = out["combo"][0]["data"][0]
+        return [u.order for u in party if u.hp < before[u.order]], len(party), rows
+
+    hurt, n, rows = enemy_strike(100000311)          # design range 1 -> "1 enemy"
+    check("a 1-target enemy skill hits one party member", len(hurt) == 1, str(hurt))
+    check("the party is big enough for this to mean something", n >= 5, str(n))
+
+    hurt, _n, rows = enemy_strike(2081113)           # range 6 -> "2 enemies"
+    check("a 2-target enemy skill hits two party members", len(hurt) == 2, str(hurt))
+    check("with one DamageInfo row each", len(rows) == 2, str(len(rows)))
+
+    hurt, _n, _r = enemy_strike(2081116)             # range 7 -> "3 enemies"
+    check("a 3-target enemy skill hits three party members", len(hurt) == 3, str(hurt))
+
+    hurt, n, _r = enemy_strike(100001611)            # range 2 -> "All enemies"
+    check("an ALL enemy skill hits the whole party", len(hurt) == n, str(hurt))
 
 if __name__ == "__main__":
     main()
