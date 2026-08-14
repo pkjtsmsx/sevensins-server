@@ -53,12 +53,21 @@ General 339 `DeviceInfo` (acked — it has no reply cmd in the client enum).
 | 6 | `SyncAuto` |
 | 7 | `AutoStop` |
 
-### Shop  (3/6)
+### Shop  (5/6)
 | cmd | name |
 |---:|---|
-| 261 | `GoodsIDToShopID` |
-| 273 | `query_coupon_list` |
 | 274 | `PurchaseAsk` |
+
+Closed 2026-08-13:
+* **261 `GoodsIDToShopID`** -> reply **517**. The GO! button on a "go and exchange X"
+  goal. Reply intargs are `[shopID, tabID]` and the handler needs BOTH -- it bails
+  unless `_size >= 2`, then calls `PanelStore.EnterSpecificStore(filterID=intargs[1],
+  shopID=intargs[0])`. Unanswered the button is silently inert.
+* **273 `query_coupon_list`** -> reply **529**. Drop Info for an `_action 7` SELECTOR.
+  `PanelItemInfo.OnPanelDirty` (0x15AA038) routes Drop Info by `_action`: `_action 2`
+  goes to the BACKPACK (129), `_action 7` to the SHOP. Same `List<List<uint>>` payload.
+  Unanswered this LOCKS the client -- the popup is already behind a modal that only the
+  reply populates.
 
 ### Gacha  (7/13)
 | cmd | name |

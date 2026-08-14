@@ -1,6 +1,6 @@
 # Economy gaps — currencies the game charges for that nothing provides
 
-Audited 2026-08-13 against commit `9c1cb00`. Method: diff every cost id our build
+Audited 2026-08-13 against commit `9c1cb00`; §7 retracted the same day. Method: diff every cost id our build
 charges (the four storefronts' `CostID`, plus every gacha banner's `cost_tbl`) against
 every item id our build can actually hand out (stage drops, quest `_item_id`,
 login-bonus mail, `char_decompose` unsummon refunds, shop payouts).
@@ -112,13 +112,18 @@ Recovered so far:
 The Soul Altar's Summoning Orbs tab was squatting on 3301–3309 and had to move to
 3601–3609. Check this table before assigning a goods id.
 
-## 7. Adjacent, same shape
+## 7. Gifts / karma — RETRACTED, this was wrong
 
-Not currencies, but the identical failure — the sink exists and the source does not:
+An earlier note here claimed gifts had no source and karma rank was unreachable. That
+is **false**, checked 2026-08-13 against a live account:
 
-* **Gift items.** Karma/affection rank needs gifts; nothing in the game drops one, so
-  rank is unreachable. Diagnosed 2026-08-12, not implemented. The rank formula itself
-  was verified correct.
+* Five gift items (`_action 3`) were already held — Popular Manga, Electric Generator,
+  Wine, Ramen, Popular Poster (~140 items total).
+* Quest 31020 pays Popular Poster ×10 and it filed correctly into `_gift_List`.
+* `give_gifts` works end to end: 5 Popular Posters = +500 karma xp, ranking Lucifer
+  7 → 8.
+
+Karma is fully functional. Nothing to do here.
 
 ## Suggested order
 
@@ -131,4 +136,4 @@ Not currencies, but the identical failure — the sink exists and the source doe
    than scattering.
 5. Soulmirror Scrolls (Revisited) — without them two of the three Soulmirror banners
    cannot be rolled at all.
-6. Gift drops, then Guild / Arena / IAP when those subsystems land.
+6. Guild / Arena / IAP when those subsystems land.
