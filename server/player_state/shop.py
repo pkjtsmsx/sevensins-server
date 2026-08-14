@@ -360,11 +360,13 @@ DEFAULT_SHOP_GOODS = {
         _goods(2403, 1200023, 1, COST_GUILD_PT, 3000, filt=FILTER_GUILD, sort=3),
         _goods(2404, 1200024, 1, COST_GUILD_PT, 2500, filt=FILTER_GUILD, sort=4),
         _goods(2405, 1200020, 1, COST_GUILD_PT, 1200, filt=FILTER_GUILD, sort=5),
-        # The three "Awaker Soulmirror+①/②/③ Selector Box" cards are mail-delivered
-        # selectors; our pack has only the generic 1382, not the ①/②/③ tiers, so one
-        # card stands in for the set rather than inventing two ids.
-        _goods(2406, 1382, 1, COST_GUILD_PT, 5000, filt=FILTER_GUILD, sort=6,
-               limit=1, reset=RESET_MONTHLY, once_max=1),
+        # The footage's three "Awaker Soulmirror+①/②/③ Selector Box" cards are OMITTED.
+        # They are `_action 7` SELECTORS ("自選", self-select), not `_action 2`
+        # containers: tapping one opens a choose-your-reward flow that is delivered by
+        # mail, and none of that exists here. Standing item 1382 in for them put a
+        # permanent modal overlay over the game with nothing to dismiss it -- the
+        # display tap never even reaches the server, so there is no reply we could fix
+        # it with. A missing card is better than one that locks the client.
         _goods(2407, 711, 1, COST_GUILD_PT, 500, filt=FILTER_GUILD, sort=7,
                limit=2, reset=RESET_DAILY, once_max=2),
         _goods(2408, 2, 50000, COST_GUILD_PT, 250, filt=FILTER_GUILD, sort=8,
@@ -445,6 +447,17 @@ def find_shop_goods(state, goods_id):
             if row[0] == int(goods_id):
                 return sid, row
     return None, None
+
+
+# `_action 7` is a SELECTOR: a choose-your-reward box delivered through the mailbox.
+# The client opens its own selection flow for these -- it does not even ask the server
+# what is inside -- and with no flow behind it the panel leaves an undismissable modal
+# overlay. Until selectors are implemented, no shop may list one.
+SELECTOR_ACTION = 7
+
+
+def is_sellable(item_id):
+    return (bt.dd.row("item", int(item_id)) or {}).get("_action") != SELECTOR_ACTION
 
 
 def buy_shop_goods(state, goods_id, count):

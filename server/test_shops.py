@@ -321,6 +321,17 @@ def main():
     paid = dict(ps.goods_bundle_lines(st, 1102))
     check("preview matches the payout", lines == paid, f"{lines} vs {paid}")
 
+    # ---- no shop may list a SELECTOR --------------------------------------
+    # `_action 7` opens a choose-your-reward flow the client handles itself (it never
+    # asks the server), and with nothing behind it the panel leaves a permanent modal
+    # overlay. Seen in game: the store became unusable until the app was restarted.
+    for shop_id, rows in sh.DEFAULT_SHOP_GOODS.items():
+        for r in rows:
+            if not sh.is_sellable(r[5]):
+                check(f"shop {shop_id} goods {r[0]} is not a selector", False,
+                      f"item {r[5]} action 7")
+    check("no shop sells a selector item", True)
+
     print("\n" + ("ALL PASSED" if not _fail else f"{_fail} FAILED"))
     return 1 if _fail else 0
 
