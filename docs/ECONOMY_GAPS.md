@@ -45,6 +45,7 @@ upstream, which is why each group has holes rather than being wholly absent.
 | 300001 | ★3 Minion Summon Orb Fragment | Orbs tab | 300002 (★4) HAS a quest source |
 | 300003 | ★5 Awaker Summon Orb Fragment | Orbs tab | " |
 | 300011–300015 | Inherit Gem Fragments (Sin/Virtue/Rider/★5/★4 Awaker) | Skill Up | all five missing |
+| — | *(Grimoire of ★4/★5 Awaker Fragment, 545/544, are FINE — 1,250 and 5,830 from quests)* | | |
 | 543 | Grimoire of Rider Fragment | Skill Up | 541/542 HAVE quest sources |
 | 546 | Grimoire of ★3 Minion Fragment | Skill Up | " |
 | 304 | ★4 LR Starshard Ticket | Star Shards | 301/302/303 HAVE quest sources |
@@ -89,7 +90,29 @@ they render and cannot be bought:
 The prices on 3107/3108 are placeholders (1 each); the footage crops them. The ids,
 the currency and the contents are correct.
 
-## 6. Adjacent, same shape
+## 6. Goods ids are not always ours to choose
+
+Separate from supply, and worth knowing before renumbering any card. Quests with
+`_case_id 2003` are "go buy goods N" steps, and `_case_v1` holds the **original
+server's goods id**. The GO! button sends it verbatim as cmd 261 and the server
+answers with the shop and tab to jump to, so our card has to carry that exact id.
+
+Recovered so far:
+
+| goods | card |
+|---|---|
+| 3305 | Grimoire of ★4 Awaker — Soul Altar, Skill Up (quests 31017, 31034) |
+| 3304 | Grimoire of ★5 Awaker — Soul Altar, Skill Up (quest 31041) |
+| 1101 / 1201 / 1301 | Mammon's daily / weekly / monthly free (quests 10033, 10041, 10051) |
+| 121 | 30 Days Monthly Pass (quest 44183) |
+| 12011–12014 | Step Gift Boxes 1–4 (quests 50002–50005) |
+| 1100935 | SoulMirror Pass (quest 44179) |
+| 52745 | Angel Prefect Gabriel Pack (quest 80960) |
+
+The Soul Altar's Summoning Orbs tab was squatting on 3301–3309 and had to move to
+3601–3609. Check this table before assigning a goods id.
+
+## 7. Adjacent, same shape
 
 Not currencies, but the identical failure — the sink exists and the source does not:
 

@@ -520,18 +520,37 @@ DEFAULT_SHOP_GOODS = {
                limit=1, reset=RESET_MONTHLY, once_max=1),
 
         # ---- Skill Up (each item bought with its OWN fragment) -----------------
+        # The rule is uniform and exact: Grimoire N is bought with fragment N+10, so
+        # 531..536 <- 541..546. The tab LEADS with the two Awaker Grimoires (★4 at 625,
+        # ★5 at 750) -- both were missing entirely until 2026-08-13, and a quest step
+        # sends the player here for the ★4 one.
+        #
+        # **These two goods ids are NOT ours to choose.** Quests 31017 and 31034 carry
+        # `_case_v1 = 3305` and quest 31041 carries `3304` -- "Go to Shop-Soul Altar and
+        # exchange Grimoire of ★4/★5 Awaker" -- and the GO! button on those steps sends
+        # that id straight to the server as SendGoodsIDToShopIDCmd (cmd 261), which we
+        # answer with the shop and tab to jump to. Number these cards anything else and
+        # the button lands in the wrong tab, or in a shop that does not sell the thing
+        # the quest just asked for. That is why the Summoning Orbs tab below had to
+        # move off 3301..3309: it was squatting on the real ids.
+        _goods(3305, 535, 1, 545, 625, filt=FILTER_SKILL_UP, sort=1),
+        _goods(3304, 534, 1, 544, 750, filt=FILTER_SKILL_UP, sort=2),
         # The Grimoire of Sin card is cropped in the footage; its price is taken from
         # the 1000-fragment rate the other Grimoires and the Holy Blood card both
         # state. Reset strips are cropped on this whole tab, so these are uncapped.
-        _goods(3201, 531, 1, 541, 1000, filt=FILTER_SKILL_UP, sort=1),
-        _goods(3202, 532, 1, 542, 1000, filt=FILTER_SKILL_UP, sort=2),
-        _goods(3203, 533, 1, 543, 1000, filt=FILTER_SKILL_UP, sort=3),
-        _goods(3204, 536, 1, 546, 180, filt=FILTER_SKILL_UP, sort=4),
-        _goods(3205, 14, 1, 300014, 750, filt=FILTER_SKILL_UP, sort=5),
-        _goods(3206, 23, 1, 300015, 625, filt=FILTER_SKILL_UP, sort=6),
-        _goods(3207, 12, 1, 300011, 900, filt=FILTER_SKILL_UP, sort=7),
-        _goods(3208, 13, 1, 300013, 900, filt=FILTER_SKILL_UP, sort=8),
-        _goods(3209, 21, 1, 300012, 900, filt=FILTER_SKILL_UP, sort=9),
+        _goods(3201, 531, 1, 541, 1000, filt=FILTER_SKILL_UP, sort=3),
+        _goods(3202, 532, 1, 542, 1000, filt=FILTER_SKILL_UP, sort=4),
+        _goods(3203, 533, 1, 543, 1000, filt=FILTER_SKILL_UP, sort=5),
+        _goods(3204, 536, 1, 546, 180, filt=FILTER_SKILL_UP, sort=6),
+        # The Inherit Gems are a SEPARATE product line from the Grimoires -- their own
+        # items (12/13/14/21/23) bought with their own Inherit Gem Fragments. They sit
+        # further right in the tab and are cropped in every shot we have, so their
+        # prices are inferred from the same footage and are the least certain here.
+        _goods(3205, 14, 1, 300014, 750, filt=FILTER_SKILL_UP, sort=7),
+        _goods(3206, 23, 1, 300015, 625, filt=FILTER_SKILL_UP, sort=8),
+        _goods(3207, 12, 1, 300011, 900, filt=FILTER_SKILL_UP, sort=9),
+        _goods(3208, 13, 1, 300013, 900, filt=FILTER_SKILL_UP, sort=10),
+        _goods(3209, 21, 1, 300012, 900, filt=FILTER_SKILL_UP, sort=11),
 
         # ---- Summoning Orbs ---------------------------------------------------
         # Orbs are `_action 2` and summon "a random cast of ★N or better", so they
@@ -539,26 +558,26 @@ DEFAULT_SHOP_GOODS = {
         # The tab's first card is a second ★5 Awaker Orb bought with Mana Crystal (the
         # common grade) rather than with Orb Fragments -- 70 of them. The cost ICON was
         # unreadable in the footage and is now identified.
-        _goods(3301, 212, 1, COST_MANA_CRYSTAL, 70, filt=FILTER_ORBS, sort=1,
+        _goods(3601, 212, 1, COST_MANA_CRYSTAL, 70, filt=FILTER_ORBS, sort=1,
                limit=5, reset=RESET_WEEKLY, once_max=5),
-        _goods(3302, 212, 1, 300003, 100, filt=FILTER_ORBS, sort=2,
+        _goods(3602, 212, 1, 300003, 100, filt=FILTER_ORBS, sort=2,
                limit=5, reset=RESET_WEEKLY, once_max=5),
-        _goods(3303, 211, 1, 300002, 100, filt=FILTER_ORBS, sort=3,
+        _goods(3603, 211, 1, 300002, 100, filt=FILTER_ORBS, sort=3,
                limit=5, reset=RESET_WEEKLY, once_max=5),
-        _goods(3304, 210, 1, 300001, 100, filt=FILTER_ORBS, sort=4,
+        _goods(3604, 210, 1, 300001, 100, filt=FILTER_ORBS, sort=4,
                limit=20, reset=RESET_DAILY, once_max=20),
         # Transcender Gremlins are `_action 1` CASTS bought with their own Pieces, and
         # they carry NO purchase cap -- buy as many as you have Pieces for. That is
         # GOODS_NO_LIMIT (a NEGATIVE Limit), which is what hides the cap strip; limit=0
         # is a cap of zero and renders "Purchase Cap 0/0" over an unbuyable card.
-        _goods(3305, 115, 1, 120, 1, filt=FILTER_ORBS, sort=5, limit=GOODS_NO_LIMIT),
-        _goods(3306, 114, 1, 119, 1, filt=FILTER_ORBS, sort=6,
+        _goods(3605, 115, 1, 120, 1, filt=FILTER_ORBS, sort=5, limit=GOODS_NO_LIMIT),
+        _goods(3606, 114, 1, 119, 1, filt=FILTER_ORBS, sort=6,
                limit=GOODS_NO_LIMIT),
-        _goods(3307, 113, 1, 118, 1, filt=FILTER_ORBS, sort=7,
+        _goods(3607, 113, 1, 118, 1, filt=FILTER_ORBS, sort=7,
                limit=GOODS_NO_LIMIT),
-        _goods(3308, 112, 1, 117, 1, filt=FILTER_ORBS, sort=8,
+        _goods(3608, 112, 1, 117, 1, filt=FILTER_ORBS, sort=8,
                limit=GOODS_NO_LIMIT),
-        _goods(3309, 111, 1, 116, 1, filt=FILTER_ORBS, sort=9,
+        _goods(3609, 111, 1, 116, 1, filt=FILTER_ORBS, sort=9,
                limit=GOODS_NO_LIMIT),
 
         # ---- Summon Star Shards -----------------------------------------------

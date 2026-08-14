@@ -405,7 +405,7 @@ def main():
     st = fresh()
     ps.grant_item(st, 300002, 100)
     n = len(st["roster"])
-    ok, _s, why, new = ps.buy_shop_goods(st, 3303, 1)      # ★4 Awaker orb
+    ok, _s, why, new = ps.buy_shop_goods(st, 3603, 1)      # ★4 Awaker orb
     check("an orb grants a cast", ok and len(new) == 1 and len(st["roster"]) == n + 1,
           why or str(new))
     check("granted at the orb's star", st["roster"][new[0]]["star"] == 4,
@@ -418,9 +418,69 @@ def main():
     check("a shard ticket buys a real shard",
           ok and len(st["backpack"].get("2", {})) == shards + 1, why)
 
+    test_quest_goods_ids()
+
     print("\n" + ("ALL PASSED" if not _fail else f"{_fail} FAILED"))
     return 1 if _fail else 0
 
+
+
+def test_quest_goods_ids():
+    """Goods ids a QUEST names are not ours to choose.
+
+    Quests 31017/31034 ("Go to Shop-Soul Altar and exchange Grimoire of ★4 Awaker")
+    carry `_case_v1 = 3305`, and 31041 carries 3304 for the ★5. The GO! button sends
+    that id verbatim as SendGoodsIDToShopIDCmd (cmd 261) and the server answers with
+    the shop and tab to jump to -- so the card MUST be numbered what the quest says.
+    """
+    import battle as bt
+    from player_state.shop import DEFAULT_SHOP_GOODS, FILTER_SKILL_UP
+    from player_state.core import _default, _seed_roster
+    import player_state as ps
+
+    quest_goods = {}
+    for qid, r in (bt.dd.rows("quest") or {}).items():
+        if r.get("_case_id") == 2003 and r.get("_case_v1"):
+            quest_goods.setdefault(int(r["_case_v1"]), []).append(qid)
+
+    check("the quest table still names goods 3305", 3305 in quest_goods)
+    check("the quest table still names goods 3304", 3304 in quest_goods)
+
+    st = _default(1000001)
+    _seed_roster(st)
+    # 3305 -> Grimoire of ★4 Awaker, 3304 -> ★5, both on the Skill Up tab.
+    for gid, item_id, cost_id, price in ((3305, 535, 545, 625), (3304, 534, 544, 750)):
+        shop_id, row = ps.find_shop_goods(st, gid)
+        check(f"goods {gid} exists", row is not None)
+        if not row:
+            continue
+        check(f"goods {gid} is in the Soul Altar", shop_id == 3, str(shop_id))
+        check(f"goods {gid} sells item {item_id}", row[5] == item_id, str(row[5]))
+        check(f"goods {gid} is on the Skill Up tab", row[9] == FILTER_SKILL_UP,
+              str(row[9]))
+        check(f"goods {gid} costs {price}x item {cost_id}",
+              (row[7], row[8]) == (cost_id, price), str((row[7], row[8])))
+        # This pair is what cmd 261 answers with; both are required or
+        # EnterSpecificStore is never reached.
+        check(f"goods {gid} yields a complete (shop, tab) answer",
+              bool(shop_id) and bool(row[9]))
+
+    # On the SKILL UP tab, Grimoire N is bought with fragment N+10, without exception.
+    # (The Holy Blood tab also sells two Grimoires, but for Holy Blood of Saint -- a
+    # different tab, a different currency, so it is excluded here on purpose.)
+    altar = DEFAULT_SHOP_GOODS["3"]
+    grimoires = [r for r in altar
+                 if r[5] in range(531, 537) and r[9] == FILTER_SKILL_UP]
+    check("all six Grimoires are on the Skill Up tab", len(grimoires) == 6,
+          str(sorted(r[5] for r in grimoires)))
+    check("every Skill Up Grimoire costs its own fragment",
+          all(r[7] == r[5] + 10 for r in grimoires),
+          str([(r[5], r[7]) for r in grimoires]))
+
+    # Goods ids must stay globally unique -- find_shop_goods returns the first match.
+    ids = [r[0] for rows in DEFAULT_SHOP_GOODS.values() for r in rows]
+    dupes = sorted({i for i in ids if ids.count(i) > 1})
+    check("no duplicate goods ids anywhere", not dupes, str(dupes))
 
 if __name__ == "__main__":
     try:

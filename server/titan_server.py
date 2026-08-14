@@ -221,6 +221,14 @@ SHOP_REQ_SYNC_GOODS, SHOP_RPLY_SYNC_GOODS = 260, 516
 # ShowCouponItemInfoPopup -- the variant that turns ON the footer label (text 108806,
 # "Select and acquire 1 Item or Cast.").
 SHOP_REQ_QUERY_COUPON, SHOP_RPLY_QUERY_COUPON = 273, 529
+# The "GO!" button on a quest step that sends you shopping. PlayerShop.
+# SendGoodsIDToShopIDCmd (0x180597C) is ShopRpcServerCmd 0x105 = 261 with intargs
+# [goodsID] -- the goods id comes straight off the quest row's `_case_v1`. The reply
+# is HandleSendGoodsIDToShopID (jumptable case 0x205 = 517), which logs
+# "shopID={0}, tabID={1}", requires intargs._size >= 2, and calls
+# PanelStore.EnterSpecificStore(filterID=intargs[1], shopID=intargs[0]). Unanswered,
+# the button simply does nothing -- no error, no overlay, no navigation.
+SHOP_REQ_GOODS_TO_SHOP, SHOP_RPLY_GOODS_TO_SHOP = 261, 517
 # PlayerOFA. 1 -> 257 static banners, 2 -> 258 event banners, 3 -> 259 banner CONTENT.
 OFA_SERVER, OFA_CLIENT = 0xAE866295, 0xAF29ED03
 OFA_REQ_CONTENT, OFA_RPLY_CONTENT = 3, 259
@@ -2464,6 +2472,22 @@ def handle(conn, addr):
                             # from the login sync like everything else.
                             send(MSG_RPC, uint_msg(0xAE487D79, 512, [],
                                                    [ps.energy_json(state)]))
+                    elif index == SHOP_SERVER and cmd == SHOP_REQ_GOODS_TO_SHOP:
+                        # "Which shop sells goods N, and which tab is it on?"
+                        # EnterSpecificStore needs BOTH, and the handler bails unless
+                        # intargs has two entries -- one is not a partial answer, it is
+                        # no answer. A goods id we do not sell gets no reply, since
+                        # navigating somewhere arbitrary is worse than not moving.
+                        goods_id = intargs[0] if intargs else 0
+                        shop_id, row = ps.find_shop_goods(state, goods_id)
+                        if row:
+                            log(f"    -> goods {goods_id} is in shop {shop_id} "
+                                f"tab {row[9]}")
+                            send(MSG_RPC, uint_msg(
+                                SHOP_CLIENT, SHOP_RPLY_GOODS_TO_SHOP,
+                                [shop_id, row[9]], []))
+                        else:
+                            log(f"    -> goods {goods_id} is in no shop we serve")
                     elif index == SHOP_SERVER and cmd == SHOP_REQ_QUERY_COUPON:
                         # Drop Info on a selector. UNANSWERED THIS LOCKS THE CLIENT:
                         # the popup is already open behind a modal overlay and only
