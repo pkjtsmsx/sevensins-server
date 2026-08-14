@@ -125,6 +125,10 @@ FILTER_PVP = 16022          # "PVP Shop" -- the Medal of Pride tab; our pack has
                             # content (arena currency buying ★5 casts and Trainers).
 FILTER_GUILD = 16032        # "Guild Pt"
 FILTER_SALES = 16033        # "Super Sales"
+FILTER_HOLY_BLOOD = 16023   # "Holy Blood"     -- Soul Altar
+FILTER_SKILL_UP = 16031     # "Skill Up"
+FILTER_ORBS = 16052         # "Summoning Orbs"
+FILTER_STAR_SHARDS = 16053  # "Summon Star Shards"
 FILTER_DAILY = 16034        # "Daily Sales"    -- Mammon's three tabs are reset tiers
 FILTER_WEEKLY = 16035       # "Weekly Sales"
 FILTER_MONTHLY = 16036      # "Monthly Sales"
@@ -197,6 +201,14 @@ RUNE_BUNDLES = {
     1200023: ("Hawkeye", 4),
     1200024: ("Defender", 4),
     1200020: (None, 3),          # ★3 (UR-LR) Random Starshard Luckybag (Slot 6)
+    # Soul Altar "Summon Star Shards": each card is bought with the ticket for exactly
+    # that shard (301..304 -> 311..314). The card names a RANK (SR/UR/LR) as well as a
+    # star, but rank is not a field on the shard rows, so the roll is by star across
+    # every element -- right in kind, looser in grade.
+    311: (None, 1),
+    312: (None, 2),
+    313: (None, 3),
+    314: (None, 4),
 }
 
 # **Drop Info shows "SET" icons, which are display-only and cannot be used.** They are
@@ -234,21 +246,48 @@ def starshard_set_items(element, star):
 # rarity or better". Same `_action 2` problem, so it resolves to a real cast: roll one
 # of the ★5 casts and report the matching `_action 1` character item, which both
 # survives the popup mask and carries the tweenPopup flag that plays the reveal.
-CHAR_ORB_BUNDLES = {212: 5}
-# The three ★5 casts, by `_alignment`: Sins / Virtues / Riders.
-AWAKER_ALIGNMENTS = (100, 101, 102)
+# "Summon a random awaker of ★N rarity or better" -- the Soul Altar's orbs, and the
+# ★5 orb Belphe's sells for Medals. All `_action 2`, so each resolves to a real cast.
+# **"Awaker" does NOT mean any playable cast.** The Sins (100), Virtues (101) and
+# Riders (102) are their own thing and are NOT awakers -- an Awaker Summon Orb draws
+# only from alignments 103 and 104. Including the ★5 casts made the ★5 orb a Lucifer
+# machine, which is not what the card sells.
+#
+# The star on the item is the star the cast is granted AT, so a ★5 Awaker orb yields a
+# rarity-3/4 awaker raised to ★5 -- which is why these pools look "too low rarity" at
+# first glance and are nonetheless right.
+AWAKER_ALIGNMENTS = (103, 104)
+# **A "Minion" orb summons MINIONS, not casts.** Every ★3 character item belongs to
+# alignment 9001 (mobs) or 905, so pooling the minion orb over the playable alignments
+# found nothing at all -- it would have sold a card that grants silently nothing.
+MINION_ALIGNMENTS = (9001,)
+# item id -> (star to summon at, which alignments it draws from)
+CHAR_ORB_BUNDLES = {
+    212: (5, AWAKER_ALIGNMENTS),
+    211: (4, AWAKER_ALIGNMENTS),
+    210: (3, MINION_ALIGNMENTS),
+}
 
 _rune_pool_cache = {}
 _awaker_pool_cache = {}
 
 
-def awaker_pool(rarity):
-    """[(char id, character item id), ...] for ★`rarity` casts that have an item."""
-    if rarity not in _awaker_pool_cache:
+def awaker_pool(star, alignments=None):
+    """[(char id, character item id), ...] summonable AT ★`star`.
+
+    **The ★N on a character item is the star the cast is GRANTED at, not the cast's own
+    rarity** -- a rarity-3 cast like Caillen has ★4/★5/★6 items, a rarity-4 cast starts
+    at ★5. Keying this off `_rarity` therefore found nothing for the ★4 and ★3 orbs,
+    whose whole point is to summon a lower-rarity cast at a good star. Filter by the
+    item's star and keep only playable casts.
+    """
+    alignments = tuple(alignments or AWAKER_ALIGNMENTS)
+    key = (star, alignments)
+    if key not in _awaker_pool_cache:
         chars = {int(cid) for cid, row in (bt.dd.rows("char") or {}).items()
-                 if row.get("_rarity") == rarity
-                 and row.get("_alignment") in AWAKER_ALIGNMENTS}
-        star = f"\u2605{rarity}"
+                 if row.get("_alignment") in alignments}
+        star = int(star)
+        prefix = f"\u2605{'I' if star == 1 else star}"
         out = []
         for iid, row in (bt.dd.rows("item") or {}).items():
             if row.get("_action") != 1:
@@ -257,10 +296,11 @@ def awaker_pool(rarity):
             # **Match the ENGLISH name too.** The CN name of a "Bunrei" (a separate,
             # non-summonable variant sharing the star prefix) also starts with ★N, so
             # a CN-only test dragged 70-odd of them into the pool.
-            if cid in chars and (row.get("_itemName_en") or "").startswith(star):
+            name = (row.get("_itemName_en") or "")
+            if cid in chars and name.startswith(prefix) and "Bunrei" not in name:
                 out.append((cid, int(iid)))
-        _awaker_pool_cache[rarity] = sorted(out)
-    return _awaker_pool_cache[rarity]
+        _awaker_pool_cache[key] = sorted(out)
+    return _awaker_pool_cache[key]
 
 
 def rune_bundle_pool(element, grade):
@@ -424,10 +464,38 @@ DEFAULT_SHOP_GOODS = {
         _goods(1305, STAMINA, 2000, COST_DIAMOND, 490, filt=FILTER_MONTHLY, sort=5,
                limit=1, reset=RESET_MONTHLY, once_max=1),
     ],
-    # 3 = Asmodeus's Soul Altar
+    # 3 = Asmodeus's Soul Altar. **PARTIAL** -- only the two tabs the reference
+    # footage covers. "Holy Blood" (16023) and "Skill Up" (16031) have no screenshots
+    # yet and are deliberately absent rather than invented.
+    #
+    # Every card here is bought with the currency for exactly the thing it sells, which
+    # is the pattern the cost icons show: an orb costs that orb's FRAGMENT, a Gremlin
+    # costs that Gremlin's PIECES, a shard costs that shard's TICKET.
     "3": [
-        _goods(301, 202, 1, 1, 300, filt=FILTER_ITEMS),
-        _goods(302, 32, 10, 2, 100000, filt=FILTER_COINS),
+        # ---- Summoning Orbs ---------------------------------------------------
+        # Orbs are `_action 2` and summon "a random cast of ★N or better", so they
+        # resolve to a real cast through CHAR_ORB_BUNDLES.
+        _goods(3302, 212, 1, 300003, 100, filt=FILTER_ORBS, sort=2,
+               limit=5, reset=RESET_WEEKLY, once_max=5),
+        _goods(3303, 211, 1, 300002, 100, filt=FILTER_ORBS, sort=3,
+               limit=5, reset=RESET_WEEKLY, once_max=5),
+        _goods(3304, 210, 1, 300001, 100, filt=FILTER_ORBS, sort=4,
+               limit=20, reset=RESET_DAILY, once_max=20),
+        # Transcender Gremlins are `_action 1` CASTS bought with their own Pieces.
+        # The footage crops the reset strip on these five, so the caps below are a
+        # guess -- the ids, costs and prices are not.
+        _goods(3305, 115, 1, 120, 1, filt=FILTER_ORBS, sort=5),
+        _goods(3306, 114, 1, 119, 1, filt=FILTER_ORBS, sort=6),
+        _goods(3307, 113, 1, 118, 1, filt=FILTER_ORBS, sort=7),
+        _goods(3308, 112, 1, 117, 1, filt=FILTER_ORBS, sort=8),
+        _goods(3309, 111, 1, 116, 1, filt=FILTER_ORBS, sort=9),
+
+        # ---- Summon Star Shards -----------------------------------------------
+        # Reset strip is cropped here too, so these are uncapped for now.
+        _goods(3401, 314, 1, 304, 1, filt=FILTER_STAR_SHARDS, sort=1),
+        _goods(3402, 313, 1, 303, 1, filt=FILTER_STAR_SHARDS, sort=2),
+        _goods(3403, 312, 1, 302, 1, filt=FILTER_STAR_SHARDS, sort=3),
+        _goods(3404, 311, 1, 301, 1, filt=FILTER_STAR_SHARDS, sort=4),
     ],
     # 5 = Dixie's Exchange Booth
     "5": [
@@ -525,13 +593,14 @@ def grant_goods(state, item_id, amount, rng=None):
     # A random ★5+ cast orb.
     orb = CHAR_ORB_BUNDLES.get(int(item_id))
     if orb:
-        pool = awaker_pool(orb)
+        star, alignments = orb
+        pool = awaker_pool(star, alignments)
         if pool:
             got_item = None
             uids = []
             for _ in range(max(1, amount)):
                 cid, got_item = rng.choice(pool)
-                uids.append(add_char(state, cid, star=orb))
+                uids.append(add_char(state, cid, star=star))
             return uids, got_item, max(1, amount)
 
     # A fixed bundle: pay the amount printed on the card.
@@ -571,7 +640,7 @@ def goods_reward(state, goods_id, count):
     if payout:
         item_id, per = payout[0][0], payout[0][1] * per
     elif int(item_id) in CHAR_ORB_BUNDLES:
-        pool = awaker_pool(CHAR_ORB_BUNDLES[int(item_id)])
+        pool = awaker_pool(*CHAR_ORB_BUNDLES[int(item_id)])
         if pool:
             item_id = pool[0][1]
     elif int(item_id) in RUNE_BUNDLES:
@@ -675,5 +744,5 @@ def box_contents(item_id):
         return out
     orb = CHAR_ORB_BUNDLES.get(item_id)
     if orb:
-        return [[int(iid), 1] for _cid, iid in awaker_pool(orb)]
+        return [[int(iid), 1] for _cid, iid in awaker_pool(*orb)]
     return []

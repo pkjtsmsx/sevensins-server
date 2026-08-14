@@ -332,6 +332,60 @@ def main():
                       f"item {r[5]} action 7")
     check("no shop sells a selector item", True)
 
+    # ---- Asmodeus's Soul Altar (shop 3, partial) --------------------------
+    altar = sh.DEFAULT_SHOP_GOODS["3"]
+    check("altar rows have 21 fields", all(len(r) == 21 for r in altar))
+    check("altar has the two captured tabs",
+          {r[9] for r in altar} == {sh.FILTER_ORBS, sh.FILTER_STAR_SHARDS},
+          str(sorted({r[9] for r in altar})))
+    for r in altar:
+        if not bt.dd.row("item", r[5]) or not bt.dd.row("item", r[7]):
+            check(f"altar goods {r[0]} ids exist", False, f"{r[5]} / {r[7]}")
+        if not sh.is_sellable(r[5]):
+            check(f"altar goods {r[0]} is not a selector", False, str(r[5]))
+    check("altar ids exist and none is a selector", True)
+
+    # **Every card must actually hand something over.** An orb whose pool is empty
+    # would take the currency and grant nothing -- which is how the ★3 Minion orb
+    # behaved when it was pooled over the playable alignments instead of the mobs.
+    for iid in (212, 211, 210):
+        check(f"orb {iid} has a pool", len(ps.box_contents(iid)) > 0)
+    # **Awakers are NOT Sins / Virtues / Riders.** Those three casts are their own
+    # thing; an Awaker orb that includes them is a Lucifer machine, not what the card
+    # sells.
+    for iid in (211, 212):
+        bad = [e[0] for e in ps.box_contents(iid)
+               if (bt.dd.row("char", (bt.dd.row("item", e[0]) or {}).get("_param1"))
+                   or {}).get("_alignment") in (100, 101, 102)]
+        check(f"awaker orb {iid} excludes Sins/Virtues/Riders", not bad, str(bad[:4]))
+    check("awaker orbs draw only alignments 103/104",
+          all((bt.dd.row("char", (bt.dd.row("item", e[0]) or {}).get("_param1"))
+               or {}).get("_alignment") in sh.AWAKER_ALIGNMENTS
+              for e in ps.box_contents(212)))
+
+    check("the minion orb draws MINIONS",
+          all("Gremlin" in ((bt.dd.row("item", e[0]) or {}).get("_itemName_en") or "")
+              or (bt.dd.row("char",
+                            (bt.dd.row("item", e[0]) or {}).get("_param1")) or {}
+                  ).get("_alignment") in sh.MINION_ALIGNMENTS
+              for e in ps.box_contents(210)))
+
+    st = fresh()
+    ps.grant_item(st, 300002, 100)
+    n = len(st["roster"])
+    ok, _s, why, new = ps.buy_shop_goods(st, 3303, 1)      # ★4 Awaker orb
+    check("an orb grants a cast", ok and len(new) == 1 and len(st["roster"]) == n + 1,
+          why or str(new))
+    check("granted at the orb's star", st["roster"][new[0]]["star"] == 4,
+          str(st["roster"][new[0]]))
+
+    st = fresh()
+    ps.grant_item(st, 304, 5)
+    shards = len(st["backpack"].get("2", {}))
+    ok, _s, why, _n = ps.buy_shop_goods(st, 3401, 1)       # ★4 LR shard ticket
+    check("a shard ticket buys a real shard",
+          ok and len(st["backpack"].get("2", {})) == shards + 1, why)
+
     print("\n" + ("ALL PASSED" if not _fail else f"{_fail} FAILED"))
     return 1 if _fail else 0
 
