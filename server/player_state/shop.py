@@ -199,6 +199,37 @@ RUNE_BUNDLES = {
     1200020: (None, 3),          # ★3 (UR-LR) Random Starshard Luckybag (Slot 6)
 }
 
+# **Drop Info shows "SET" icons, which are display-only and cannot be used.** They are
+# the `Random ★{star} {Element}` items -- five per (element, star), one per RANK
+# (N/R/SR/UR/LR) in `_param1` order, e.g. ★4 Endearment is 1016..1020 / 5241..5245.
+# They exist purely to say "you will get one of this set", so they belong in the
+# preview and must NEVER be granted: the purchase still rolls a real shard.
+#
+# Which of them a card lists depends on what the card randomises, and the live popups
+# show both shapes:
+#   * "★4 (UR-LR) Random SLOT Endearment"  -> one element, the UR and LR ranks (2 icons)
+#   * "★3 (UR-LR) Random Starshard (Slot N)" -> one icon per ELEMENT at that star (6)
+STARSHARD_ELEMENTS = ("Endearment", "Chaos", "Hawkeye", "Slayer",
+                      "Nightshade", "Mystery")
+RANK_UR, RANK_LR = 3, 4          # indices into the five ranks, lowest `_param1` first
+
+_set_item_cache = {}
+
+
+def starshard_set_items(element, star):
+    """The five display-only set icons for one element at one star, rank order."""
+    key = (element, star)
+    if key not in _set_item_cache:
+        want = f"Random \u2605{'I' if star == 1 else star} {element}"
+        found = []
+        for iid, row in (bt.dd.rows("item") or {}).items():
+            if row.get("_action") != 2:
+                continue
+            if (row.get("_itemName_en") or "").strip() == want:
+                found.append((int(row.get("_param1") or 0), int(iid)))
+        _set_item_cache[key] = [i for _p, i in sorted(found)]
+    return _set_item_cache[key]
+
 # "★5 Awaker Summon Orb" -- a box whose card reads "Summon a random awaker of ★5
 # rarity or better". Same `_action 2` problem, so it resolves to a real cast: roll one
 # of the ★5 casts and report the matching `_action 1` character item, which both
@@ -617,16 +648,17 @@ def box_contents(item_id):
         return [[int(i), int(c)] for i, c in payout]
     bundle = RUNE_BUNDLES.get(item_id)
     if bundle:
-        # One entry per SLOT, not every variant. The card promises a "Random Slot"
-        # shard and the live Drop Info shows a handful of icons, not the 42-deep
-        # permutation list -- a preview nobody can read is worse than a short one.
-        # The grant still rolls across the whole pool.
-        seen, out = set(), []
-        for i in rune_bundle_pool(*bundle):
-            slot = (bt.dd.row("item", i) or {}).get("_action")
-            if slot not in seen:
-                seen.add(slot)
-                out.append([int(i), 1])
+        element, star = bundle
+        if element:
+            # One element, random slot -> its UR and LR set icons.
+            ranks = starshard_set_items(element, star)
+            return [[ranks[r], 1] for r in (RANK_UR, RANK_LR) if r < len(ranks)]
+        # One slot, random element -> one set icon per element.
+        out = []
+        for el in STARSHARD_ELEMENTS:
+            ranks = starshard_set_items(el, star)
+            if len(ranks) > RANK_UR:
+                out.append([ranks[RANK_UR], 1])
         return out
     orb = CHAR_ORB_BUNDLES.get(item_id)
     if orb:

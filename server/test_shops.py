@@ -275,12 +275,35 @@ def main():
         check(f"box {iid} names real items",
               all(bt.dd.row("item", e[0]) for e in c), str(c))
 
-    # A random box previews the KINDS on offer, not every permutation -- the live Drop
-    # Info shows a handful of icons, and a 42-deep list is a preview nobody can read.
-    lb = ps.box_contents(1200021)
-    check("a starshard box lists one entry per slot", len(lb) == 6, str(len(lb)))
-    slots = {(bt.dd.row("item", e[0]) or {}).get("_action") for e in lb}
-    check("and covers every slot", len(slots) == 6, str(sorted(slots)))
+    # A random starshard box previews display-only "SET" icons -- the
+    # `Random ★N Element` items -- not concrete shards. Which ones depends on what the
+    # card randomises, and both shapes appear in the live popups.
+    lb = ps.box_contents(1200021)          # ★4 (UR-LR) Random SLOT Endearment
+    check("an element box lists its UR and LR set icons", len(lb) == 2, str(lb))
+    names = {(bt.dd.row("item", e[0]) or {}).get("_itemName_en") for e in lb}
+    check("both are the same element and star", names == {"Random \u26054 Endearment"},
+          str(names))
+
+    slotbag = ps.box_contents(1200020)     # ★3 (UR-LR) Random Starshard (Slot 6)
+    check("a slot box lists one icon per element", len(slotbag) == 6, str(len(slotbag)))
+    els = [(bt.dd.row("item", e[0]) or {}).get("_itemName_en") for e in slotbag]
+    check("covering all six elements",
+          els == [f"Random \u26053 {el}" for el in sh.STARSHARD_ELEMENTS],
+          str(els))
+
+    # **Set icons are display-only and cannot be used**, so they must never be what a
+    # purchase actually hands over -- the grant rolls a REAL shard (_action 111..116).
+    st = fresh()
+    before = len(st["backpack"].get("2", {}))
+    ps.buy_shop_goods(st, 2401, 1)
+    check("buying a luckybag grants a real shard",
+          len(st["backpack"].get("2", {})) == before + 1)
+    granted = [e["iid"] for e in st["backpack"]["2"].values()]
+    check("and never a set icon",
+          all((bt.dd.row("item", i) or {}).get("_action") in range(111, 117)
+              for i in granted), str(granted))
+    check("no set icon reached the bag",
+          not any(i in {e[0] for e in lb} for i in granted), str(granted))
 
     orb = ps.box_contents(212)
     check("the awaker orb lists ★5 casts", len(orb) > 20, str(len(orb)))
