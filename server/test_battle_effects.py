@@ -442,11 +442,21 @@ def test_starshard_temple_drops():
               int(row.get("_action") or 0) - 110 == d.slot, str(row.get("_action")))
 
     # STAR is the axis the ladder moves; it must ascend or 41 stages pay the same.
-    check("star climbs with depth",
-          bt.starshard_temple_tier(1600041) > bt.starshard_temple_tier(1600001),
-          f"{bt.starshard_temple_tier(1600001)} -> {bt.starshard_temple_tier(1600041)}")
-    check("and tops out at the cap",
-          bt.starshard_temple_tier(1600041) == bt.STARSHARD_MAX_STAR)
+    # **Every stage must beat the one before it** -- a hard band made all 8 stages
+    # inside it identical, so there was no reason to push deeper until a boundary.
+    def mean_star(sid):
+        w = bt.starshard_star_weights(sid)
+        return sum(x * st for x, st in w) / sum(x for x, _ in w)
+
+    order = {r.get("_sort"): sid for sid, r in (bt.dd.rows("stage") or {}).items()
+             if r.get("_book") == bt.STARSHARD_BOOK}
+    means = [mean_star(order[o]) for o in sorted(order)]
+    flat = [i + 1 for i in range(1, len(means)) if means[i] <= means[i - 1] + 1e-9]
+    check("every temple stage pays better than the one before it", not flat, str(flat))
+    check("and the run spans most of the star range",
+          means[-1] - means[0] > 3, f"{means[0]:.2f} -> {means[-1]:.2f}")
+    check("the deepest stage tops out near the cap",
+          means[-1] > bt.STARSHARD_MAX_STAR - 0.5, f"{means[-1]:.2f}")
 
     # **RARITY is deliberately NOT tied to depth** -- one table everywhere, so a lucky
     # early run can pay an LR and a late one can still pay a plain. Assert the shape
@@ -482,9 +492,16 @@ def test_starshard_temple_drops():
     preview = bt.stage_drop_preview(1600001)
     check("the temple preview is not coins",
           bt.COIN_ITEM_ID not in preview, str(preview[:3]))
-    # ONE icon per set on rotation. The raw pool is 4 sets x 6 slots x 3 ranks = 72,
-    # which is not a preview -- these are the display-only "Random <star> <set>" items.
-    check("it lists one icon per set on rotation", len(preview) == 4, str(len(preview)))
+    # One icon per (star, set) the stage can roll. The star window is at most 3 wide, so
+    # 8-12 icons -- naming a single star would under-report a stage that rolls three.
+    stars = {st for _w, st in bt.starshard_star_weights(1600001)}
+    sets = len(bt.starshard_sets_for_day())
+    check("it lists one icon per (star, set) it can roll",
+          len(preview) == len(stars) * sets, f"{len(preview)} vs {len(stars)}x{sets}")
+    check("the preview covers every rollable star",
+          all(any(f"\u2605{'I' if st == 1 else st} " in
+                  ((bt.dd.row("item", i) or {}).get("_itemName_en") or "")
+                  for i in preview) for st in stars), str(sorted(stars)))
     check("with no duplicates", len(set(preview)) == len(preview))
     check("and they are display-only set icons",
           all((bt.dd.row("item", i) or {}).get("_action") == 2 for i in preview))
@@ -497,6 +514,40 @@ def test_starshard_temple_drops():
           deep != preview, "preview did not move with depth")
     check("every temple stage previews shards, not coins",
           all(bt.COIN_ITEM_ID not in bt.stage_drop_preview(s) for s in temple))
+
+    # ---- the preview must be EXACT, both directions ------------------------
+    # Not "roughly right": every (set, star) the stage can roll has to be advertised,
+    # and nothing advertised may be unrollable. Checked by actually rolling, so a change
+    # to either side that desyncs them fails here rather than in game.
+    import re as _re
+    NAME = bt.STARSHARD_SET_NAMES
+
+    def preview_pairs(sid):
+        out = set()
+        for i in bt.stage_drop_preview(sid):
+            n = (bt.dd.row("item", i) or {}).get("_itemName_en") or ""
+            m = _re.match(r"Random \u2605(I|\d)\s+(.+)$", n)
+            if m:
+                out.add((m.group(2), 1 if m.group(1) == "I" else int(m.group(1))))
+        return out
+
+    def rolled_pairs(sid, n=1500):
+        out, rng3 = set(), random.Random(1)
+        for _ in range(n):
+            for d in bt.starshard_temple_drops(sid, rng3):
+                e, rest = divmod(d.item_id, 1000)
+                _slot, rest = divmod(rest, 100)
+                _rank, st = divmod(rest, 10)
+                out.add((NAME[e], st))
+        return out
+
+    wrong = []
+    for sid in temple:
+        prev_p, roll_p = preview_pairs(sid), rolled_pairs(sid)
+        if prev_p != roll_p:
+            wrong.append((sid, sorted(roll_p - prev_p), sorted(prev_p - roll_p)))
+    check("Drop Info matches what every stage actually rolls", not wrong,
+          str(wrong[:2]))
 
     # An ordinary stage must be untouched by any of this.
     check("a main-story stage drops no shards", bt.starshard_temple_drops(1101) == [])

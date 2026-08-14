@@ -262,9 +262,15 @@ STARSHARD_SETS_MWF = (201, 205, 206, 208)     # Fortitude, Nightshade, Mystery, 
 STARSHARD_SETS_TTSS = (207, 202, 203, 204)    # Defender, Chaos, Hawkeye, Slayer
 STARSHARD_TEMPLE_SLOTS = tuple(range(1, 7))   # all six slots can drop
 STARSHARD_DROPS_PER_CLEAR = 2                 # what the live results panel shows
-# Ladder shape. STAR is what the stage buys: it climbs 1..5 over the 41 stages (a ★6
-# shard exists but is reached by upgrading, not by dropping).
+# Ladder shape. BOTH axes are rolled, never granted outright -- a hard band made every
+# stage inside it identical, so there was no reason to push from ST-1 to ST-8.
+#
+# STAR slides with depth: each stage rolls over a triangular window centred on
+# 1 + depth*(MAX_STAR-1), so the centre creeps up stage by stage and the EXPECTED star
+# rises at every one of the 41. Deep stages stop wasting the player's time with 1-stars
+# and early ones can still surprise.
 STARSHARD_MAX_STAR = 5
+STARSHARD_STAR_SPREAD = 2.0       # how many stars either side of centre stay possible
 STARSHARD_MAX_RANK = 4                        # 0..4 = N / R / SR / UR / LR
 # **RARITY is NOT tied to depth.** Every rank can drop on every stage, on one fixed
 # table -- so a lucky ST-1 run can hand over an LR, and a late stage still sees plain
@@ -283,8 +289,8 @@ def starshard_sets_for_day(when=None):
     return STARSHARD_SETS_MWF if day in (0, 2, 4) else STARSHARD_SETS_TTSS
 
 
-def starshard_temple_tier(stage_id):
-    """-> the star a Temple stage drops at, or None if it is not a Temple stage.
+def starshard_temple_depth(stage_id):
+    """-> 0.0..1.0 through the Temple (ST-1 .. ST-41), or None if not a Temple stage.
 
     Keyed on the stage's ORDER within the temple (ST-1..ST-41, from `_sort`), not on
     `_itemrank_str`. That field looks like a ladder (31,32,…,60) and was tried first, but
@@ -297,9 +303,33 @@ def starshard_temple_tier(stage_id):
     if row.get("_book") != STARSHARD_BOOK:
         return None
     order = int(row.get("_sort") or 1)
-    total = STARSHARD_TEMPLE_COUNT
-    depth = max(0.0, min((order - 1) / max(total - 1, 1), 1.0))
-    return min(1 + int(depth * STARSHARD_MAX_STAR), STARSHARD_MAX_STAR)
+    return max(0.0, min((order - 1) / max(STARSHARD_TEMPLE_COUNT - 1, 1), 1.0))
+
+
+def starshard_star_weights(stage_id):
+    """-> [(weight, star), ...] for a Temple stage: the sliding window described above."""
+    depth = starshard_temple_depth(stage_id)
+    if depth is None:
+        return []
+    centre = 1.0 + depth * (STARSHARD_MAX_STAR - 1)
+    out = []
+    for star in range(1, STARSHARD_MAX_STAR + 1):
+        weight = 1.0 - abs(star - centre) / STARSHARD_STAR_SPREAD
+        if weight > 0:
+            out.append((weight, star))
+    return out
+
+
+def starshard_typical_star(stage_id):
+    """The star a Temple stage MOSTLY pays -- what Drop Info previews."""
+    weights = starshard_star_weights(stage_id)
+    return max(weights)[1] if weights else None
+
+
+def starshard_temple_tier(stage_id):
+    """Truthy for a Temple stage (its typical star), None otherwise. Kept as the cheap
+    "is this the temple?" test callers use."""
+    return starshard_typical_star(stage_id)
 
 
 STARSHARD_TEMPLE_COUNT = 41       # ST-1..ST-41; set below from the pack at import
@@ -320,19 +350,22 @@ def starshard_temple_pool(stage_id, when=None):
     Only the SHAPE is evidence-backed: at least one shard or the client hangs, two per
     clear per live footage, and the eight sets / day rotation off the in-game banner.
     """
-    star = starshard_temple_tier(stage_id)
-    if star is None:
+    stars = starshard_star_weights(stage_id)
+    if not stars:
         return []
-    # ONE icon per set on rotation, not every combination. Listing the raw pool would be
-    # 4 sets x 6 slots x 3 ranks = 72 icons, which is not a preview. The display-only
-    # "Random ★N <set>" items say exactly the right thing: one of this set, at this star.
+    # One icon per (STAR, set) the stage can actually roll. The star window is at most
+    # three wide, so this is 8-12 icons -- honest without becoming unreadable. Listing
+    # the raw pool instead would be 4 sets x 6 slots x 3 stars x 5 ranks, which is not a
+    # preview; and naming a single star would under-report a stage that rolls three.
+    #
+    # RANK is deliberately not split out: every rank drops on every stage, so no variant
+    # is "the" answer and the base icon stands for the set.
     pool = []
-    for element in starshard_sets_for_day(when):
-        icons = starshard_set_icon(element, star)
-        if icons:
-            # Any rank can drop, so no rank variant is "the" answer -- show the base
-            # icon as the set's representative at this star.
-            pool.append((icons[0], 0))
+    for _weight, star in sorted(stars, key=lambda x: x[1]):
+        for element in starshard_sets_for_day(when):
+            icons = starshard_set_icon(element, star)
+            if icons and (icons[0], 0) not in pool:
+                pool.append((icons[0], 0))
     return pool
 
 
@@ -341,11 +374,12 @@ def starshard_temple_drops(stage_id, rng=None, when=None):
     each rolling its own set, slot and rank."""
     import random as _r
     rng = rng or _r
-    star = starshard_temple_tier(stage_id)
-    if star is None:
+    stars = starshard_star_weights(stage_id)
+    if not stars:
         return []
     sets = starshard_sets_for_day(when)
     total = sum(w for w, _r in STARSHARD_RANK_CHANCE)
+    star_total = sum(w for w, _s in stars)
     # Distinct slots, so the two candidates are a real choice rather than near-duplicates
     # -- the live panel shows a slot I next to a slot II.
     slots = list(STARSHARD_TEMPLE_SLOTS)
@@ -359,6 +393,13 @@ def starshard_temple_drops(stage_id, rng=None, when=None):
                 rank = r
                 break
             roll -= weight
+        sroll = rng.random() * star_total
+        star = stars[-1][1]
+        for weight, sv in stars:
+            if sroll < weight:
+                star = sv
+                break
+            sroll -= weight
         item_id = rng.choice(sets) * 1000 + slot * 100 + rank * 10 + star
         if not dd.row("item", item_id):
             continue                 # never hand out an id the client cannot draw
