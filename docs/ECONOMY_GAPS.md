@@ -83,7 +83,7 @@ Grimoire of Sin/Virtue Fragment (1,580 each).
 Three Soul Altar cards added on 2026-08-13 are priced in currencies from section 3, so
 they render and cannot be bought:
 
-* goods 3301 — ★5 Awaker Orb, 70 **Mana Crystal**
+* goods 3601 — ★5 Awaker Orb, 70 **Mana Crystal**
 * goods 3107 — ★5 Sin Bunrei Selector Box, **Prime Mana Crystal**
 * goods 3108 — Virtue Bunrei Selector Box, **Prime Mana Crystal**
 
