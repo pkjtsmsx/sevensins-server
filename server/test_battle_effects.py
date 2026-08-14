@@ -453,18 +453,19 @@ def test_starshard_temple_drops():
     preview = bt.stage_drop_preview(1600001)
     check("the temple preview is not coins",
           bt.COIN_ITEM_ID not in preview, str(preview[:3]))
-    check("it lists the whole rollable pool (6 elements x 2 slots)",
-          len(preview) == 12, str(len(preview)))
+    # ONE icon per set on rotation. The raw pool is 4 sets x 6 slots x 3 ranks = 72,
+    # which is not a preview -- these are the display-only "Random <star> <set>" items.
+    check("it lists one icon per set on rotation", len(preview) == 4, str(len(preview)))
     check("with no duplicates", len(set(preview)) == len(preview))
-    # Every possible payout has to appear in the preview, on any roll.
-    for seed in range(25):
-        paid = bt.starshard_temple_drops(1600001, random.Random(seed))
-        missing = [d.display_item for d in paid if d.display_item not in preview]
-        if missing:
-            check("every rolled drop is in the preview", False, str(missing))
-            break
-    else:
-        check("every rolled drop is in the preview", True)
+    check("and they are display-only set icons",
+          all((bt.dd.row("item", i) or {}).get("_action") == 2 for i in preview))
+    check("which name the sets available today",
+          all(any(n in ((bt.dd.row("item", i) or {}).get("_itemName_en") or "")
+                  for n in bt.STARSHARD_SET_NAMES.values()) for i in preview))
+    # The preview must track the ladder, not sit still.
+    deep = bt.stage_drop_preview(1600041)
+    check("a late stage previews a higher star than the first",
+          deep != preview, "preview did not move with depth")
     check("every temple stage previews shards, not coins",
           all(bt.COIN_ITEM_ID not in bt.stage_drop_preview(s) for s in temple))
 

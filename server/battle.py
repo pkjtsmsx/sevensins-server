@@ -254,65 +254,143 @@ class RuneDrop(NamedTuple):
 # Starshard item ids encode `ELEMENT*1000 + slot*100 + rank*10 + star`, where rank
 # 0..4 = N/R/SR/UR/LR (and `_param2` grade = rank + 1); `_action` is 110 + slot.
 STARSHARD_BOOK = 2
-STARSHARD_ELEMENT_IDS = (201, 202, 203, 204, 205, 206)   # 205 = Nightshade
-STARSHARD_TEMPLE_SLOTS = (1, 2)      # what the live results panel shows for a 2-wave run
+# The eight Temple sets, and the DAY ROTATION the in-game banner states: four sets on
+# Mon/Wed/Fri, the other four on Tue/Thu/Sat/Sun. "Fortitude" is the current EN name for
+# the set the pack still calls Endearment (201) -- confirmed both ways: the banner reads
+# "Fortitude Set(2): HP+19%" and `equip_suit` row 1 "Endearment" is Set(2) HP 190.
+STARSHARD_SETS_MWF = (201, 205, 206, 208)     # Fortitude, Nightshade, Mystery, Devotee
+STARSHARD_SETS_TTSS = (207, 202, 203, 204)    # Defender, Chaos, Hawkeye, Slayer
+STARSHARD_TEMPLE_SLOTS = tuple(range(1, 7))   # all six slots can drop
+STARSHARD_DROPS_PER_CLEAR = 2                 # what the live results panel shows
+# Ladder shape. Stars 1..5 spread over the 41 stages (a ★6 shard exists but is reached by
+# upgrading, not by dropping), and the rarity FLOOR climbs N -> LR across the same run.
+STARSHARD_MAX_STAR = 5
+STARSHARD_MAX_RANK = 4                        # 0..4 = N / R / SR / UR / LR
+# Each shard rolls at the floor or a little above, so a stage has a spread rather than
+# one fixed answer: 55% at the floor, 30% one rank up, 15% two.
+STARSHARD_RANK_ROLL = ((55, 0), (30, 1), (15, 2))
+STARSHARD_SET_NAMES = {201: "Endearment", 202: "Chaos", 203: "Hawkeye", 204: "Slayer",
+                       205: "Nightshade", 206: "Mystery", 207: "Defender",
+                       208: "Devotee"}
 
 
-def starshard_temple_pool(stage_id):
-    """Every shard a Starshard Temple stage can drop, or [] if this is not one.
+def starshard_sets_for_day(when=None):
+    """The four sets the Temple offers today. Monday=0 .. Sunday=6."""
+    import datetime as _dt
+    day = (when or _dt.date.today()).weekday()
+    return STARSHARD_SETS_MWF if day in (0, 2, 4) else STARSHARD_SETS_TTSS
 
-    **WHICH shard a temple stage drops is not recorded anywhere.** The client does not
-    know either: `DesignStageRow` has no ItemsRank accessor at all, so `_itemrank_str`
-    is dead data client-side, and for drop previews the client ASKS us (StageRpc
-    GetDrops 8 -> 25). Temple drop tables were live-ops, exactly like every other
-    stage's -- so this is our content, and only the *shape* is evidence-backed:
 
-      * at least one shard, or the client hangs (see the note on STARSHARD_BOOK);
-      * two of them for a 2-wave clear, which is what live footage shows and what the
-        panel's own `_rune2_Left_Info`/`_rune2_Right_Info` pair is for.
+def starshard_temple_tier(stage_id):
+    """-> (star, rank floor) for a Temple stage, or None if it is not one.
 
-    For WHICH shard, `_itemrank_str`'s first field is the only signal in the row: it
-    runs 31,32,33,34,41,...,60 across ST-1..ST-41, ascending with difficulty. Reading
-    it as A = the shard's star and B = its rank (N/R/SR/UR/LR) fits the ordering and
-    the shard id layout, and gives a sane ladder for 40 of the 41 stages. **It is an
-    inference, not a recovered table** -- ST-41 is "60", which lands on 6-star plain,
-    and the weakest rank on the hardest stage is the tell that the B reading may be
-    wrong. Footage of a late temple clear would settle it.
+    Keyed on the stage's ORDER within the temple (ST-1..ST-41, from `_sort`), not on
+    `_itemrank_str`. That field looks like a ladder (31,32,…,60) and was tried first, but
+    it is dead data -- `DesignStageRow` has no accessor for it, so the client never reads
+    it -- and taken literally it puts ★6 PLAIN on the final stage, i.e. the weakest rank
+    on the hardest content. Stage order is the honest signal and gives a ladder we can
+    state plainly. See docs/BATTLE_SKILL_PLAN.md; this is our design, not a recovery.
     """
     row = dd.row("stage", int(stage_id)) or {}
     if row.get("_book") != STARSHARD_BOOK:
+        return None
+    order = int(row.get("_sort") or 1)
+    total = STARSHARD_TEMPLE_COUNT
+    depth = max(0.0, min((order - 1) / max(total - 1, 1), 1.0))
+    star = min(1 + int(depth * STARSHARD_MAX_STAR), STARSHARD_MAX_STAR)
+    rank = min(int(depth * STARSHARD_MAX_RANK), STARSHARD_MAX_RANK)
+    return star, rank
+
+
+STARSHARD_TEMPLE_COUNT = 41       # ST-1..ST-41; set below from the pack at import
+
+
+def starshard_temple_pool(stage_id, when=None):
+    """Every shard a Temple stage can drop today -> [(item_id, slot), ...], or [].
+
+    WHICH shard drops is not recorded anywhere and the client does not know either: it
+    asks the server for drop previews (StageRpc GetDrops 8 -> 25). Temple drop tables
+    were live-ops like every other stage's, so the ladder here is OUR design:
+
+      * star rises 1..5 across ST-1..ST-41 (~8 stages a band);
+      * the rarity FLOOR rises N -> LR over the same run, and each shard rolls at the
+        floor or up to two ranks above it (STARSHARD_RANK_ROLL);
+      * the set is one of the four on today's rotation, the slot is any of the six.
+
+    Only the SHAPE is evidence-backed: at least one shard or the client hangs, two per
+    clear per live footage, and the eight sets / day rotation off the in-game banner.
+    """
+    tier = starshard_temple_tier(stage_id)
+    if tier is None:
         return []
-    ladder = str(row.get("_itemrank_str") or "").split(",")[0].strip()
-    star = int(ladder[0]) if ladder[:1].isdigit() else 3
-    rank = int(ladder[1]) if len(ladder) > 1 and ladder[1].isdigit() else 0
-    star = max(1, min(star, 6))
-    rank = max(0, min(rank, 4))
+    star, floor = tier
+    # ONE icon per set on rotation, not every combination. Listing the raw pool would be
+    # 4 sets x 6 slots x 3 ranks = 72 icons, which is not a preview. The display-only
+    # "Random ★N <set>" items say exactly the right thing: one of this set, at this star.
     pool = []
-    for slot in STARSHARD_TEMPLE_SLOTS:
-        for element in STARSHARD_ELEMENT_IDS:
-            item_id = element * 1000 + slot * 100 + rank * 10 + star
-            if dd.row("item", item_id):      # never name an id the client cannot draw
-                pool.append((item_id, slot))
+    for element in starshard_sets_for_day(when):
+        icons = starshard_set_icon(element, star)
+        if icons:
+            pool.append((icons[min(floor, len(icons) - 1)], 0))
     return pool
 
 
-def starshard_temple_drops(stage_id, rng=None):
-    """[RuneDrop, ...] a temple clear actually pays: one shard per slot, random element.
-
-    The element is rolled, so `stage_drop_preview` shows the whole pool rather than one
-    outcome -- the same convention the storefronts use for a random box.
-    """
+def starshard_temple_drops(stage_id, rng=None, when=None):
+    """[RuneDrop, ...] a Temple clear actually pays: STARSHARD_DROPS_PER_CLEAR shards,
+    each rolling its own set, slot and rank."""
     import random as _r
     rng = rng or _r
-    pool = starshard_temple_pool(stage_id)
+    tier = starshard_temple_tier(stage_id)
+    if tier is None:
+        return []
+    star, floor = tier
+    sets = starshard_sets_for_day(when)
+    total = sum(w for w, _b in STARSHARD_RANK_ROLL)
+    # Distinct slots, so the two candidates are a real choice rather than near-duplicates
+    # -- the live panel shows a slot I next to a slot II.
+    slots = list(STARSHARD_TEMPLE_SLOTS)
+    rng.shuffle(slots)
     out = []
-    for slot in STARSHARD_TEMPLE_SLOTS:
-        choices = [i for i, sl in pool if sl == slot]
-        if not choices:
-            continue
-        item_id = rng.choice(choices)
+    for slot in slots[:STARSHARD_DROPS_PER_CLEAR]:
+        roll = rng.randrange(total)
+        bump = 0
+        for weight, b in STARSHARD_RANK_ROLL:
+            if roll < weight:
+                bump = b
+                break
+            roll -= weight
+        rank = min(floor + bump, STARSHARD_MAX_RANK)
+        item_id = rng.choice(sets) * 1000 + slot * 100 + rank * 10 + star
+        if not dd.row("item", item_id):
+            continue                 # never hand out an id the client cannot draw
         out.append(RuneDrop(display_item=item_id, item_id=item_id, slot=slot))
     return out
+
+
+_set_icon_cache = {}
+
+
+def starshard_set_icon(element, star):
+    """The display-only "Random ★N <set>" icon for a set at a star, or None.
+
+    `_action 2` items that exist purely to say "one of this set" -- the same ones the
+    storefront Drop Info uses. Five per (set, star), one per rank in `_param1` order.
+    """
+    key = (element, star)
+    if key not in _set_icon_cache:
+        name = (dd.row("item", element * 1000 + 100 + 4 + star * 0) or {})
+        want = STARSHARD_SET_NAMES.get(element)
+        found = []
+        for iid, row in (dd.rows("item") or {}).items():
+            if row.get("_action") != 2 or not want:
+                continue
+            n = (row.get("_itemName_en") or "").strip()
+            if n.startswith("Random \u2605") and n.endswith(" " + want):
+                star_txt = n[len("Random \u2605"):-(len(want) + 1)].strip()
+                if star_txt == ("I" if star == 1 else str(star)):
+                    found.append((int(row.get("_param1") or 0), int(iid)))
+        _set_icon_cache[key] = [i for _p, i in sorted(found)]
+    return _set_icon_cache[key]
 
 
 STAGE_DROPS = {

@@ -810,11 +810,22 @@ def battle_end_reward(battle, state):
                        [json.dumps(reward, separators=(",", ":"))])]
     if won:
         buckets = set()
+        # A temple clear offers a CHOICE of shards; every other stage grants outright.
+        rune_pick = [] if bt.starshard_temple_tier(battle.stage_id) else None
         for d in drops:
             if isinstance(d, bt.RuneDrop):
                 # A starshard is an equipment INSTANCE, not a stackable item: it goes
                 # into storage 2 with its own uid and rolled attr, which is what makes
                 # it show up in the Starshards list.
+                #
+                # **On a Starshard Temple stage the drops are CANDIDATES, not prizes.**
+                # The panel is titled "Starshards Select": the player is shown them and
+                # keeps ONE. Roll now (the panel prints the attributes) and hold the
+                # grant until cmd 508 says which.
+                if rune_pick is not None:
+                    e = ps.roll_rune(state, d.item_id, d.slot, d.level, d.enhance)
+                    rune_pick.append(e)
+                    continue
                 r = ps.grant_rune(state, d.item_id, d.slot, d.level, d.enhance)
                 log(f"    -> starshard: item {d.item_id} slot {d.slot} "
                     f"lv {d.level} uid {r['uid']}")
@@ -852,6 +863,22 @@ def battle_end_reward(battle, state):
                 f"{TUTORIAL_GIFT_STAR}* lv{TUTORIAL_GIFT_LV}")
         # Record the clear so progress persists -- and so the forced newbie tutorial
         # does not run again on a replay (bTutorial keys off this stage's rating).
+        # **The rune panel is launched BY cmd 1507, and reads ONLY the list it carries.**
+        # HandleRuneListCmd (0x168ABAC) deserializes strargs[0] as
+        # List<BackpackItemData> into CurRuneList, takes intargs[0] as CurRuneIndex and
+        # strargs[1] as a List<int> price list, then LaunchPanel()s the panel itself.
+        # Putting the shards in the end-reward `item_list` (which is what an earlier fix
+        # did) does NOT feed that list -- the panel opens with nothing, parks at
+        # UpdateResultState(0) and hangs on the empty altar room.
+        if rune_pick:
+            state["_rune_pick"] = {"stage": battle.stage_id,
+                                   "cands": [dict(e) for e in rune_pick]}
+            msgs.append(battle_msg(
+                bt.CMD_RUNE_LIST, [0],
+                [json.dumps(rune_pick, separators=(",", ":")),
+                 json.dumps([0] * len(rune_pick), separators=(",", ":"))]))
+            log(f"    -> starshard select: {len(rune_pick)} candidates "
+                f"{[e['iid'] for e in rune_pick]}")
         state["stages"][str(battle.stage_id)] = 15
         # Credit the "clear any stage of <family> N times" goals (`_case_id` 5). The
         # client cannot re-derive these -- GetQuestValue reads a server counter -- so
@@ -1088,14 +1115,28 @@ def battle_replies(battle, cmd, intargs, strargs, state=None, uid=""):
                             json.dumps(battle.action_order(),
                                        separators=(",", ":"))])]
     if cmd == bt.REQ_SELECT_RUNE:
-        # ServerRPCRuneSelect(idx) -> intargs=[idx]. HandleSelectRune (0x168A5A8)
-        # only logs and re-raises the intargs as BattleEvent 12, so echoing the
-        # selection back is the whole contract. (The rune CHOICES would come from
-        # cmd 1507 RuneList, which nothing on our side pushes yet -- so in practice
-        # this fires only if a stage offers a rune pick.)
+        # ServerRPCRuneSelect(idx) -> intargs=[idx], the candidate the player kept.
+        # **Reply 1508 carries [itemID, itemCount], NOT the index.** HandleSelectRune
+        # (0x168A5A8) re-raises the intargs as BattleEvent 12, and the listener is
+        # PanelBattleRuneResult.OnBattleEnd (0x16BAB78), which returns early unless the
+        # list has >= 1 entry and then reads [0] as ItemID and [1] as ItemCount for its
+        # reward icon -- and only after that does it reach UpdateResultState(7), the
+        # call that ends the sequence. Echoing the index alone leaves it hanging.
         pick = intargs[0] if intargs else 0
-        log(f"    -> rune select {pick}")
-        return [battle_msg(bt.CMD_SELECT_RUNE, [pick], [])]
+        held = (state or {}).get("_rune_pick") or {}
+        cands = held.get("cands") or []
+        if not cands:
+            log(f"    -> rune select {pick} with no candidates held")
+            return [battle_msg(bt.CMD_SELECT_RUNE, [0, 0], [])]
+        entry = cands[pick] if 0 <= pick < len(cands) else cands[0]
+        ps.store_rune(state, entry)
+        state.pop("_rune_pick", None)
+        ps.save(state)
+        log(f"    -> starshard kept: item {entry['iid']} uid {entry['uid']} "
+            f"(of {len(cands)} offered)")
+        return [battle_msg(bt.CMD_SELECT_RUNE, [int(entry["iid"]), 1], []),
+                backpack_msg(85, [1],
+                             [ps.backpack_json(state, ps.BP_STORAGE_EQUIPMENT)])]
     if cmd == bt.REQ_RECONNECT:
         # Same cmd for BOTH buttons on the "rejoin your battle?" prompt --
         # CB_Reconnect sends intargs=[1] on accept, CB_ReconnectCancel sends [0] on

@@ -663,8 +663,14 @@ def fuse_soulmirrors(state, uids, rng=None):
     return new, removed, coins
 
 
-def grant_rune(state, item_id, slot, level=0, enhance=0, rng=None):
-    """Put a starshard in storage 2. -> the stored entry."""
+def roll_rune(state, item_id, slot, level=0, enhance=0, rng=None):
+    """Roll a starshard WITHOUT storing it -> an entry with its sid/uid reserved.
+
+    The Starshard Temple shows the player two candidates and keeps only the one they
+    pick, so the attributes have to be rolled up front (the panel prints them) while the
+    grant waits on the selection. Rolling again at selection time would hand over a
+    different shard from the one on screen.
+    """
     bag = state["backpack"].setdefault(str(BP_STORAGE_EQUIPMENT), {})
     sid = max((int(k) for k in bag), default=0) + 1
     n = len(bag) + 1
@@ -675,8 +681,26 @@ def grant_rune(state, item_id, slot, level=0, enhance=0, rng=None):
     entry = make_rune(state, item_id, slot, level, enhance, rng)
     entry["sid"] = sid
     entry["uid"] = uid
-    bag[str(sid)] = entry
     return entry
+
+
+def store_rune(state, entry):
+    """Commit a rolled starshard into storage 2, re-deriving sid/uid if they were taken
+    while the player was choosing. -> the stored entry."""
+    bag = state["backpack"].setdefault(str(BP_STORAGE_EQUIPMENT), {})
+    if str(entry.get("sid")) in bag:
+        entry["sid"] = max((int(k) for k in bag), default=0) + 1
+    n = len(bag) + 1
+    while any(e.get("uid") == entry.get("uid") for e in bag.values()):
+        entry["uid"] = rune_uid(state, n)
+        n += 1
+    bag[str(entry["sid"])] = entry
+    return entry
+
+
+def grant_rune(state, item_id, slot, level=0, enhance=0, rng=None):
+    """Roll a starshard and put it straight into storage 2. -> the stored entry."""
+    return store_rune(state, roll_rune(state, item_id, slot, level, enhance, rng))
 
 
 def backpack_json(state, cbp_type):
