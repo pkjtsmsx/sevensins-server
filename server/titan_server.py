@@ -434,6 +434,12 @@ BACKPACK_REQ_DECOMPOSE_SOULFRAG, BACKPACK_RPLY_DECOMPOSE_SOULFRAG = 119, 120
 BACKPACK_REQ_TRANSMUTE_SOULFRAG, BACKPACK_RPLY_TRANSMUTE_SOULFRAG = 117, 118
 # The padlock, shared by every equipment family (runes / soulmirrors / bloodpacts).
 BACKPACK_REQ_EQUIP_LOCK, BACKPACK_RPLY_EQUIP_LOCK = 105, 106
+# BackpackRpcCmd.DropItemRply -- "here is everything you just received", the ONE
+# message that can show a multi-item popup. HandleDropItemRply (0x18EB9DC) needs
+# EXACTLY ONE strarg, a `Dictionary<int,int>` of item id -> count, and builds one
+# ItemStruct per entry into a single ItemPopupInfo. Reply 513 cannot do this: it reads
+# intargs[2]/[3], a single pair, with no loop.
+BACKPACK_RPLY_DROP_ITEM = 24
 BACKPACK_CHANGE = 145
 
 
@@ -2342,10 +2348,17 @@ def handle(conn, addr):
                         # and an empty grid, and it can be dismissed. Inventing plausible
                         # contents would show the player a preview that is simply wrong.
                         item_id = intargs[0] if intargs else 0
-                        log(f"    -> box {item_id} contents unknown "
-                            f"(empty list -- not in client data)")
+                        # Box contents are OUR data -- they were live-ops and are in no
+                        # design form -- so answer from the same tables a purchase pays
+                        # out of. That is what keeps Drop Info honest: what the preview
+                        # lists is exactly what buying hands over. An unknown box still
+                        # answers with an empty list, which opens the popup with the
+                        # item's own name and an empty grid rather than throwing.
+                        contents = ps.box_contents(item_id)
+                        log(f"    -> box {item_id}: {len(contents)} entries")
                         send(MSG_RPC, backpack_msg(
-                            BACKPACK_RPLY_QUERY_BOX, [0], ["[]"]))
+                            BACKPACK_RPLY_QUERY_BOX, [item_id],
+                            [json.dumps(contents, separators=(",", ":"))]))
                     elif index == OFA_SERVER and cmd == OFA_REQ_CONTENT:
                         # Opening any OFA banner (`RequestServerOFAContent: <id>` in
                         # logcat) asks for its content; unanswered, the bulletin panel
@@ -2410,10 +2423,21 @@ def handle(conn, addr):
                         #                                     silently with no animation.
                         #   strargs[0] = updated Dictionary<int, GoodsBuyData>
                         item_id, item_cnt = ps.goods_reward(state, gid, cnt)
+                        # A BUNDLE pays several things, so its confirmation goes out as
+                        # a drop-item popup listing every line. Reply 513 then carries
+                        # only two intargs -- with fewer than three it deliberately
+                        # shows nothing, which is what stops the two popups stacking.
+                        lines = ps.goods_bundle_lines(state, gid) if ok else []
                         send(MSG_RPC, uint_msg(
                             SHOP_CLIENT, SHOP_RPLY_BUY,
-                            [shop_id or 0, gid, item_id, item_cnt],
+                            ([shop_id or 0, gid] if len(lines) > 1
+                             else [shop_id or 0, gid, item_id, item_cnt]),
                             [ps.shop_bought_json(state, shop_id or 0)]))
+                        if len(lines) > 1:
+                            send(MSG_RPC, backpack_msg(
+                                BACKPACK_RPLY_DROP_ITEM, [],
+                                [json.dumps({str(i): c for i, c in lines},
+                                            separators=(",", ":"))]))
                         if ok:
                             send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
                                                    [ps.currency_json(state)]))

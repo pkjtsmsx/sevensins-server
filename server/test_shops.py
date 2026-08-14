@@ -26,6 +26,7 @@ from player_state.core import _default, _seed_roster   # noqa: E402
 
 _fail = 0
 SHOP = "2"
+MAMMON = "1"
 
 
 def check(name, cond, detail=""):
@@ -173,6 +174,129 @@ def main():
     sent = json.loads(payload[1])
     check("sync carries the whole table", len(sent) == len(goods),
           f"{len(sent)} vs {len(goods)}")
+
+    # ---- Mammon's Premium Shop (shop 1) -----------------------------------
+    mam = sh.DEFAULT_SHOP_GOODS[MAMMON]
+    check("mammon rows have 21 fields", all(len(r) == 21 for r in mam))
+    mids = [r[0] for r in mam]
+    check("mammon goods ids are unique", len(set(mids)) == len(mids))
+    check("mammon has the three reset tabs",
+          {r[9] for r in mam} == {sh.FILTER_DAILY, sh.FILTER_WEEKLY, sh.FILTER_MONTHLY},
+          str(sorted({r[9] for r in mam})))
+    # Every tab IS a reset tier, so every card must carry the matching cycle.
+    tab_cycle = {sh.FILTER_DAILY: sh.RESET_DAILY,
+                 sh.FILTER_WEEKLY: sh.RESET_WEEKLY,
+                 sh.FILTER_MONTHLY: sh.RESET_MONTHLY}
+    for r in mam:
+        if r[3] != tab_cycle[r[9]]:
+            check(f"mammon goods {r[0]} cycle matches its tab", False,
+                  f"tab {r[9]} cycle {r[3]}")
+    check("every mammon card resets with its tab", True)
+    for r in mam:
+        if not bt.dd.row("item", r[5]) or not bt.dd.row("item", r[7]):
+            check(f"mammon goods {r[0]} ids exist", False, f"{r[5]} / {r[7]}")
+    check("mammon item and cost ids exist", True)
+
+    # Multi-item bundles must pay EVERY line on the card, and headline a real item.
+    st = fresh()
+    st["currency"]["32"] = 10 ** 6                 # paid diamonds
+    gems0 = int(st["currency"]["1"])
+    coins0 = int(st["currency"]["16"])
+    ok, _s, why, _n = ps.buy_shop_goods(st, 1101, 1)   # Daily Free Bundle
+    check("a free bundle can be bought", ok, why)
+    check("free bundle paid diamonds AND coins",
+          int(st["currency"]["1"]) == gems0 + 10
+          and int(st["currency"]["16"]) == coins0 + 25000,
+          f"{gems0}->{st['currency']['1']} {coins0}->{st['currency']['16']}")
+
+    st = fresh()
+    t2 = ps.item_count(st, 102)
+    t5 = ps.item_count(st, 105)
+    ok, _s, why, _n = ps.buy_shop_goods(st, 1102, 1)   # Power-Leveling Bundle
+    check("trainer bundle pays every tier", ok and
+          ps.item_count(st, 102) == t2 + 24 and ps.item_count(st, 105) == t5 + 5,
+          f"t2 {t2}->{ps.item_count(st,102)} t5 {t5}->{ps.item_count(st,105)}")
+
+    st = fresh()
+    st["currency"]["32"] = 10 ** 6
+    ok, _s, why, _n = ps.buy_shop_goods(st, 1303, 1)   # costs PAID diamonds
+    check("a paid-diamond card spends currency 32", ok and
+          int(st["currency"]["32"]) == 10 ** 6 - 790, why or str(st["currency"]["32"]))
+
+    for r in mam:
+        rid, rcnt = ps.goods_reward(fresh(), r[0], 1)
+        row = bt.dd.row("item", rid) or {}
+        act = row.get("_action")
+        if act in MASK_DROPPED or (act == 0 and row.get("_class") == 2) or rcnt <= 0:
+            check(f"mammon goods {r[0]} headlines a displayable item", False,
+                  f"item {rid} action {act} count {rcnt}")
+    check("every mammon card headlines a displayable reward", True)
+
+    # ---- multi-item bundles report every line -----------------------------
+    # Reply 513 can only name ONE item, so a bundle's confirmation goes out as a
+    # drop-item popup (Backpack 24) listing everything. Single-item cards must NOT
+    # produce one, or the player gets two popups.
+    st = fresh()
+    ps.buy_shop_goods(st, 1102, 1)                 # Power-Leveling: 5 lines
+    lines = ps.goods_bundle_lines(st, 1102)
+    check("a bundle reports every line", len(lines) == 5, str(lines))
+    check("bundle lines carry real counts",
+          dict(lines).get(102) == 24 and dict(lines).get(2) == 250000, str(lines))
+    check("bundle lines are all displayable",
+          all((bt.dd.row("item", i) or {}).get("_action") not in MASK_DROPPED
+              for i, _c in lines), str(lines))
+
+    st = fresh()
+    ps.buy_shop_goods(st, 1103, 1)                 # Soul Essence bundle: 2 lines
+    check("a two-line bundle reports both", len(ps.goods_bundle_lines(st, 1103)) == 2,
+          str(ps.goods_bundle_lines(st, 1103)))
+
+    st = fresh()
+    ps.buy_shop_goods(st, 2409, 1)                 # plain Soul Essence card
+    check("a plain card reports no bundle lines",
+          len(ps.goods_bundle_lines(st, 2409)) <= 1,
+          str(ps.goods_bundle_lines(st, 2409)))
+
+    st = fresh()
+    ps.buy_shop_goods(st, 2101, 1)                 # single-line bundle (coin box)
+    check("a one-line bundle stays on the 513 popup",
+          len(ps.goods_bundle_lines(st, 2101)) == 1,
+          str(ps.goods_bundle_lines(st, 2101)))
+
+    # ---- Drop Info (Backpack 129 -> 130) ----------------------------------
+    # GetIconDataInBox reads each inner list positionally: [0] ItemID, [1] ItemCount,
+    # optional [2] DropWeight. Contents come from the same tables a purchase pays from,
+    # so the preview cannot drift from what buying actually gives.
+    for iid, want in ((901, 5), (3650, 4), (736, 1)):
+        c = ps.box_contents(iid)
+        check(f"box {iid} lists its contents", len(c) == want, str(c))
+        check(f"box {iid} rows are [item, count]",
+              all(len(e) == 2 and e[1] > 0 for e in c), str(c))
+        check(f"box {iid} names real items",
+              all(bt.dd.row("item", e[0]) for e in c), str(c))
+
+    # A random box previews the KINDS on offer, not every permutation -- the live Drop
+    # Info shows a handful of icons, and a 42-deep list is a preview nobody can read.
+    lb = ps.box_contents(1200021)
+    check("a starshard box lists one entry per slot", len(lb) == 6, str(len(lb)))
+    slots = {(bt.dd.row("item", e[0]) or {}).get("_action") for e in lb}
+    check("and covers every slot", len(slots) == 6, str(sorted(slots)))
+
+    orb = ps.box_contents(212)
+    check("the awaker orb lists ★5 casts", len(orb) > 20, str(len(orb)))
+    check("and no Bunrei variants",
+          not any("Bunrei" in ((bt.dd.row("item", e[0]) or {}).get("_itemName_en") or "")
+                  for e in orb))
+    check("every orb entry is a cast item",
+          all((bt.dd.row("item", e[0]) or {}).get("_action") == 1 for e in orb))
+    check("an unknown box answers empty, not garbage", ps.box_contents(999999) == [])
+
+    # Whatever Drop Info promises must be what the card actually pays.
+    st = fresh()
+    lines = dict(ps.box_contents(901))
+    ps.buy_shop_goods(st, 1102, 1)
+    paid = dict(ps.goods_bundle_lines(st, 1102))
+    check("preview matches the payout", lines == paid, f"{lines} vs {paid}")
 
     print("\n" + ("ALL PASSED" if not _fail else f"{_fail} FAILED"))
     return 1 if _fail else 0

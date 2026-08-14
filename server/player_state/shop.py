@@ -125,6 +125,9 @@ FILTER_PVP = 16022          # "PVP Shop" -- the Medal of Pride tab; our pack has
                             # content (arena currency buying ★5 casts and Trainers).
 FILTER_GUILD = 16032        # "Guild Pt"
 FILTER_SALES = 16033        # "Super Sales"
+FILTER_DAILY = 16034        # "Daily Sales"    -- Mammon's three tabs are reset tiers
+FILTER_WEEKLY = 16035       # "Weekly Sales"
+FILTER_MONTHLY = 16036      # "Monthly Sales"
 
 # `ResetCycle` (index 3) drives the "Daily/Weekly/Monthly Reset" strip under each card
 # (texts 113039/113040/113041). The int->label mapping is not in an enum; 1/2/3 in
@@ -136,19 +139,50 @@ RESET_NONE, RESET_DAILY, RESET_WEEKLY, RESET_MONTHLY = 0, 1, 2, 3
 COST_DIAMOND = 1            # CurrencyType.Cash
 COST_MEDAL = 9              # "Medal of Pride" -- a plain bag item, not a currency
 COST_GUILD_PT = 4           # CurrencyType.Guild
+COST_PAID_DIAMOND = 11      # CurrencyType 32 -- the $-marked gem, a separate balance
 
 # **Storefront bundles are `_action 2` BOX items with no contents in the pack.** They
 # carry the art and the name the footage shows ("Deluxe Coin Box (1,500,000)"), so we
 # sell those ids and pay out the amount printed on the card. Coins are item 2 (Mira,
 # a currency) and Stamina is item 5 (energy), both of which grant_reward routes.
+# Values are LISTS: a premium bundle pays several things at once ("Contains Evolution
+# Gem x350, Popular Poster x100, Soul Essence x50,000, and ★4 Trainer x100"). The FIRST
+# entry is the headline the purchase popup names, since reply 513 carries only one
+# (item, count) pair.
+COIN, DIAMOND, PAID_DIAMOND, STAMINA = 2, 1, 11, 5
+POSTER, SOUL_ESSENCE, EVO_GEM = 487, 30, 556
+TRAINER2, TRAINER3, TRAINER4, TRAINER5 = 102, 103, 104, 105
+PASS_ABYSS, PASS_RAIDERS, PASS_GYM, PASS_CORRIDOR = 16, 17, 18, 19
+
 BUNDLE_PAYOUT = {
-    736: (2, 1500000),      # Deluxe Coin Box
-    735: (2, 810000),       # Great Coin Piles
-    734: (2, 240000),       # Coin Piles
-    733: (2, 105000),       # Small Coin Piles
-    732: (2, 55000),        # Coin
-    731: (2, 15000),        # Coin
-    711: (5, 100),          # Stamina (100)
+    # -- Belphe's coin/stamina cards
+    736: [(COIN, 1500000)],     # Deluxe Coin Box
+    735: [(COIN, 810000)],      # Great Coin Piles
+    734: [(COIN, 240000)],      # Coin Piles
+    733: [(COIN, 105000)],      # Small Coin Piles
+    732: [(COIN, 55000)],       # Coin
+    731: [(COIN, 15000)],       # Coin
+    711: [(STAMINA, 100)],      # Stamina (100)
+
+    # -- Mammon's Premium Shop, contents read off each card's own description
+    922: [(DIAMOND, 10), (COIN, 25000)],                      # Daily Free Bundle
+    901: [(TRAINER2, 24), (TRAINER3, 16), (TRAINER4, 10),     # "Power-Leveling"
+          (TRAINER5, 5), (COIN, 250000)],
+    3648: [(SOUL_ESSENCE, 30000), (COIN, 50000)],             # Daily Soul Essence
+    700322: [(POSTER, 12), (STAMINA, 200)],                   # Let's Grow Daily
+    923: [(DIAMOND, 25), (COIN, 50000)],                      # Weekly Free Bundle
+    3581: [(TRAINER2, 36), (TRAINER3, 24), (TRAINER4, 15),    # Adv. Trainer Box
+           (TRAINER5, 9), (COIN, 800000)],
+    902: [(EVO_GEM, 200), (COIN, 300000)],                    # Evo Bundle
+    700323: [(STAMINA, 1000), (COIN, 1000000)],               # Let's Grow Weekly
+    700324: [(PASS_ABYSS, 3), (PASS_RAIDERS, 3),              # Weekly Dungeon Bundle
+             (PASS_GYM, 3), (PASS_CORRIDOR, 3)],
+    700325: [(SOUL_ESSENCE, 30000), (COIN, 200000)],          # Weekly Soul Essence
+    924: [(DIAMOND, 50), (COIN, 100000)],                     # Monthly Free Gift
+    3650: [(EVO_GEM, 350), (POSTER, 100),                     # Deluxe Power-Up
+           (SOUL_ESSENCE, 50000), (TRAINER4, 100)],
+    700014: [(POSTER, 100), (COIN, 250000), (TRAINER3, 10)],  # Ultra Karma Deluxe
+    906: [(POSTER, 50), (COIN, 150000), (TRAINER2, 10)],      # Karma Boost Bundle
 }
 
 # The Guild Pt luckybags are `_action 2` as well, so they hit exactly the same wall --
@@ -189,7 +223,10 @@ def awaker_pool(rarity):
             if row.get("_action") != 1:
                 continue
             cid = int(row.get("_param1") or 0)
-            if cid in chars and (row.get("_itemName") or "").startswith(star):
+            # **Match the ENGLISH name too.** The CN name of a "Bunrei" (a separate,
+            # non-summonable variant sharing the star prefix) also starts with ★N, so
+            # a CN-only test dragged 70-odd of them into the pool.
+            if cid in chars and (row.get("_itemName_en") or "").startswith(star):
                 out.append((cid, int(iid)))
         _awaker_pool_cache[rarity] = sorted(out)
     return _awaker_pool_cache[rarity]
@@ -304,10 +341,55 @@ DEFAULT_SHOP_GOODS = {
         _goods(2409, 30, 500, COST_GUILD_PT, 200, filt=FILTER_GUILD, sort=9,
                limit=10, reset=RESET_DAILY),
     ],
-    # 1 = Mammon's Premium Shop
+    # 1 = Mammon's Premium Shop. Three tabs, one per reset tier, transcribed from
+    # footage. Every card here is a `_action 2` BUNDLE, so each needs a BUNDLE_PAYOUT
+    # entry -- the contents are read straight off the card's own description text (and
+    # for the Trainer boxes, off the in-game Drop Info panel).
+    #
+    # The "Free" cards cost nothing: CostCount 0 against the coin item, which
+    # spend_cost trivially satisfies. They are still capped and still reset.
+    #
+    # Two cards are quoted in PAID diamonds (item 11, CurrencyType 32) rather than the
+    # ordinary gem -- the footage shows the $-marked icon on Ultra Karma Deluxe Box and
+    # the 5,000,000 Coin card.
     "1": [
-        _goods(101, 36, 10, 1, 200, filt=FILTER_SALES),
-        _goods(102, 101, 5, 2, 50000, filt=FILTER_ITEMS),
+        # ---- Daily Sales ------------------------------------------------------
+        _goods(1101, 922, 1, COIN, 0, filt=FILTER_DAILY, sort=1,
+               limit=1, reset=RESET_DAILY, once_max=1),
+        _goods(1102, 901, 1, COST_DIAMOND, 190, filt=FILTER_DAILY, sort=2,
+               limit=2, reset=RESET_DAILY, once_max=2),
+        _goods(1103, 3648, 1, COST_DIAMOND, 130, filt=FILTER_DAILY, sort=3,
+               limit=1, reset=RESET_DAILY, once_max=1),
+        _goods(1104, 700322, 1, COST_DIAMOND, 130, filt=FILTER_DAILY, sort=4,
+               limit=3, reset=RESET_DAILY, once_max=3),
+
+        # ---- Weekly Sales -----------------------------------------------------
+        _goods(1201, 923, 1, COIN, 0, filt=FILTER_WEEKLY, sort=1,
+               limit=1, reset=RESET_WEEKLY, once_max=1),
+        _goods(1202, 3581, 1, COST_DIAMOND, 590, filt=FILTER_WEEKLY, sort=2,
+               limit=2, reset=RESET_WEEKLY, once_max=2),
+        _goods(1203, 902, 1, COST_DIAMOND, 590, filt=FILTER_WEEKLY, sort=3,
+               limit=3, reset=RESET_WEEKLY, once_max=3),
+        _goods(1204, 700323, 1, COST_DIAMOND, 490, filt=FILTER_WEEKLY, sort=4,
+               limit=1, reset=RESET_WEEKLY, once_max=1),
+        _goods(1205, 700324, 1, COST_DIAMOND, 490, filt=FILTER_WEEKLY, sort=5,
+               limit=1, reset=RESET_WEEKLY, once_max=1),
+        _goods(1206, 700325, 1, COST_DIAMOND, 490, filt=FILTER_WEEKLY, sort=6,
+               limit=3, reset=RESET_WEEKLY, once_max=3),
+        _goods(1207, COIN, 5000000, COST_PAID_DIAMOND, 590, filt=FILTER_WEEKLY,
+               sort=7, limit=1, reset=RESET_WEEKLY, once_max=1),
+
+        # ---- Monthly Sales ----------------------------------------------------
+        _goods(1301, 924, 1, COIN, 0, filt=FILTER_MONTHLY, sort=1,
+               limit=1, reset=RESET_MONTHLY, once_max=1),
+        _goods(1302, 3650, 1, COST_DIAMOND, 1890, filt=FILTER_MONTHLY, sort=2,
+               limit=2, reset=RESET_MONTHLY, once_max=2),
+        _goods(1303, 700014, 1, COST_PAID_DIAMOND, 790, filt=FILTER_MONTHLY, sort=3,
+               limit=2, reset=RESET_MONTHLY, once_max=2),
+        _goods(1304, 906, 1, COST_DIAMOND, 590, filt=FILTER_MONTHLY, sort=4,
+               limit=1, reset=RESET_MONTHLY, once_max=1),
+        _goods(1305, STAMINA, 2000, COST_DIAMOND, 490, filt=FILTER_MONTHLY, sort=5,
+               limit=1, reset=RESET_MONTHLY, once_max=1),
     ],
     # 3 = Asmodeus's Soul Altar
     "3": [
@@ -352,6 +434,7 @@ def buy_shop_goods(state, goods_id, count):
 
     if not spend_cost(state, cost_id, cost_cnt * count):
         return False, shop_id, f"cannot pay {cost_cnt * count}x item {cost_id}", []
+    state.pop("_last_payout", None)
     new_chars, out_id, out_cnt = grant_goods(state, item_id, item_cnt * count)
     rec["Count"] += count
     bought[str(goods_id)] = rec
@@ -410,9 +493,13 @@ def grant_goods(state, item_id, amount, rng=None):
     # A fixed bundle: pay the amount printed on the card.
     payout = BUNDLE_PAYOUT.get(int(item_id))
     if payout:
-        real_id, per = payout
-        grant_reward(state, real_id, per * amount)
-        return [], real_id, per * amount
+        lines = []
+        for real_id, per in payout:
+            grant_reward(state, real_id, per * amount)
+            lines.append((real_id, per * amount))
+        state.setdefault("_last_payout", {})[str(item_id)] = lines
+        head_id, head_per = payout[0]
+        return [], head_id, head_per * amount
 
     grant_reward(state, item_id, amount)
     return [], item_id, amount
@@ -438,7 +525,7 @@ def goods_reward(state, goods_id, count):
     item_id, per = row[5], row[6]
     payout = BUNDLE_PAYOUT.get(int(item_id))
     if payout:
-        item_id, per = payout[0], payout[1] * per
+        item_id, per = payout[0][0], payout[0][1] * per
     elif int(item_id) in CHAR_ORB_BUNDLES:
         pool = awaker_pool(CHAR_ORB_BUNDLES[int(item_id)])
         if pool:
@@ -491,3 +578,57 @@ def shop_goods_json(state, shop_id):
     return [json.dumps(bought, separators=(",", ":")),
             json.dumps(goods, separators=(",", ":")),
             "{}"]
+
+
+def goods_bundle_lines(state, goods_id):
+    """As goods_payout_lines, but keyed by the GOODS id the client bought."""
+    _sid, row = find_shop_goods(state, goods_id)
+    return goods_payout_lines(state, row[5]) if row else []
+
+
+def goods_payout_lines(state, item_id):
+    """Every (item id, count) the last purchase of this card handed over.
+
+    **A bundle should show ONE popup listing everything it dropped**, which reply 513
+    cannot do -- `HandleShopBuy` reads exactly intargs[2]/[3], a single pair, with no
+    loop. `PlayerBackpack.HandleDropItemRply` (BackpackRpcCmd.DropItemRply = 24) is the
+    message built for it: strargs[0] is a `Dictionary<int,int>` of item id -> count and
+    it builds one ItemStruct per entry into a single ItemPopupInfo. Returns [] for a
+    plain single-item card, where 513's own popup is the right one.
+    """
+    return list((state.get("_last_payout") or {}).get(str(item_id)) or [])
+
+
+def box_contents(item_id):
+    """strargs[0] of the Drop Info reply (Backpack 129 -> 130): [[itemId, count], ...].
+
+    `PanelItemInfo.GetIconDataInBox` (0x15AAC90) reads each inner list positionally --
+    [0] ItemID, [1] ItemCount, and an optional [2] DropWeight (0 when the entry has
+    fewer than three elements) -- so two-element rows are a complete answer.
+
+    Contents come from the same tables the purchase pays out of, which is what keeps the
+    preview honest: whatever Drop Info shows is exactly what buying hands over. A random
+    box lists its whole pool, one entry per possibility, which is what the popup's
+    scroll view is for.
+    """
+    item_id = int(item_id)
+    payout = BUNDLE_PAYOUT.get(item_id)
+    if payout:
+        return [[int(i), int(c)] for i, c in payout]
+    bundle = RUNE_BUNDLES.get(item_id)
+    if bundle:
+        # One entry per SLOT, not every variant. The card promises a "Random Slot"
+        # shard and the live Drop Info shows a handful of icons, not the 42-deep
+        # permutation list -- a preview nobody can read is worse than a short one.
+        # The grant still rolls across the whole pool.
+        seen, out = set(), []
+        for i in rune_bundle_pool(*bundle):
+            slot = (bt.dd.row("item", i) or {}).get("_action")
+            if slot not in seen:
+                seen.add(slot)
+                out.append([int(i), 1])
+        return out
+    orb = CHAR_ORB_BUNDLES.get(item_id)
+    if orb:
+        return [[int(iid), 1] for _cid, iid in awaker_pool(orb)]
+    return []
