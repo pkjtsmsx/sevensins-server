@@ -144,6 +144,7 @@ COST_DIAMOND = 1            # CurrencyType.Cash
 COST_MEDAL = 9              # "Medal of Pride" -- a plain bag item, not a currency
 COST_GUILD_PT = 4           # CurrencyType.Guild
 COST_PAID_DIAMOND = 11      # CurrencyType 32 -- the $-marked gem, a separate balance
+COST_HOLY_BLOOD = 3         # "Holy Blood of Saint" -- the Soul Altar's own currency
 
 # **Storefront bundles are `_action 2` BOX items with no contents in the pack.** They
 # carry the art and the name the footage shows ("Deluxe Coin Box (1,500,000)"), so we
@@ -464,14 +465,54 @@ DEFAULT_SHOP_GOODS = {
         _goods(1305, STAMINA, 2000, COST_DIAMOND, 490, filt=FILTER_MONTHLY, sort=5,
                limit=1, reset=RESET_MONTHLY, once_max=1),
     ],
-    # 3 = Asmodeus's Soul Altar. **PARTIAL** -- only the two tabs the reference
-    # footage covers. "Holy Blood" (16023) and "Skill Up" (16031) have no screenshots
-    # yet and are deliberately absent rather than invented.
+    # 3 = Asmodeus's Soul Altar, all four tabs.
+    #
+    # The Grimoires and Inherit Gems are the game's SKILL-UP fodder, and the Grimoires
+    # are `_action 1` CASTS (531 -> char 90401 and so on) -- you feed them to another
+    # cast, exactly like the Transcender Gremlins -- so they are granted into the
+    # roster, not the bag. That looks wrong at a glance and is right.
+    #
+    # Skill Up is the fragment exchange, and the rule is uniform: an item costs its OWN
+    # fragment, item N <- fragment N+10 for the Grimoires (531..536 <- 541..546) and
+    # 12/21/13/14/23 <- 300011..300015 for the Inherit Gems. The Holy Blood tab's own
+    # card text confirms the rate ("Collect 1000 fragments to exchange Grimoire of Sin
+    # in Soul Altar").
     #
     # Every card here is bought with the currency for exactly the thing it sells, which
     # is the pattern the cost icons show: an orb costs that orb's FRAGMENT, a Gremlin
     # costs that Gremlin's PIECES, a shard costs that shard's TICKET.
     "3": [
+        # ---- Holy Blood (bought with Holy Blood of Saint, item 3) --------------
+        # The footage's first two cards -- "Sin/Virtue Bunrei Selector Box" -- are
+        # OMITTED: they are `_action 7` selectors ("You may select 1 Bunrei ... as
+        # prefer"), the same class that left an undismissable overlay over the game.
+        _goods(3101, 533, 1, COST_HOLY_BLOOD, 12000, filt=FILTER_HOLY_BLOOD, sort=3,
+               limit=1, reset=RESET_MONTHLY, once_max=1),
+        _goods(3102, 534, 1, COST_HOLY_BLOOD, 7500, filt=FILTER_HOLY_BLOOD, sort=4,
+               limit=1, reset=RESET_MONTHLY, once_max=1),
+        _goods(3103, 541, 500, COST_HOLY_BLOOD, 20000, filt=FILTER_HOLY_BLOOD, sort=5,
+               limit=1, reset=RESET_MONTHLY, once_max=1),
+        _goods(3104, 542, 500, COST_HOLY_BLOOD, 20000, filt=FILTER_HOLY_BLOOD, sort=6,
+               limit=1, reset=RESET_MONTHLY, once_max=1),
+        _goods(3105, 12, 1, COST_HOLY_BLOOD, 15000, filt=FILTER_HOLY_BLOOD, sort=7,
+               limit=1, reset=RESET_MONTHLY, once_max=1),
+        _goods(3106, 21, 1, COST_HOLY_BLOOD, 15000, filt=FILTER_HOLY_BLOOD, sort=8,
+               limit=1, reset=RESET_MONTHLY, once_max=1),
+
+        # ---- Skill Up (each item bought with its OWN fragment) -----------------
+        # The Grimoire of Sin card is cropped in the footage; its price is taken from
+        # the 1000-fragment rate the other Grimoires and the Holy Blood card both
+        # state. Reset strips are cropped on this whole tab, so these are uncapped.
+        _goods(3201, 531, 1, 541, 1000, filt=FILTER_SKILL_UP, sort=1),
+        _goods(3202, 532, 1, 542, 1000, filt=FILTER_SKILL_UP, sort=2),
+        _goods(3203, 533, 1, 543, 1000, filt=FILTER_SKILL_UP, sort=3),
+        _goods(3204, 536, 1, 546, 180, filt=FILTER_SKILL_UP, sort=4),
+        _goods(3205, 14, 1, 300014, 750, filt=FILTER_SKILL_UP, sort=5),
+        _goods(3206, 23, 1, 300015, 625, filt=FILTER_SKILL_UP, sort=6),
+        _goods(3207, 12, 1, 300011, 900, filt=FILTER_SKILL_UP, sort=7),
+        _goods(3208, 13, 1, 300013, 900, filt=FILTER_SKILL_UP, sort=8),
+        _goods(3209, 21, 1, 300012, 900, filt=FILTER_SKILL_UP, sort=9),
+
         # ---- Summoning Orbs ---------------------------------------------------
         # Orbs are `_action 2` and summon "a random cast of ★N or better", so they
         # resolve to a real cast through CHAR_ORB_BUNDLES.

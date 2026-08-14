@@ -335,9 +335,41 @@ def main():
     # ---- Asmodeus's Soul Altar (shop 3, partial) --------------------------
     altar = sh.DEFAULT_SHOP_GOODS["3"]
     check("altar rows have 21 fields", all(len(r) == 21 for r in altar))
-    check("altar has the two captured tabs",
-          {r[9] for r in altar} == {sh.FILTER_ORBS, sh.FILTER_STAR_SHARDS},
+    check("altar has all four tabs",
+          {r[9] for r in altar} == {sh.FILTER_HOLY_BLOOD, sh.FILTER_SKILL_UP,
+                                    sh.FILTER_ORBS, sh.FILTER_STAR_SHARDS},
           str(sorted({r[9] for r in altar})))
+
+    # Skill Up is the fragment exchange: every card is bought with its OWN fragment.
+    # Grimoires are item N <- fragment N+10; Inherit Gems use the 3000xx fragments.
+    frag_of = {531: 541, 532: 542, 533: 543, 536: 546,
+               12: 300011, 21: 300012, 13: 300013, 14: 300014, 23: 300015}
+    for r in altar:
+        if r[9] == sh.FILTER_SKILL_UP and r[5] in frag_of and r[7] != frag_of[r[5]]:
+            check(f"skill-up goods {r[0]} costs its own fragment", False,
+                  f"item {r[5]} costs {r[7]}, expected {frag_of[r[5]]}")
+    check("every skill-up card costs its own fragment", True)
+
+    # Grimoires are `_action 1` CASTS -- skill-up fodder you feed to another cast --
+    # so they must land in the roster, not the bag.
+    st = fresh()
+    ps.grant_item(st, 543, 5000)
+    n = len(st["roster"])
+    ok, _s, why, new = ps.buy_shop_goods(st, 3203, 1)      # Grimoire of Rider
+    check("a grimoire is granted as a cast",
+          ok and len(new) == 1 and len(st["roster"]) == n + 1, why or str(new))
+    check("and not bagged",
+          not any(e.get("iid") == 533 for e in st["backpack"].get("1", {}).values()))
+
+    # Holy Blood cards spend the Soul Altar's own currency.
+    st = fresh()
+    ps.grant_item(st, sh.COST_HOLY_BLOOD, 100000)
+    hb = ps.item_count(st, sh.COST_HOLY_BLOOD)
+    ok, _s, why, _n = ps.buy_shop_goods(st, 3103, 1)       # 500 Sin fragments
+    check("a holy-blood card spends Holy Blood",
+          ok and ps.item_count(st, sh.COST_HOLY_BLOOD) == hb - 20000, why)
+    check("and pays the stated quantity", ps.item_count(st, 541) == 500,
+          str(ps.item_count(st, 541)))
     for r in altar:
         if not bt.dd.row("item", r[5]) or not bt.dd.row("item", r[7]):
             check(f"altar goods {r[0]} ids exist", False, f"{r[5]} / {r[7]}")
