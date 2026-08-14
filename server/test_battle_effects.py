@@ -447,8 +447,32 @@ def test_starshard_temple_drops():
     check("a late stage pays a higher star than the first",
           star(last) > star(first), f"{star(first)} -> {star(last)}")
 
+    # ---- the PREVIEW must agree with the payout ---------------------------
+    # These drifted once already: drops() learned to pay shards while the Drop Info
+    # panel still advertised coins, so the panel lied about every temple stage.
+    preview = bt.stage_drop_preview(1600001)
+    check("the temple preview is not coins",
+          bt.COIN_ITEM_ID not in preview, str(preview[:3]))
+    check("it lists the whole rollable pool (6 elements x 2 slots)",
+          len(preview) == 12, str(len(preview)))
+    check("with no duplicates", len(set(preview)) == len(preview))
+    # Every possible payout has to appear in the preview, on any roll.
+    for seed in range(25):
+        paid = bt.starshard_temple_drops(1600001, random.Random(seed))
+        missing = [d.display_item for d in paid if d.display_item not in preview]
+        if missing:
+            check("every rolled drop is in the preview", False, str(missing))
+            break
+    else:
+        check("every rolled drop is in the preview", True)
+    check("every temple stage previews shards, not coins",
+          all(bt.COIN_ITEM_ID not in bt.stage_drop_preview(s) for s in temple))
+
     # An ordinary stage must be untouched by any of this.
     check("a main-story stage drops no shards", bt.starshard_temple_drops(1101) == [])
+    check("and still previews coins",
+          set(bt.stage_drop_preview(1101)) == {bt.COIN_ITEM_ID},
+          str(bt.stage_drop_preview(1101)))
 
 if __name__ == "__main__":
     main()

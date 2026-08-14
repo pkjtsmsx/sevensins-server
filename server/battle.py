@@ -258,29 +258,27 @@ STARSHARD_ELEMENT_IDS = (201, 202, 203, 204, 205, 206)   # 205 = Nightshade
 STARSHARD_TEMPLE_SLOTS = (1, 2)      # what the live results panel shows for a 2-wave run
 
 
-def starshard_temple_drops(stage_id, rng=None):
-    """[RuneDrop, ...] for a Starshard Temple clear, or [] if this is not one.
+def starshard_temple_pool(stage_id):
+    """Every shard a Starshard Temple stage can drop, or [] if this is not one.
 
     **WHICH shard a temple stage drops is not recorded anywhere.** The client does not
     know either: `DesignStageRow` has no ItemsRank accessor at all, so `_itemrank_str`
     is dead data client-side, and for drop previews the client ASKS us (StageRpc
-    GetDrops 8 -> 25). Temple drop tables were live-ops, exactly like every other stage's
-    -- so this is our content, and only the *shape* below is evidence-backed:
+    GetDrops 8 -> 25). Temple drop tables were live-ops, exactly like every other
+    stage's -- so this is our content, and only the *shape* is evidence-backed:
 
       * at least one shard, or the client hangs (see the note on STARSHARD_BOOK);
       * two of them for a 2-wave clear, which is what live footage shows and what the
         panel's own `_rune2_Left_Info`/`_rune2_Right_Info` pair is for.
 
-    For WHICH shard, `_itemrank_str`'s first field is the only signal in the row: it runs
-    31,32,33,34,41,…,60 across ST-1..ST-41, ascending with difficulty. Reading it as
-    A = the shard's ★ and B = its rank (N/R/SR/UR/LR) fits the ordering and the shard id
-    layout, and gives a sane ladder for 40 of the 41 stages. **It is an inference, not a
-    recovered table** -- ST-41 is "60", which lands on ★6 plain, and the weakest rank on
-    the hardest stage is the tell that the B reading may be wrong. Footage of a late
-    temple clear would settle it.
+    For WHICH shard, `_itemrank_str`'s first field is the only signal in the row: it
+    runs 31,32,33,34,41,...,60 across ST-1..ST-41, ascending with difficulty. Reading
+    it as A = the shard's star and B = its rank (N/R/SR/UR/LR) fits the ordering and
+    the shard id layout, and gives a sane ladder for 40 of the 41 stages. **It is an
+    inference, not a recovered table** -- ST-41 is "60", which lands on 6-star plain,
+    and the weakest rank on the hardest stage is the tell that the B reading may be
+    wrong. Footage of a late temple clear would settle it.
     """
-    import random as _r
-    rng = rng or _r
     row = dd.row("stage", int(stage_id)) or {}
     if row.get("_book") != STARSHARD_BOOK:
         return []
@@ -289,12 +287,30 @@ def starshard_temple_drops(stage_id, rng=None):
     rank = int(ladder[1]) if len(ladder) > 1 and ladder[1].isdigit() else 0
     star = max(1, min(star, 6))
     rank = max(0, min(rank, 4))
+    pool = []
+    for slot in STARSHARD_TEMPLE_SLOTS:
+        for element in STARSHARD_ELEMENT_IDS:
+            item_id = element * 1000 + slot * 100 + rank * 10 + star
+            if dd.row("item", item_id):      # never name an id the client cannot draw
+                pool.append((item_id, slot))
+    return pool
+
+
+def starshard_temple_drops(stage_id, rng=None):
+    """[RuneDrop, ...] a temple clear actually pays: one shard per slot, random element.
+
+    The element is rolled, so `stage_drop_preview` shows the whole pool rather than one
+    outcome -- the same convention the storefronts use for a random box.
+    """
+    import random as _r
+    rng = rng or _r
+    pool = starshard_temple_pool(stage_id)
     out = []
     for slot in STARSHARD_TEMPLE_SLOTS:
-        element = rng.choice(STARSHARD_ELEMENT_IDS)
-        item_id = element * 1000 + slot * 100 + rank * 10 + star
-        if not dd.row("item", item_id):
-            continue                     # never hand out an id the client cannot draw
+        choices = [i for i, sl in pool if sl == slot]
+        if not choices:
+            continue
+        item_id = rng.choice(choices)
         out.append(RuneDrop(display_item=item_id, item_id=item_id, slot=slot))
     return out
 
@@ -365,12 +381,19 @@ def stage_drop_preview(stage_id):
     per-stage drop tables were live-ops data.
 
     So the contents are ours to choose, and the only honest choice is to preview exactly
-    what a clear actually pays -- see Battle.drops(), one coin stack per wave. When drops
-    become per-stage, this and drops() must change together or the panel starts lying.
+    what a clear actually pays -- see Battle.drops(). **This and drops() must change
+    together or the panel starts lying**, which is exactly what happened when the
+    Starshard Temple learned to pay shards and this still advertised coins.
+
+    A temple clear rolls its ELEMENT, so the preview lists the whole pool -- one entry
+    per possibility, the same convention the storefronts use for a random box.
     """
     known = STAGE_DROPS.get(int(stage_id))
     if known is not None:
         return [d.display_item if isinstance(d, RuneDrop) else d[0] for d in known]
+    pool = starshard_temple_pool(stage_id)
+    if pool:
+        return [i for i, _slot in pool]
     row = dd.row("stage", int(stage_id)) or {}
     waves = len(dd.csv_ints(row.get("_mobGroup_datas"))) or 1
     return [COIN_ITEM_ID] * waves
