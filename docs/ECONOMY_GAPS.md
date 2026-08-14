@@ -1,6 +1,7 @@
 # Economy gaps — currencies the game charges for that nothing provides
 
-Audited 2026-08-13 against commit `9c1cb00`; §7 retracted the same day. Method: diff every cost id our build
+Audited 2026-08-13 against commit `9c1cb00`. §7 retracted and §3 corrected the same
+day — see both. The count is now **20**, not the 22 first reported. Method: diff every cost id our build
 charges (the four storefronts' `CostID`, plus every gacha banner's `cost_tbl`) against
 every item id our build can actually hand out (stage drops, quest `_item_id`,
 login-bonus mail, `char_decompose` unsummon refunds, shop payouts).
@@ -40,8 +41,6 @@ upstream, which is why each group has holes rather than being wholly absent.
 
 | id | name | spent at | note |
 |---|---|---|---|
-| 501 | Mana Crystal | Soul Altar ★5 Awaker Orb | see below |
-| 502 | Prime Mana Crystal | Soul Altar, both Bunrei selectors | see below |
 | 300001 | ★3 Minion Summon Orb Fragment | Orbs tab | 300002 (★4) HAS a quest source |
 | 300003 | ★5 Awaker Summon Orb Fragment | Orbs tab | " |
 | 300011–300015 | Inherit Gem Fragments (Sin/Virtue/Rider/★5/★4 Awaker) | Skill Up | all five missing |
@@ -52,12 +51,24 @@ upstream, which is why each group has holes rather than being wholly absent.
 | 1400414 | Virtue Soulmirror Scroll (Revisited) | gacha 1005 | banner unrollable |
 | 1400430 | Sin Soulmirror Scroll (Revisited) | gacha 1004 | banner unrollable |
 
-**Mana Crystal is NOT an unsummon refund in the pack.** `char_decompose` only ever pays
-Ex Grimoires — Gust of Agility, Fist of Strength, Book of Technique, Book of Shadows —
-and neither 501 nor 502 appears as an item id in `char_decompose`, `formula`,
-`transmute`, `quest`, `mail` or `shop`. In the live game unsummoning did pay them, so
-that payout was server-side and is ours to write. Wiring it unblocks three cards at
-once and is probably the best first move in this section.
+**CORRECTED 2026-08-13.** An earlier version of this section claimed Mana Crystal (501)
+and Prime Mana Crystal (502) had no source, on the grounds that `char_decompose` only
+pays Ex Grimoires. That is true of DECOMPOSE and irrelevant: **unsummon is a different
+operation** — Char cmd **291** (`sell_chars`), not 292 (`char_decompose`) — and it pays
+`char._sellId` × `char._sellNumber`, which is exactly the crystals. Confirmed in game and
+in the log: `unsummon ['10000010142'] -> [(2, 3000), (502, 6)]`.
+
+Supply, by the unsummoned cast's rarity:
+
+| rarity | pays | casts |
+|---|---|---|
+| 3 | Mana Crystal (501) | 15 |
+| 4–5 | Prime Mana Crystal (502) | 107 |
+
+So the ★5 Awaker Orb (70 Mana Crystal) and both Bunrei Selector Boxes (Prime Mana
+Crystal) are buyable, and always were. **The lesson: check the operation the player
+actually performed.** Decompose and unsummon are different commands with different
+payout tables.
 
 ## 4. Obtainable but finite
 
@@ -78,17 +89,15 @@ Gacha 1001 is the sharpest edge here: 10 pulls total, ever.
 Genuinely healthy: Diamond, Coin, Holy Blood of Saint (79,250 across 36 quests),
 Grimoire of Sin/Virtue Fragment (1,580 each).
 
-## 5. Self-inflicted — fix before anything else
-
-Three Soul Altar cards added on 2026-08-13 are priced in currencies from section 3, so
-they render and cannot be bought:
+## 5. Priced in crystals — buyable, but the prices are placeholders
 
 * goods 3601 — ★5 Awaker Orb, 70 **Mana Crystal**
 * goods 3107 — ★5 Sin Bunrei Selector Box, **Prime Mana Crystal**
 * goods 3108 — Virtue Bunrei Selector Box, **Prime Mana Crystal**
 
-The prices on 3107/3108 are placeholders (1 each); the footage crops them. The ids,
-the currency and the contents are correct.
+These were listed here as unbuyable while §3 wrongly said the crystals had no source.
+They are fine — unsummon pays both. What IS still provisional is the price on 3107/3108
+(1 each); the footage crops them. The ids, the currency and the contents are correct.
 
 ## 6. Goods ids are not always ours to choose
 
@@ -128,12 +137,10 @@ Karma is fully functional. Nothing to do here.
 ## Suggested order
 
 1. Fix section 5 (data only, minutes).
-2. Mana Crystal + Prime Mana Crystal on unsummon — unblocks three cards, and it is the
-   payout the live game had.
-3. Daily-dungeon drop table for Gremlin Pieces — the client already names the source.
-4. Fragment sources (300001/300003, 300011–300015, 543, 546, 304). These are all
+2. Daily-dungeon drop table for Gremlin Pieces — the client already names the source.
+3. Fragment sources (300001/300003, 300011–300015, 543, 546, 304). These are all
    "some dungeon or daily pays N of these"; pick a consistent home for them rather
    than scattering.
-5. Soulmirror Scrolls (Revisited) — without them two of the three Soulmirror banners
+4. Soulmirror Scrolls (Revisited) — without them two of the three Soulmirror banners
    cannot be rolled at all.
-6. Guild / Arena / IAP when those subsystems land.
+5. Guild / Arena / IAP when those subsystems land.
