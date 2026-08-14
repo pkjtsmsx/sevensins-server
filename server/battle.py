@@ -578,6 +578,30 @@ def _grow(char_row, star, lv, super_star=0):
             "spd": grow["spd"]}
 
 
+def stage_drops_for(stage_id, waves=None, rng=None):
+    """What ONE clear of `stage_id` pays -> [(item, count) | RuneDrop, ...].
+
+    Module-level so the auto-play sweep pays exactly what beating the stage by hand
+    pays. Battle.drops() is a thin wrapper over this; keeping two copies is how the
+    Drop Info preview drifted out of step with the payout once already.
+    """
+    known = STAGE_DROPS.get(int(stage_id))
+    if known is not None:
+        return list(known)
+    # **A Starshard Temple stage MUST drop starshards, or the client hangs.**
+    # See starshard_temple_drops.
+    temple = starshard_temple_drops(stage_id, rng)
+    if temple:
+        return temple
+    gremlins = transcend_corridor_drops(stage_id, rng)
+    if gremlins:
+        return gremlins
+    if waves is None:
+        row = dd.row("stage", int(stage_id)) or {}
+        waves = len(dd.csv_ints(row.get("_mobGroup_datas"))) or 1
+    return [(COIN_ITEM_ID, COIN_PER_WAVE)] * waves
+
+
 def stage_drop_preview(stage_id):
     """Item ids for the stage's "Drop Info" panel (StageRpc GetDrops 8 -> 25).
 
@@ -1467,18 +1491,7 @@ class Battle:
         """
         if not self.wave_cleared():
             return []
-        known = STAGE_DROPS.get(self.stage_id)
-        if known is not None:
-            return list(known)
-        # **A Starshard Temple stage MUST drop starshards, or the client hangs.**
-        # See starshard_temple_drops.
-        temple = starshard_temple_drops(self.stage_id)
-        if temple:
-            return temple
-        gremlins = transcend_corridor_drops(self.stage_id)
-        if gremlins:
-            return gremlins
-        return [(COIN_ITEM_ID, COIN_PER_WAVE)] * self.wave_max
+        return stage_drops_for(self.stage_id, waves=self.wave_max)
 
     def wave_cleared(self):
         return not self.team_alive(TEAM_ENEMY)

@@ -298,6 +298,7 @@ def main():
     test_enemy_multi_target()
     test_starshard_temple_drops()
     test_transcend_corridor_drops()
+    test_auto_play_sweep()
     print(f"\n{'ALL PASSED' if not _fail else f'{_fail} CHECK(S) FAILED'}")
     sys.exit(1 if _fail else 0)
 
@@ -673,6 +674,92 @@ def test_transcend_corridor_drops():
     check("a Temple stage still pays shards, not pieces",
           bt.transcend_corridor_drops(1600001) == []
           and bool(bt.starshard_temple_drops(1600001)))
+
+
+def test_auto_play_sweep():
+    """The AUTO PLAY button must start a sweep, and the sweep must pay out.
+
+    PanelAutoPlay sends PlayerStage cmd 3 [stageID, count, useCoupon]; unanswered, the
+    button does nothing at all (the log just reads "no handler for cmd=3"). The reply
+    shapes are exact: HandleAutoSuccess wants intargs of length EXACTLY 2 and
+    HandleAutoStop EXACTLY 3, and either returns silently otherwise.
+    """
+    import player_state as _ps
+    import titan_server as _ts
+    from player_state.core import _default as _mk, _seed_roster as _seed
+
+    st = _mk(1000001)
+    _seed(st)
+    _ps.grant_reward(st, 19, 50)          # Transcend Corridor passes
+    _ps.grant_reward(st, 30064, 20)       # Quick Battle Coupons
+
+    ok, why = _ps.autorun_start(st, 1800021, 5, False, 1000)
+    check("a sweep starts", ok, why)
+    job = st.get("autorun") or {}
+    check("it records the stage and count",
+          (job.get("stage_id"), job.get("count")) == (1800021, 5), str(job))
+    check("it is TIMED, not instant", job.get("duetime", 0) > job.get("starttime", 0),
+          str(job))
+    check("the pass is charged per run", _ps.item_count(st, 19) == 45,
+          str(_ps.item_count(st, 19)))
+    # **Passes are free runs, not a hard cap.** With only 3 a day, refusing a 99-run
+    # sweep would make the feature unusable on exactly the stages worth sweeping -- so
+    # passes are spent while they last and stamina carries the rest.
+    st2 = _mk(1000002)
+    _seed(st2)
+    check("a sweep runs with NO passes at all",
+          _ps.autorun_start(st2, 1800021, 99, False, 100)[0]
+          and st2["autorun"]["count"] == 99, str(st2.get("autorun")))
+    st3 = _mk(1000003)
+    _seed(st3)
+    _ps.grant_reward(st3, 19, 3)
+    _ps.autorun_start(st3, 1800021, 99, False, 100)
+    check("passes are spent first, then stamina carries the rest",
+          _ps.item_count(st3, 19) == 0 and st3["autorun"]["count"] == 99,
+          f"passes {_ps.item_count(st3, 19)}")
+    check("a second sweep is refused while one runs",
+          not _ps.autorun_start(st, 1800021, 2, False, 1001)[0])
+    check("nothing pays out before it is due", _ts.autorun_settle(st, 1000) == [])
+
+    before = sum(_ps.item_count(st, i) for i in bt.GREMLIN_PIECE_ITEMS)
+    msgs = _ts.autorun_settle(st, job["duetime"])
+    after = sum(_ps.item_count(st, i) for i in bt.GREMLIN_PIECE_ITEMS)
+    check("settling pays every run", after - before == 5 * bt.GREMLIN_PIECES_PER_CLEAR,
+          f"{before} -> {after}")
+    check("and clears the job", "autorun" not in st)
+    check("it answers the client", len(msgs) >= 1, str(len(msgs)))
+
+    # **A Temple sweep must NOT pick shards for the player.** Its reward is a choice.
+    _ps.autorun_start(st, 1600002, 4, False, 5000)
+    shards = len(st["backpack"].get("2", {}))
+    _ts.autorun_settle(st, st["autorun"]["duetime"])
+    check("a Temple sweep grants no shards",
+          len(st["backpack"].get("2", {})) == shards, "a sweep cannot make the choice")
+
+    # Express buys the SPEED, and pays the entry cost as well.
+    passes, coupons = _ps.item_count(st, 19), _ps.item_count(st, 30064)
+    ok, why = _ps.autorun_start(st, 1800021, 3, True, 9000)
+    check("express starts", ok, why)
+    check("express is instant", st["autorun"]["duetime"] == 9000, str(st["autorun"]))
+    check("express spends coupons", _ps.item_count(st, 30064) == coupons - 3)
+    check("express ALSO spends the entry cost while passes last",
+          _ps.item_count(st, 19) == max(0, passes - 3))
+
+    # The sweep pays exactly what one clear pays, N times -- one source of truth.
+    check("stage_drops_for matches the corridor table",
+          bt.stage_drops_for(1800021, rng=random.Random(2))[0][0]
+          in bt.GREMLIN_PIECE_ITEMS)
+    check("and falls back to coins for an ordinary stage",
+          bt.stage_drops_for(9999999) == [(bt.COIN_ITEM_ID, bt.COIN_PER_WAVE)])
+
+    # bestrec drives the panel's "Stage Clear Record" and its time estimate.
+    _ps.record_stage_turns(st, 1600002, 7)
+    _ps.record_stage_turns(st, 1600002, 9)
+    _ps.record_stage_turns(st, 1600002, 4)
+    check("the best (lowest) clear length is kept",
+          (st.get("bestrec") or {}).get("1600002") == 4, str(st.get("bestrec")))
+    check("and it reaches the client",
+          json.loads(_ps.stage_json(st))["bestrec"].get("1600002") == 4)
 
 if __name__ == "__main__":
     main()

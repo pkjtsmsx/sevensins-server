@@ -9,6 +9,8 @@ import battle as bt
 import design_data as dd
 
 from .core import (
+    item_count,
+    spend_item,
     CHAR_BUYCOUNT_MAX,
     CHAR_SORT_SLOTS,
     char_sort_list,
@@ -324,11 +326,127 @@ def char_capacity(state):
     return int(state.get("add_char", CHAR_BUYCOUNT_MAX))
 
 
-def stage_json(state):
+# ---- AUTO PLAY (the offline sweep) -----------------------------------------
+# PanelAutoPlay's Start button sends **PlayerStage cmd 3**
+# `RequestServerStageAutoStart(stageID, count, useQuickBattleCoupon)` (0x180C318). The
+# three answers it wants back:
+#   cmd 33 HandleAutoSuccess -- intargs EXACTLY [stageID, count]; shows confirm 401,
+#          "sweep started". Any other length and it returns without a word.
+#   cmd 24 HandleAutoSync    -- strargs[0] is a StageSyncData whose `auto` dict is
+#          Dictionary<int, AutoRunData>; it dispatches StageEvent 1 so the panel redraws.
+#   (stop) HandleAutoStop    -- intargs EXACTLY 3, confirm 402.
+# AutoRunData's wire keys are {stage_id, count, duetime, starttime} -- a TIMED job, which
+# is what the panel's "Est. Time" is counting down and what Express mode pays to skip.
+AUTORUN_COUPON_ITEM = 30064          # Quick Battle Coupon, the Express currency
+AUTORUN_SECONDS_PER_TURN = 10        # the panel's own "+10s per turn"
+AUTORUN_DEFAULT_TURNS = 10           # used until the stage has a clear record
+STAMINA_ENERGY_TYPE = 1
+AUTORUN_CHARGES_STAMINA = False       # see autorun_start
+
+
+def stage_best_turns(state, stage_id):
+    """Best recorded clear length, or None. Drives both the sweep's duration and the
+    panel's "Stage Clear Record" -- which reads **-1 Turn(s)** while `bestrec` is empty."""
+    rec = (state.get("bestrec") or {}).get(str(int(stage_id)))
+    return int(rec) if rec else None
+
+
+def record_stage_turns(state, stage_id, turns):
+    """Keep the best (lowest) clear length for a stage."""
+    if not turns or turns < 1:
+        return
+    rec = state.setdefault("bestrec", {})
+    key = str(int(stage_id))
+    if key not in rec or int(turns) < int(rec[key]):
+        rec[key] = int(turns)
+
+
+def autorun_duration(state, stage_id, count):
+    """Seconds a sweep of `count` runs will take, by the panel's own arithmetic."""
+    turns = stage_best_turns(state, stage_id) or AUTORUN_DEFAULT_TURNS
+    return max(1, int(turns)) * AUTORUN_SECONDS_PER_TURN * max(1, int(count))
+
+
+def autorun_start(state, stage_id, count, use_coupon, now):
+    """Begin an offline sweep. -> (ok, reason). Charges up front, like the panel says."""
+    row = dd.row("stage", int(stage_id)) or {}
+    if not row:
+        return False, f"unknown stage {stage_id}"
+    if state.get("autorun"):
+        return False, "a sweep is already running"
+    count = max(1, int(count))
+    # **A Quick Battle Coupon buys the SPEED, not the run.** Express still pays the
+    # stage's own entry cost on top -- otherwise the express tab would be a way to run
+    # a pass-gated dungeon without spending passes.
+    if use_coupon and not spend_item(state, AUTORUN_COUPON_ITEM, count):
+        return False, f"not enough Quick Battle Coupons ({count} needed)"
+
+    # **Passes first, then STAMINA for the rest.** A daily dungeon's passes are free
+    # runs, not a hard cap: with only 3 a day, refusing a 99-run sweep outright would
+    # make the whole feature unusable on exactly the stages people want to sweep. Spend
+    # what passes there are, and let stamina carry the remainder.
+    on_passes = 0
+    item_cost = stage_ap_cost(row)
+    if item_cost:
+        iid, per = item_cost
+        on_passes = min(count, item_count(state, iid) // per) if per else count
+        if on_passes:
+            spend_item(state, iid, per * on_passes)
+    remainder = count - on_passes
+    # **Stamina is deliberately NOT charged**, so the remainder is currently free.
+    # Ordinary runs do not charge it either (the stage-entry path only spends
+    # `_ap_type 2` pass items), so taking it here would make a sweep cost more than
+    # doing the same runs by hand. Flip AUTORUN_CHARGES_STAMINA to switch it on -- the
+    # panel already quotes the cost and the arithmetic below is ready for it.
+    if remainder and AUTORUN_CHARGES_STAMINA:
+        per_ap = int(row.get("_ap") or 0)
+        slot = state["energy"].setdefault(str(STAMINA_ENERGY_TYPE),
+                                          {"energy": 0, "cap": 0})
+        if int(slot.get("energy", 0)) < per_ap * remainder:
+            return False, (f"not enough stamina ({per_ap * remainder} needed, "
+                           f"{slot.get('energy', 0)} held)")
+        slot["energy"] = int(slot["energy"]) - per_ap * remainder
+    # Express skips the wait entirely -- that is what the coupon buys.
+    secs = 0 if use_coupon else autorun_duration(state, stage_id, count)
+    state["autorun"] = {"stage_id": int(stage_id), "count": count,
+                        "starttime": int(now), "duetime": int(now) + secs}
+    return True, ""
+
+
+def autorun_json(state, now=None):
+    """The `auto` dict of StageSyncData: Dictionary<int, AutoRunData>."""
+    job = state.get("autorun")
+    if not job:
+        return {}
+    return {str(job["stage_id"]): {"stage_id": job["stage_id"],
+                                   "count": job["count"],
+                                   "starttime": job["starttime"],
+                                   "duetime": job["duetime"]}}
+
+
+def autorun_due(state, now):
+    """The job if its timer has elapsed, else None."""
+    job = state.get("autorun")
+    return job if job and int(now) >= int(job["duetime"]) else None
+
+
+def autorun_cancel(state):
+    """Abandon a running sweep. -> the job that was dropped, or None. Nothing is
+    refunded: the runs it already represents are paid for."""
+    return state.pop("autorun", None)
+
+
+def stage_json(state, now=None):
     """PlayerStage.StageSyncData. `stages` maps stage id -> rating bitmask and is
     what GetStageRating reads; the other three dicts use LuaTableConverter and must
-    be present or they deserialize to null."""
+    be present or they deserialize to null.
+
+    `bestrec` is the per-stage best clear length. Leaving it empty is why the auto-play
+    panel reads "Stage Clear Record -1 Turn(s)" and cannot estimate a sweep's duration.
+    `auto` carries the running sweep, if any."""
     return json.dumps({
-        "entrance": {}, "stages": state["stages"], "bestrec": {}, "auto": {},
+        "entrance": {}, "stages": state["stages"],
+        "bestrec": state.get("bestrec") or {},
+        "auto": autorun_json(state, now),
         "weekday": 0,
     }, separators=(",", ":"))
