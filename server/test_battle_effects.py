@@ -21,6 +21,13 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+# **Point the account store at a THROWAWAY DIR before player_state is imported.**
+# This suite drives real server paths (battle_end_reward, battle_replies) and those
+# call ps.save(), so without this it writes a fresh default account straight over the
+# player's real save. That is not hypothetical -- it happened, and cost a live account.
+import tempfile as _tempfile
+os.environ["SEVENSINS_ACCOUNTS"] = _tempfile.mkdtemp(prefix="sevensins-test-")
+
 import battle as bt          # noqa: E402
 import battle_effects as fx  # noqa: E402
 
