@@ -102,6 +102,42 @@ def main():
     check("unknown uids are skipped, not nulled",
           json.loads(ps.char_create_json(st, ["nope"])) == {})
 
+
+    # ---- a quest that pays a BUNDLE ---------------------------------------
+    # Quest 31019 (Lucifer's Note step 19) pays item 1200006 "Evolution TUT Bundle",
+    # `_action 2`. Same double wall as the storefront bundles: GetItemSpace has no case
+    # for `_action 2` so no inventory tab holds it, and EnqueItemPopupInfo strips it
+    # from the reward popup -- claiming the goal handed over something invisible and
+    # said nothing. Contents come from the row's CHINESE `_note1`, and live footage of
+    # the claim shows exactly the two cards this asserts.
+    st3 = fresh()
+    st3["sp_quests"]["31018"] = {"id": 31018, "a_time": 0, "cnt": 1, "status": 1}
+    roster_before = len(st3["roster"])
+    gems_before = ps.item_count(st3, 556)
+    rewards3, new3 = ps.complete_quests(st3, [31019])
+
+    check("the bundle is never bagged whole",
+          not any(e.get("iid") == 1200006
+                  for e in st3["backpack"].get("1", {}).values()))
+    check("its cast line reaches the roster", len(new3) == 1, str(new3))
+    check("and it is Jacqueline at ★4",
+          st3["roster"][new3[0]]["id"] == 11001
+          and st3["roster"][new3[0]]["star"] == 4, str(st3["roster"][new3[0]]))
+    check("its item line reaches the bag",
+          ps.item_count(st3, 556) == gems_before + 1200,
+          f"{gems_before} -> {ps.item_count(st3, 556)}")
+    check("the roster grew by exactly one",
+          len(st3["roster"]) == roster_before + 1)
+    # Reply 513 carries one (item, count); it must name a row the popup mask keeps.
+    check("the headline is the `_action 1` cast item",
+          rewards3 == [(31019, 111004, 1)], str(rewards3))
+    check("which survives EnqueItemPopupInfo's mask",
+          (bt.dd.row("item", rewards3[0][1]) or {}).get("_action") == 1)
+    # Both lines are needed for the side-by-side popup the live game shows.
+    lines = ps.goods_payout_lines(st3, 1200006)
+    check("both bundle lines are reported for the popup",
+          lines == [(111004, 1), (556, 1200)], str(lines))
+
     # ---- ordinary rewards are untouched -----------------------------------
     st2 = fresh()
     rewards2, new2 = ps.complete_quests(st2, [31013])      # pays an Awaker Scroll

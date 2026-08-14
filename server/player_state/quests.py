@@ -192,10 +192,21 @@ def complete_quests(state, quest_ids):
                 new_chars.append(add_char(state, char_id, star=star))
             rewards.append((int(qid), display_item, cnt))
         elif item_id and cnt:
-            # routed by _action -- 21001 pays 10000x item 2, which is Mira, not a
-            # 10000-deep backpack stack
-            grant_reward(state, item_id, cnt)
-            rewards.append((int(qid), item_id, cnt))
+            # Routed by `_action` -- 21001 pays 10000x item 2, which is Mira, not a
+            # 10000-deep backpack stack.
+            #
+            # **A quest can also pay a BUNDLE.** Step 19 of Lucifer's Note pays item
+            # 1200006 "Evolution TUT Bundle", `_action 2`: no inventory tab will hold
+            # it (GetItemSpace has no case for `_action 2`) and EnqueItemPopupInfo
+            # strips it from the reward popup, so claiming the goal handed over
+            # something invisible and said nothing. grant_goods is the one place that
+            # knows how to turn an item id into what it is actually worth -- bundles,
+            # casts, random boxes and plain items alike -- so defer to it and report
+            # what it says was paid.
+            from .shop import grant_goods       # local: shop imports us, not the reverse
+            uids, paid_id, paid_cnt = grant_goods(state, item_id, cnt)
+            new_chars.extend(uids)
+            rewards.append((int(qid), paid_id, paid_cnt))
         else:
             rewards.append((int(qid), item_id, cnt))
     return rewards, new_chars

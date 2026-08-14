@@ -1476,13 +1476,32 @@ def handle(conn, addr):
                         triples = [v for r in rewards for v in r]
                         send(MSG_RPC, uint_msg(PLAYER_QUEST, QUEST_RPLY_REWARD,
                                                triples, []))
+                        # A BUNDLE reward pays several things, and reply 513's triples
+                        # carry only the headline. The live claim popup shows every
+                        # line side by side (★4 Jacqueline AND Evolution Gem x1200), so
+                        # follow up with the drop-item popup that can list them all --
+                        # the same message the storefront bundles use.
+                        for _q, rid, _c in rewards:
+                            lines = ps.goods_payout_lines(
+                                state, (bt.dd.row("quest", _q) or {}).get("_item_id"))
+                            if len(lines) > 1:
+                                send(MSG_RPC, backpack_msg(
+                                    BACKPACK_RPLY_DROP_ITEM, [],
+                                    [json.dumps({str(i): c for i, c in lines},
+                                                separators=(",", ":"))]))
                         send(MSG_RPC, quest_sync_msg(state))
                         # The reward popup is display only and the client caches the bag
                         # and the currencies from the login sync, so without these the
                         # granted items exist ONLY server-side -- which is why the gacha
                         # still read 0 scrolls right after the 1-1 goal paid out 10.
-                        buckets = {ps.item_bucket(iid) for _q, iid, cnt in rewards
-                                   if iid and cnt}
+                        # Count the bundle's LINES, not just its headline: a bundle
+                        # whose head is a cast would otherwise report "backpack" for a
+                        # payout that actually moved currency or energy.
+                        paid = [(iid, cnt) for _q, iid, cnt in rewards if iid and cnt]
+                        for _q, _rid, _c in rewards:
+                            paid += ps.goods_payout_lines(
+                                state, (bt.dd.row("quest", _q) or {}).get("_item_id"))
+                        buckets = {ps.item_bucket(iid) for iid, cnt in paid if iid and cnt}
                         if "backpack" in buckets:
                             send(MSG_RPC, backpack_msg(
                                 84, [1],

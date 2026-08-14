@@ -164,6 +164,8 @@ COIN, DIAMOND, PAID_DIAMOND, STAMINA = 2, 1, 11, 5
 POSTER, SOUL_ESSENCE, EVO_GEM = 487, 30, 556
 TRAINER2, TRAINER3, TRAINER4, TRAINER5 = 102, 103, 104, 105
 PASS_ABYSS, PASS_RAIDERS, PASS_GYM, PASS_CORRIDOR = 16, 17, 18, 19
+# `_action 1` character item -> char 11001 at ★4. NOT the ★5/★6 rows (111005/6).
+JACQUELINE_4STAR = 111004
 
 BUNDLE_PAYOUT = {
     # -- Belphe's coin/stamina cards
@@ -194,6 +196,18 @@ BUNDLE_PAYOUT = {
            (SOUL_ESSENCE, 50000), (TRAINER4, 100)],
     700014: [(POSTER, 100), (COIN, 250000), (TRAINER3, 10)],  # Ultra Karma Deluxe
     906: [(POSTER, 50), (COIN, 150000), (TRAINER2, 10)],      # Karma Boost Bundle
+
+    # -- QUEST reward bundles. Same `_action 2` wall as the storefront ones: no
+    # inventory tab will hold them and the reward popup strips them, so claiming the
+    # goal paid out nothing the player could see. Contents come from the row's own
+    # CHINESE `_note1` -- the only place they are written down, since the EN string is
+    # just the item name repeated.
+    #   1200006 "Evolution TUT Bundle" (quest 31019, Lucifer's Note step 19)
+    #   CN: 內含【★4機械之隸魔 賈桂琳x1】、【進化石x1200】
+    #       = ★4 Eccentric Inventor Jacqueline x1 + Evolution Gem x1200
+    # Confirmed against live footage of the claim popup, which shows exactly those two
+    # cards side by side.
+    1200006: [(JACQUELINE_4STAR, 1), (EVO_GEM, 1200)],
 }
 
 # The Guild Pt luckybags are `_action 2` as well, so they hit exactly the same wall --
@@ -763,12 +777,19 @@ def grant_goods(state, item_id, amount, rng=None):
     payout = BUNDLE_PAYOUT.get(int(item_id))
     if payout:
         lines = []
+        uids = []
         for real_id, per in payout:
-            grant_reward(state, real_id, per * amount)
+            # **Recurse rather than grant_reward.** A bundle line can itself be a CAST
+            # (the Evolution TUT Bundle contains ★4 Jacqueline), and grant_reward would
+            # file an `_action 1` item into the bag, where GetItemSpace cannot place it
+            # and the player never sees it. Going back through grant_goods routes each
+            # line by its own `_action`, so casts reach the roster.
+            sub_uids, _pid, _pcnt = grant_goods(state, real_id, per * amount, rng)
+            uids.extend(sub_uids)
             lines.append((real_id, per * amount))
         state.setdefault("_last_payout", {})[str(item_id)] = lines
         head_id, head_per = payout[0]
-        return [], head_id, head_per * amount
+        return uids, head_id, head_per * amount
 
     grant_reward(state, item_id, amount)
     return [], item_id, amount
