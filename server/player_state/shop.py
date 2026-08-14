@@ -324,9 +324,21 @@ def rune_bundle_pool(element, grade):
         _rune_pool_cache[key] = sorted(pool)
     return _rune_pool_cache[key]
 
-# `Limit` (index 4) is the purchase cap; 0 renders as "Purchase Cap 0/0" and blocks
-# buying. OnceBuyMax (16) caps a single transaction.
+# `Limit` (index 4) is the purchase cap. Three regimes, and the encoding is not
+# obvious -- read out of `StoreItemHandler.SetValue` (0x34407C0), which does
+#
+#     LDR  W8, [X20,#0x20]   ; Limit
+#     LSR  W8, W8, #0x1F     ; sign bit
+#     EOR  W1, W8, #1        ; active = !(Limit < 0)
+#     BL   GameObject$$SetActive
+#
+# so the "Purchase Cap" strip (text 113009) is shown only while Limit >= 0:
+#   Limit > 0   capped, renders "Purchase Cap bought/Limit"
+#   Limit == 0  renders "Purchase Cap 0/0" and the card CANNOT BE BOUGHT -- 0 is a
+#               real cap of zero, not "no cap"
+#   Limit < 0   UNCAPPED: the strip is hidden and the card can be bought forever
 GOODS_DEFAULT_LIMIT = 99
+GOODS_NO_LIMIT = -1
 GOODS_DEFAULT_ONCE_MAX = 10
 
 
@@ -536,14 +548,18 @@ DEFAULT_SHOP_GOODS = {
         _goods(3304, 210, 1, 300001, 100, filt=FILTER_ORBS, sort=4,
                limit=20, reset=RESET_DAILY, once_max=20),
         # Transcender Gremlins are `_action 1` CASTS bought with their own Pieces, and
-        # they carry NO purchase cap -- buy as many as you have Pieces for. limit=0 is
-        # what says that: `buy_shop_goods` treats 0 as uncapped, and the card renders
-        # no cap strip.
-        _goods(3305, 115, 1, 120, 1, filt=FILTER_ORBS, sort=5, limit=0),
-        _goods(3306, 114, 1, 119, 1, filt=FILTER_ORBS, sort=6, limit=0),
-        _goods(3307, 113, 1, 118, 1, filt=FILTER_ORBS, sort=7, limit=0),
-        _goods(3308, 112, 1, 117, 1, filt=FILTER_ORBS, sort=8, limit=0),
-        _goods(3309, 111, 1, 116, 1, filt=FILTER_ORBS, sort=9, limit=0),
+        # they carry NO purchase cap -- buy as many as you have Pieces for. That is
+        # GOODS_NO_LIMIT (a NEGATIVE Limit), which is what hides the cap strip; limit=0
+        # is a cap of zero and renders "Purchase Cap 0/0" over an unbuyable card.
+        _goods(3305, 115, 1, 120, 1, filt=FILTER_ORBS, sort=5, limit=GOODS_NO_LIMIT),
+        _goods(3306, 114, 1, 119, 1, filt=FILTER_ORBS, sort=6,
+               limit=GOODS_NO_LIMIT),
+        _goods(3307, 113, 1, 118, 1, filt=FILTER_ORBS, sort=7,
+               limit=GOODS_NO_LIMIT),
+        _goods(3308, 112, 1, 117, 1, filt=FILTER_ORBS, sort=8,
+               limit=GOODS_NO_LIMIT),
+        _goods(3309, 111, 1, 116, 1, filt=FILTER_ORBS, sort=9,
+               limit=GOODS_NO_LIMIT),
 
         # ---- Summon Star Shards -----------------------------------------------
         # Reset strip is cropped here too, so these are uncapped for now.
@@ -636,7 +652,10 @@ def buy_shop_goods(state, goods_id, count):
 
     bought = state.setdefault("shop_bought", {}).setdefault(str(shop_id), {})
     rec = bought.get(str(goods_id)) or {"Count": 0, "Reset": 0}
-    if limit and rec["Count"] + count > limit:
+    # Limit < 0 is the UNCAPPED encoding (see GOODS_NO_LIMIT); only a positive Limit
+    # is a real cap. `if limit` alone would have treated -1 as a cap of -1 and refused
+    # every purchase, which is the server half of the same bug.
+    if limit > 0 and rec["Count"] + count > limit:
         return False, shop_id, f"over purchase cap {limit}", []
 
     if not spend_cost(state, cost_id, cost_cnt * count):

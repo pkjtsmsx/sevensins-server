@@ -151,8 +151,14 @@ def main():
     # Transcender Gremlins (items 111..115) carry no purchase cap.
     gremlins = [r for r in altar if r[5] in (111, 112, 113, 114, 115)]
     check("all five Gremlin cards are present", len(gremlins) == 5, str(len(gremlins)))
-    check("and none of them is capped", all(r[4] == 0 for r in gremlins),
+    # A NEGATIVE Limit is the uncapped encoding: StoreItemHandler.SetValue (0x34407C0)
+    # does `active = !(Limit < 0)` on the "Purchase Cap" strip. Limit 0 is a real cap of
+    # zero -- it renders "Purchase Cap 0/0" over a card that cannot be bought at all.
+    check("and none of them is capped", all(r[4] < 0 for r in gremlins),
           str([(r[0], r[4]) for r in gremlins]))
+    check("no card anywhere is capped at zero",
+          not [(s, r[0]) for s, rows in DEFAULT_SHOP_GOODS.items()
+               for r in rows if r[4] == 0])
 
     # A real purchase of an uncapped card must go through repeatedly.
     st3 = fresh()
@@ -160,6 +166,9 @@ def main():
     ps.grant_reward(st3, gremlins[0][7], 50)      # stock up on Pieces
     oks = [ps.buy_shop_goods(st3, gid, 1)[0] for _ in range(6)]
     check("an uncapped card can be bought over and over", all(oks), str(oks))
+    # ...and well past what a positive cap would have allowed.
+    ok30 = all(ps.buy_shop_goods(st3, gid, 1)[0] for _ in range(30))
+    check("30 more purchases still go through", ok30)
 
     print("\n" + ("ALL PASSED" if not _fail else f"{_fail} FAILED"))
     return 1 if _fail else 0
