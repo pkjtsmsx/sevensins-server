@@ -571,6 +571,29 @@ def test_starshard_temple_drops():
           [e["iid"] for e in st4["backpack"]["2"].values()] == [rolled[1]["iid"]],
           str(st4["backpack"]["2"]))
 
+    # ---- the "Inventory n/999" counter must follow the grant ---------------
+    # The storage sync (84-87) carries the item LIST; the counter comes from the
+    # backpack INFO rows, which only cmd 83 and BACKPACK_CHANGE carry. Pushing just the
+    # list drew the new shard in the grid over a stale count -- 3 icons, "2/999".
+    import json as _json
+    import titan_server as _ts
+    st5 = _mk(1000001)
+    _seed(st5)
+    order5 = {r.get("_sort"): sid for sid, r in (bt.dd.rows("stage") or {}).items()
+              if r.get("_book") == bt.STARSHARD_BOOK}
+    for expected in (1, 2, 3):
+        b5 = bt.Battle(order5[1], [{"id": 10001}, {"id": 10011}], team_level=60)
+        for u in list(b5.units.values()):
+            if u.team != bt.TEAM_PLAYER:
+                u.hp = 0
+        _ts.battle_end_reward(b5, st5)
+        _ts.battle_replies(b5, bt.REQ_SELECT_RUNE, [0], [], state=st5)
+        held5 = len(st5["backpack"].get("2", {}))
+        quantities = [row[1] for row in _json.loads(_ps.backpack_info_json(st5))]
+        check(f"clear {expected}: bag holds {expected}", held5 == expected, str(held5))
+        check(f"clear {expected}: the counter agrees",
+              expected in quantities, str(quantities))
+
     # An ordinary stage must be untouched by any of this.
     check("a main-story stage drops no shards", bt.starshard_temple_drops(1101) == [])
     check("and still previews coins",

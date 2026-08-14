@@ -1153,9 +1153,17 @@ def battle_replies(battle, cmd, intargs, strargs, state=None, uid=""):
         ps.save(state)
         log(f"    -> starshard kept: item {entry['iid']} uid {entry['uid']} "
             f"(of {len(cands)} offered)")
+        # **The storage sync alone leaves the COUNT stale.** Cmd 84-87 carries the item
+        # list and raises BackpackEvent 4; the "Inventory n/999" figure comes from the
+        # backpack INFO rows, which only cmd 83 and BACKPACK_CHANGE carry. Pushing just
+        # the list showed the new shard in the grid while the counter still read the
+        # login value -- 3 icons over "2/999". BACKPACK_CHANGE sends both, and raises
+        # event 1, the one an already-open panel refreshes on.
         return [battle_msg(bt.CMD_SELECT_RUNE, [int(entry["iid"]), 1], []),
-                backpack_msg(85, [1],
-                             [ps.backpack_json(state, ps.BP_STORAGE_EQUIPMENT)])]
+                backpack_msg(BACKPACK_CHANGE, [0],
+                             [ps.backpacks_all_json(state,
+                                                    {ps.BP_STORAGE_EQUIPMENT}),
+                              ps.backpack_info_json(state)])]
     if cmd == bt.REQ_RECONNECT:
         # Same cmd for BOTH buttons on the "rejoin your battle?" prompt --
         # CB_Reconnect sends intargs=[1] on accept, CB_ReconnectCancel sends [0] on
