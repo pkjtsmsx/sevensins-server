@@ -9,7 +9,9 @@ import json
 import battle as bt
 
 from .core import (
+    QUEST_CASE_BUY_GOODS,
     add_char,
+    bump_quest_counter,
     rune_slot,
     grant_reward,
     item_count,
@@ -684,6 +686,12 @@ def buy_shop_goods(state, goods_id, count):
     rec["Count"] += count
     bought[str(goods_id)] = rec
     state.setdefault("_last_purchase", {})[str(goods_id)] = [out_id, out_cnt]
+    # A quest may be watching for exactly this purchase ("Go to Shop-Soul Altar and
+    # exchange Grimoire of ★4 Awaker"). Its `_case_v1` is the GOODS id, so credit it
+    # narrowly -- and only bump, never complete: the client rebuilds its claimable list
+    # from the counter and the player claims through Quest cmd 257. The caller must push
+    # a quest sync afterwards or the client never sees the counter move.
+    bump_quest_counter(state, QUEST_CASE_BUY_GOODS, count, case_v1=int(goods_id))
     return True, shop_id, "", new_chars
 
 

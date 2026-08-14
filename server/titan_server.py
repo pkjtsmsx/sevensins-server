@@ -2472,6 +2472,13 @@ def handle(conn, addr):
                             # from the login sync like everything else.
                             send(MSG_RPC, uint_msg(0xAE487D79, 512, [],
                                                    [ps.energy_json(state)]))
+                            # buy_shop_goods credited any "go and exchange X" quest
+                            # watching this goods id. The counter only becomes visible
+                            # -- and the goal only becomes claimable -- once the client
+                            # is told: AnalysisQuest rebuilds the claimable list from
+                            # this payload. Without it the player buys the item and the
+                            # goal sits there unchanged.
+                            send(MSG_RPC, quest_sync_msg(state))
                     elif index == SHOP_SERVER and cmd == SHOP_REQ_GOODS_TO_SHOP:
                         # "Which shop sells goods N, and which tab is it on?"
                         # EnterSpecificStore needs BOTH, and the handler bails unless

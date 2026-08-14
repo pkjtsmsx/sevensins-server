@@ -624,6 +624,11 @@ def case_key(row):
 # rows are all (v1 0, v2 0), so "Perform Cast Power-up", "Enhance any cast 30 times" and
 # a mislabelled "Give presents" row all advance together by design.
 QUEST_CASE_GACHA = 13
+# "Go to <shop> and exchange <item>" -- `_case_v1` is the GOODS id, not a parameter to
+# a shared counter, so this case must always be bumped with case_v1= (see
+# bump_quest_counter). Its rows are also the source of the original server's goods ids;
+# see docs/ECONOMY_GAPS.md.
+QUEST_CASE_BUY_GOODS = 2003
 
 
 def quest_completed(state, qid):
@@ -641,8 +646,14 @@ def quest_completed(state, qid):
     return bool(e) and e.get("status") == SP_QUEST_COMPLETE
 
 
-def bump_quest_counter(state, case_id, amount=1):
+def bump_quest_counter(state, case_id, amount=1, case_v1=None):
     """Advance every quest counter with this _case_id, then record any completions.
+
+    `case_v1` narrows the match to rows whose `_case_v1` equals it, and is REQUIRED for
+    any case where that column is a discriminator rather than a parameter. Case 2003
+    ("buy goods N") is the clear example: its rows name eight different goods, so
+    bumping on case id alone would credit buying the Monthly Pass, every Step Gift Box
+    and Mammon's three free bundles the moment the player bought a Grimoire.
 
     QuestDB_Data's wire key is `total` (not total_cnt), and the counter key is
     `DesignQuestRow.get_CaseKey` -- see case_key().
@@ -662,6 +673,8 @@ def bump_quest_counter(state, case_id, amount=1):
     touched = []
     for qid, row in bt.dd.rows("quest").items():
         if row.get("_case_id") != case_id:
+            continue
+        if case_v1 is not None and (row.get("_case_v1") or 0) != int(case_v1):
             continue
         # Skip quests belonging to systems we do not run (event/OFA/BP/special). Arming
         # them produced the orphan sp_quests that a fresh account should never have -- see

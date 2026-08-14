@@ -419,6 +419,7 @@ def main():
           ok and len(st["backpack"].get("2", {})) == shards + 1, why)
 
     test_quest_goods_ids()
+    test_buy_quest_credit()
 
     print("\n" + ("ALL PASSED" if not _fail else f"{_fail} FAILED"))
     return 1 if _fail else 0
@@ -481,6 +482,94 @@ def test_quest_goods_ids():
     ids = [r[0] for rows in DEFAULT_SHOP_GOODS.values() for r in rows]
     dupes = sorted({i for i in ids if ids.count(i) > 1})
     check("no duplicate goods ids anywhere", not dupes, str(dupes))
+
+
+def test_buy_quest_credit():
+    """Buying goods must credit the quest watching THAT goods id -- and only it.
+
+    Case 2003 is "go to <shop> and exchange <item>", and `_case_v1` is the GOODS id, a
+    discriminator rather than a parameter. Bumping on `_case_id` alone would credit all
+    fifteen rows -- the Monthly Pass, four Step Gift Boxes, Mammon's three free bundles
+    -- off one Grimoire. That is the same shape as the earlier bug where one Power-up
+    armed steps 6/10/16/24 at once, so it is pinned here rather than left to inspection.
+
+    Two rows legitimately share v1 3305 (quests 31017 and 31034: the same objective in
+    two different chains). They are kept apart by `_pre_quest`, which bump_quest_counter
+    honours for `_case_type 2` rows.
+    """
+    import battle as bt
+    import player_state as ps
+    from player_state.core import _default, _seed_roster, SP_QUEST_COMPLETE
+
+    def fresh(done=()):
+        st = _default(1000001)
+        _seed_roster(st)
+        for q in done:
+            st["sp_quests"][str(q)] = {"id": q, "a_time": 0, "cnt": 1,
+                                       "status": SP_QUEST_COMPLETE}
+        for frag in (544, 545, 120):
+            ps.grant_reward(st, frag, 5000)
+        return st
+
+    def armed(st, ignore):
+        return {int(k) for k, v in st["sp_quests"].items()
+                if k not in {str(i) for i in ignore}
+                and v.get("status") != SP_QUEST_COMPLETE and v.get("cnt", 0) > 0}
+
+    # The step the player is actually on advances...
+    st = fresh(done=[31016])
+    ok, _s, why, _n = ps.buy_shop_goods(st, 3305, 1)
+    check("the Grimoire purchase went through", ok, why)
+    check("step 31017 is credited", armed(st, [31016]) == {31017},
+          str(armed(st, [31016])))
+    check("and its counter reaches the requirement",
+          st["sp_quests"]["31017"]["cnt"]
+          >= (bt.dd.row("quest", 31017) or {}).get("_case_cnt", 1))
+    check("the shared quest_db counter is untouched for an SP quest",
+          not st["quest_db"], str(st["quest_db"]))
+
+    # ...a step whose PREDECESSOR is not done does not, even sharing the same goods id.
+    st = fresh()
+    ps.buy_shop_goods(st, 3305, 1)
+    check("no step arms when no predecessor is done", armed(st, []) == set(),
+          str(armed(st, [])))
+
+    # ...and a sibling step watching a DIFFERENT goods id never moves.
+    st = fresh(done=[31016, 31040])
+    ps.buy_shop_goods(st, 3305, 1)
+    check("31041 (goods 3304) is not credited by buying 3305",
+          armed(st, [31016, 31040]) == {31017}, str(armed(st, [31016, 31040])))
+
+    # Both chains open at once is legitimate: same objective, two chains.
+    st = fresh(done=[31016, 32001])
+    ps.buy_shop_goods(st, 3305, 1)
+    check("both chains credit when both are live",
+          armed(st, [31016, 32001]) == {31017, 31034},
+          str(armed(st, [31016, 32001])))
+
+    # Mammon's daily free is watched by three rows; two are `_type 7`, a system we do
+    # not run, and must stay untouched.
+    st = fresh()
+    ps.buy_shop_goods(st, 1101, 1)
+    check("the daily-free purchase credits only the supported quest",
+          armed(st, []) == {10033}, str(armed(st, [])))
+
+    # A card no quest watches must move nothing whatsoever.
+    st = fresh()
+    ps.buy_shop_goods(st, 3605, 1)
+    check("an unwatched card credits no quest at all",
+          armed(st, []) == set() and not st["quest_db"],
+          f"{armed(st, [])} {st['quest_db']}")
+
+    # Guard the id alignment itself: every goods id a case-2003 quest names and we sell
+    # must be deliberate, because selling it silently completes that quest.
+    watched = {int(r["_case_v1"]) for r in (bt.dd.rows("quest") or {}).values()
+               if r.get("_case_id") == 2003 and r.get("_case_v1")}
+    from player_state.shop import DEFAULT_SHOP_GOODS
+    ours = {g[0] for gs in DEFAULT_SHOP_GOODS.values() for g in gs}
+    check("only the intended goods ids are quest-watched",
+          (watched & ours) == {1101, 1201, 1301, 3304, 3305},
+          str(sorted(watched & ours)))
 
 if __name__ == "__main__":
     try:
