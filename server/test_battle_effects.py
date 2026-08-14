@@ -721,6 +721,17 @@ def test_auto_play_sweep():
           not _ps.autorun_start(st, 1800021, 2, False, 1001)[0])
     check("nothing pays out before it is due", _ts.autorun_settle(st, 1000) == [])
 
+    # **No "Autoplay Completed" toast on start.** Confirm 401 says Completed, so
+    # sending cmd 33 when the sweep begins told the player their 99 runs had finished
+    # the instant they pressed Start. Only the syncs go out; they drive the
+    # "Autoplaying..." progress panel.
+    check("starting a sweep emits no completion toast",
+          _ts.autorun_settle(st, job["starttime"]) == [])
+    check("runs elapsed tracks the timer",
+          _ps.autorun_runs_elapsed(job, job["starttime"]) == 0
+          and _ps.autorun_runs_elapsed(job, job["duetime"]) == job["count"],
+          str(job))
+
     before = sum(_ps.item_count(st, i) for i in bt.GREMLIN_PIECE_ITEMS)
     msgs = _ts.autorun_settle(st, job["duetime"])
     after = sum(_ps.item_count(st, i) for i in bt.GREMLIN_PIECE_ITEMS)
@@ -729,12 +740,28 @@ def test_auto_play_sweep():
     check("and clears the job", "autorun" not in st)
     check("it answers the client", len(msgs) >= 1, str(len(msgs)))
 
-    # **A Temple sweep must NOT pick shards for the player.** Its reward is a choice.
+    # Stopping early pays for the runs the timer actually covered.
+    st4 = _mk(1000004)
+    _seed(st4)
+    _ps.autorun_start(st4, 1600002, 10, False, 0)
+    stopped = _ps.autorun_cancel(st4)
+    half = stopped["starttime"] + (stopped["duetime"] - stopped["starttime"]) // 2
+    _ts.autorun_payout(st4, stopped["stage_id"],
+                       _ps.autorun_runs_elapsed(stopped, half))
+    check("stopping halfway pays half the runs",
+          len(st4["backpack"].get("2", {})) == 5,
+          str(len(st4["backpack"].get("2", {}))))
+
+    # A Temple clear offers TWO candidates and the player keeps ONE. A sweep cannot
+    # ask, so it keeps the first -- taking both would pay double what playing by hand
+    # does, and paying nothing would make the stage pointless to sweep.
     _ps.autorun_start(st, 1600002, 4, False, 5000)
     shards = len(st["backpack"].get("2", {}))
     _ts.autorun_settle(st, st["autorun"]["duetime"])
-    check("a Temple sweep grants no shards",
-          len(st["backpack"].get("2", {})) == shards, "a sweep cannot make the choice")
+    got = len(st["backpack"].get("2", {})) - shards
+    check("a Temple sweep keeps ONE shard per run", got == 4, f"{got} for 4 runs")
+    ids = [(e["sid"], e["uid"]) for e in st["backpack"]["2"].values()]
+    check("every swept shard is a distinct record", len(set(ids)) == len(ids), str(ids))
 
     # Express buys the SPEED, and pays the entry cost as well.
     passes, coupons = _ps.item_count(st, 19), _ps.item_count(st, 30064)

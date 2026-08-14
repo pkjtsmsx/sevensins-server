@@ -202,8 +202,12 @@ STAGE_REQ_AUTO_START, STAGE_REQ_AUTO_SYNC, STAGE_REQ_AUTO_STOP = 3, 6, 7
 # HandleAutoSync (0x180A2DC) takes a whole StageSyncData and reads its `auto` dict.
 STAGE_RPLY_AUTO_SYNC = 24
 # HandleAutoSuccess (0x180ABA8) needs intargs of EXACTLY length 2 -- [stageID, count] --
-# and returns silently on any other length. It shows confirm 401, the "sweep started"
-# toast. HandleAutoStop (0x180ADAC) is the same shape at length EXACTLY 3, confirm 402.
+# and returns silently on any other length. Its confirm 401 reads "Autoplay COMPLETED.
+# Stage {0} / Time(s) {1}", so it belongs at the END of a sweep, not the start. Sending
+# it on Start told the player their 99 runs had already finished the instant they
+# pressed the button. HandleAutoStop (0x180ADAC) is EXACTLY 3 intargs and its confirm
+# 402 is "Autoplay STOPPED. Stage {0} / Times {1} / Elapsed Time {2} sec" -- so the
+# third argument is elapsed SECONDS, and it belongs on an early cancel.
 STAGE_RPLY_AUTO_SUCCESS, STAGE_RPLY_AUTO_STOP = 33, 34
 STAGE_RPLY_EXECUTE = 18            # -> StageEventType.EXECUTE_SUCCESS (2)
 # AVG (story cutscene) sync. The client calls RequestServerAvgSync(avgID, replayMode)
@@ -307,28 +311,22 @@ def quest_sync_msg(st):
     return uint_msg(PLAYER_QUEST, QUEST_RPLY_SYNC, [1, 1], [ps.quest_json(st)])
 
 
-def autorun_settle(state, now):
-    """Pay out a finished sweep -> the extra messages to send (empty if nothing is due).
+def autorun_payout(state, stage_id, count):
+    """Pay `count` clears of `stage_id` -> the sync messages to send.
 
-    A sweep is N clears of one stage, so it pays N times what clearing it pays: the
-    stage's own drops plus its rating rewards. Starshard Temple stages are skipped --
-    their reward is a CHOICE between candidate shards, which cannot be made while the
-    player is away, and silently picking for them would be worse than not sweeping.
+    A sweep pays exactly what beating the stage by hand pays, N times, from
+    bt.stage_drops_for -- the same call Battle.drops() wraps.
     """
-    job = ps.autorun_due(state, now)
-    if not job:
+    stage_id, count = int(stage_id), int(count)
+    if count < 1:
         return []
-    stage_id, count = int(job["stage_id"]), int(job["count"])
-    ps.autorun_cancel(state)
-    if bt.starshard_temple_tier(stage_id):
-        log(f"    -> auto play finished: stage {stage_id} x{count} pays nothing "
-            f"(its reward is a shard CHOICE, which a sweep cannot make)")
-        ps.save(state)
-        return [uint64_msg(PLAYER_STAGE, STAGE_RPLY_AUTO_STOP,
-                           [stage_id, count, 0], [])]
     buckets, totals = set(), {}
+    # A Temple clear offers TWO candidates and the player keeps ONE. A sweep cannot ask,
+    # so it keeps the first -- taking both would pay double what playing by hand does.
+    keep_one = bool(bt.starshard_temple_tier(stage_id))
     for _ in range(count):
-        for d in bt.stage_drops_for(stage_id):
+        paid = bt.stage_drops_for(stage_id)
+        for d in (paid[:1] if keep_one else paid):
             if isinstance(d, bt.RuneDrop):
                 ps.grant_rune(state, d.item_id, d.slot, d.level, d.enhance)
                 buckets.add("equipment")
@@ -337,20 +335,42 @@ def autorun_settle(state, now):
             buckets.add(ps.grant_reward(state, iid, n))
             totals[iid] = totals.get(iid, 0) + n
     state["stages"].setdefault(str(stage_id), 15)
-    ps.save(state)
-    log(f"    -> auto play finished: stage {stage_id} x{count} -> {totals}")
-    msgs = [uint64_msg(PLAYER_STAGE, STAGE_RPLY_AUTO_STOP, [stage_id, count, 0], [])]
+    log(f"    -> auto play paid {count}x stage {stage_id} -> "
+        f"{totals or 'starshards'}")
+    msgs = []
     if "backpack" in buckets:
         msgs.append(backpack_msg(84, [1],
                                  [ps.backpack_json(state, ps.BP_STORAGE_NORMAL)]))
     if "equipment" in buckets:
-        msgs.append(backpack_msg(85, [1],
-                                 [ps.backpack_json(state, ps.BP_STORAGE_EQUIPMENT)]))
+        # BACKPACK_CHANGE carries the item list AND the info rows, so the Starshards
+        # panel's "Inventory n/999" follows the grant instead of going stale.
+        msgs.append(backpack_msg(BACKPACK_CHANGE, [0],
+                                 [ps.backpacks_all_json(state,
+                                                        {ps.BP_STORAGE_EQUIPMENT}),
+                                  ps.backpack_info_json(state)]))
     if "currency" in buckets:
         msgs.append(sint_msg(0xBC8FDA7C, 512, [], [ps.currency_json(state)]))
     if "energy" in buckets:
         msgs.append(uint_msg(0xAE487D79, 512, [], [ps.energy_json(state)]))
     return msgs
+
+
+def autorun_settle(state, now):
+    """Finish a sweep whose timer has run out -> the messages to send.
+
+    The completion toast is cmd 33 (confirm 401, "Autoplay Completed"), which is why
+    it must NOT be sent when the sweep starts.
+    """
+    job = ps.autorun_due(state, now)
+    if not job:
+        return []
+    stage_id, count = int(job["stage_id"]), int(job["count"])
+    ps.autorun_cancel(state)
+    msgs = autorun_payout(state, stage_id, count)
+    ps.save(state)
+    # EXACTLY two intargs, or HandleAutoSuccess returns without a word.
+    return [uint64_msg(PLAYER_STAGE, STAGE_RPLY_AUTO_SUCCESS,
+                       [stage_id, count], [])] + msgs
 
 
 def stage_sync_msg(st):
@@ -2696,18 +2716,31 @@ def handle(conn, addr):
                             log(f"    -> auto play started: stage {stage_id} x{count}"
                                 f"{' (express)' if coupon else ''}, due in "
                                 f"{job['duetime'] - now}s")
-                            # EXACTLY two intargs, or HandleAutoSuccess bails.
-                            send(MSG_RPC, uint64_msg(
-                                PLAYER_STAGE, STAGE_RPLY_AUTO_SUCCESS,
-                                [int(stage_id), int(count)], []))
+                            # NO toast here -- 401 says "Completed", which is a lie
+                            # until the timer runs out. The syncs below are what tell
+                            # the panel a sweep is running.
                         elif cmd == STAGE_REQ_AUTO_STOP:
-                            ps.autorun_cancel(state)
-                            ps.save(state)
-                            log("    -> auto play cancelled")
+                            stopped = ps.autorun_cancel(state)
+                            if stopped:
+                                elapsed = max(0, now - int(stopped["starttime"]))
+                                done = ps.autorun_runs_elapsed(stopped, now)
+                                paid = autorun_payout(state, stopped["stage_id"], done)
+                                ps.save(state)
+                                log(f"    -> auto play stopped: stage "
+                                    f"{stopped['stage_id']} after {done}/"
+                                    f"{stopped['count']} runs ({elapsed}s)")
+                                # EXACTLY three intargs, or HandleAutoStop bails.
+                                send(MSG_RPC, uint64_msg(
+                                    PLAYER_STAGE, STAGE_RPLY_AUTO_STOP,
+                                    [int(stopped["stage_id"]), int(done),
+                                     int(elapsed)], []))
+                                for m in paid:
+                                    send(MSG_RPC, m)
                         # Settle a finished sweep before answering, so the client is
                         # told about the rewards in the same breath as the new state.
                         done = autorun_settle(state, now)
                         send(MSG_RPC, stage_sync_msg(state))
+                        send(MSG_RPC, auto_sync_msg(state))
                         for m in done:
                             send(MSG_RPC, m)
                     elif index == PLAYER_STAGE_SERVER and cmd == STAGE_REQ_GET_DROPS:

@@ -430,6 +430,16 @@ def autorun_due(state, now):
     return job if job and int(now) >= int(job["duetime"]) else None
 
 
+def autorun_runs_elapsed(job, now):
+    """How many of a sweep's runs its timer has covered by `now` (capped at its count)."""
+    count = int(job["count"])
+    span = int(job["duetime"]) - int(job["starttime"])
+    if span <= 0:
+        return count
+    done = int(count * max(0, int(now) - int(job["starttime"])) / span)
+    return max(0, min(done, count))
+
+
 def autorun_cancel(state):
     """Abandon a running sweep. -> the job that was dropped, or None. Nothing is
     refunded: the runs it already represents are paid for."""
