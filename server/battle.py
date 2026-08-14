@@ -236,6 +236,69 @@ class RuneDrop(NamedTuple):
     count: int = 1
 
 
+# ---- Starshard Temple ------------------------------------------------------
+# **`_book == 2` marks a Starshard Temple stage** -- exactly the 41 of them under dmap
+# root 40011 and nothing else in the pack, so it is the trigger rather than a stage list.
+#
+# These stages MUST drop at least one starshard or the client HANGS. Clearing one opens
+# `PanelBattleRuneResult`, and that panel is driven entirely by the rune list:
+#   * `OnPanelEnable` (0x16BAF7C) reads the list, and with a count of 0 it skips its fill
+#     loop and parks at `UpdateResultState(0)`;
+#   * `OnBattleEnd` (0x16BAB78) then does `if (EventArg.Count < 1) return;` -- so it never
+#     reaches the `UpdateResultState(7)` that finishes the sequence.
+# The result is the empty altar room with no UI on it and no way out but a restart.
+# Dropping coins here (which is what the generic per-wave fallback did) is exactly that
+# case. Observed live: a 2-wave temple clear shows TWO shards side by side, which is the
+# panel's own `_rune2_Left_Info` / `_rune2_Right_Info` pair.
+#
+# Starshard item ids encode `ELEMENT*1000 + slot*100 + rank*10 + star`, where rank
+# 0..4 = N/R/SR/UR/LR (and `_param2` grade = rank + 1); `_action` is 110 + slot.
+STARSHARD_BOOK = 2
+STARSHARD_ELEMENT_IDS = (201, 202, 203, 204, 205, 206)   # 205 = Nightshade
+STARSHARD_TEMPLE_SLOTS = (1, 2)      # what the live results panel shows for a 2-wave run
+
+
+def starshard_temple_drops(stage_id, rng=None):
+    """[RuneDrop, ...] for a Starshard Temple clear, or [] if this is not one.
+
+    **WHICH shard a temple stage drops is not recorded anywhere.** The client does not
+    know either: `DesignStageRow` has no ItemsRank accessor at all, so `_itemrank_str`
+    is dead data client-side, and for drop previews the client ASKS us (StageRpc
+    GetDrops 8 -> 25). Temple drop tables were live-ops, exactly like every other stage's
+    -- so this is our content, and only the *shape* below is evidence-backed:
+
+      * at least one shard, or the client hangs (see the note on STARSHARD_BOOK);
+      * two of them for a 2-wave clear, which is what live footage shows and what the
+        panel's own `_rune2_Left_Info`/`_rune2_Right_Info` pair is for.
+
+    For WHICH shard, `_itemrank_str`'s first field is the only signal in the row: it runs
+    31,32,33,34,41,…,60 across ST-1..ST-41, ascending with difficulty. Reading it as
+    A = the shard's ★ and B = its rank (N/R/SR/UR/LR) fits the ordering and the shard id
+    layout, and gives a sane ladder for 40 of the 41 stages. **It is an inference, not a
+    recovered table** -- ST-41 is "60", which lands on ★6 plain, and the weakest rank on
+    the hardest stage is the tell that the B reading may be wrong. Footage of a late
+    temple clear would settle it.
+    """
+    import random as _r
+    rng = rng or _r
+    row = dd.row("stage", int(stage_id)) or {}
+    if row.get("_book") != STARSHARD_BOOK:
+        return []
+    ladder = str(row.get("_itemrank_str") or "").split(",")[0].strip()
+    star = int(ladder[0]) if ladder[:1].isdigit() else 3
+    rank = int(ladder[1]) if len(ladder) > 1 and ladder[1].isdigit() else 0
+    star = max(1, min(star, 6))
+    rank = max(0, min(rank, 4))
+    out = []
+    for slot in STARSHARD_TEMPLE_SLOTS:
+        element = rng.choice(STARSHARD_ELEMENT_IDS)
+        item_id = element * 1000 + slot * 100 + rank * 10 + star
+        if not dd.row("item", item_id):
+            continue                     # never hand out an id the client cannot draw
+        out.append(RuneDrop(display_item=item_id, item_id=item_id, slot=slot))
+    return out
+
+
 STAGE_DROPS = {
     # Trainers Gym (dmap 30004) -- the material dungeon for Level Training, so it pays
     # Trainers (items 101-105). 1400001 "Beginner Class" observed dropping ★2 Trainer x6.
@@ -1174,6 +1237,11 @@ class Battle:
         known = STAGE_DROPS.get(self.stage_id)
         if known is not None:
             return list(known)
+        # **A Starshard Temple stage MUST drop starshards, or the client hangs.**
+        # See starshard_temple_drops.
+        temple = starshard_temple_drops(self.stage_id)
+        if temple:
+            return temple
         return [(COIN_ITEM_ID, COIN_PER_WAVE)] * self.wave_max
 
     def wave_cleared(self):

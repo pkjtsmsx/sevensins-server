@@ -13,6 +13,7 @@ Guards the invariants from docs/BATTLE_SKILL_PLAN.md:
 Stdlib only; exits non-zero on failure so it can gate a commit.
 """
 import json
+import random
 import os
 import sys
 
@@ -287,6 +288,7 @@ def main():
     test_full_battles()
     test_fallback_aoe()
     test_enemy_multi_target()
+    test_starshard_temple_drops()
     print(f"\n{'ALL PASSED' if not _fail else f'{_fail} CHECK(S) FAILED'}")
     sys.exit(1 if _fail else 0)
 
@@ -393,6 +395,60 @@ def test_enemy_multi_target():
 
     hurt, n, _r = enemy_strike(100001611)            # range 2 -> "All enemies"
     check("an ALL enemy skill hits the whole party", len(hurt) == n, str(hurt))
+
+
+def test_starshard_temple_drops():
+    """A Starshard Temple clear MUST drop shards, or the client hangs on the results.
+
+    Clearing one opens PanelBattleRuneResult, which is driven entirely by the rune list:
+    OnPanelEnable (0x16BAF7C) skips its fill loop at count 0 and parks at
+    UpdateResultState(0), then OnBattleEnd (0x16BAB78) does `if (EventArg.Count < 1)
+    return;` and never reaches the UpdateResultState(7) that ends the sequence. The
+    player is left on the empty altar room with no UI and no way out but a restart --
+    which is exactly what the generic per-wave COIN fallback caused.
+    """
+    stages = bt.dd.rows("stage") or {}
+    temple = [s for s, r in stages.items() if r.get("_book") == bt.STARSHARD_BOOK]
+    check("the `_book == 2` marker still finds the temple", len(temple) == 41,
+          str(len(temple)))
+    # ...and nothing else, so it is safe as the trigger.
+    check("no non-temple stage carries that marker",
+          all((bt.dd.row("dmap", (stages[s] or {}).get("_dmap_id")) or {}).get("_link")
+              == 40011 for s in temple))
+
+    rng = random.Random(3)
+    for sid in temple:
+        drops = bt.starshard_temple_drops(sid, rng)
+        # The hang condition. One would be enough to avoid it; two is what the live
+        # results panel shows for a 2-wave run.
+        if len(drops) < 1:
+            check(f"stage {sid} drops at least one shard", False, "would HANG")
+            return
+    check("every temple stage drops at least one shard", True)
+
+    drops = bt.starshard_temple_drops(1600001, random.Random(3))
+    check("a 2-wave temple clear drops two", len(drops) == 2, str(len(drops)))
+    check("both are RuneDrops", all(isinstance(d, bt.RuneDrop) for d in drops))
+    check("they occupy different slots",
+          len({d.slot for d in drops}) == len(drops), str([d.slot for d in drops]))
+    for d in drops:
+        row = bt.dd.row("item", d.item_id) or {}
+        # An id the client cannot draw would be a different flavour of broken panel.
+        check(f"{d.item_id} is a real item", bool(row))
+        check(f"{d.item_id} is a starshard", int(row.get("_action") or 0) in range(111, 117),
+              str(row.get("_action")))
+        check(f"{d.item_id}'s _action matches its slot",
+              int(row.get("_action") or 0) - 110 == d.slot, str(row.get("_action")))
+
+    # The ladder has to ascend, or the temple pays the same thing for 41 stages.
+    first = bt.starshard_temple_drops(1600001, random.Random(1))[0]
+    last = bt.starshard_temple_drops(1600041, random.Random(1))[0]
+    star = lambda d: int((bt.dd.row("item", d.item_id) or {}).get("_itemName_en", " ")[1])
+    check("a late stage pays a higher star than the first",
+          star(last) > star(first), f"{star(first)} -> {star(last)}")
+
+    # An ordinary stage must be untouched by any of this.
+    check("a main-story stage drops no shards", bt.starshard_temple_drops(1101) == [])
 
 if __name__ == "__main__":
     main()
