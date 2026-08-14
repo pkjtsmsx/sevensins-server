@@ -2769,7 +2769,19 @@ def handle(conn, addr):
                         if state:
                             if cmd in (bt.REQ_BATTLE_END, bt.REQ_RETREAT) \
                                     or declined_reconnect:
+                                # Mark it, not just clear it: RPCs still arrive AFTER
+                                # the fight is over and the else-branch below would
+                                # re-save the corpse as live. A Starshard Temple clear
+                                # does exactly that -- 505 ends the fight, then the
+                                # player's shard pick (508) lands afterwards, and the
+                                # finished battle went straight back into the save.
+                                # Every restart then offered to "Continue the Fight",
+                                # and accepting replayed a fight already won.
+                                if cur_battle is not None:
+                                    cur_battle.finished = True
                                 ps.clear_battle(state)
+                            elif getattr(cur_battle, "finished", False):
+                                pass          # never re-save a finished fight
                             else:
                                 ps.save_battle(state, cur_battle)
                             ps.save(state)

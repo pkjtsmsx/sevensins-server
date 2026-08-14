@@ -199,9 +199,45 @@ def main():
     test_sync_reply_and_reconnect_accept_decline()
     test_malformed_save_fails_loudly()
     shutil.rmtree(_TMP, ignore_errors=True)
+    test_finished_battle_is_not_resaved()
     print(f"\n{'ALL PASSED' if not _fail else f'{_fail} CHECK(S) FAILED'}")
     sys.exit(1 if _fail else 0)
 
+
+
+def test_finished_battle_is_not_resaved():
+    """RPCs that arrive AFTER a fight ends must not put it back in the save.
+
+    505 ends the fight and drops the snapshot, but the Starshard Temple's shard pick
+    (508) lands afterwards -- and the dispatcher's "persist after every battle RPC"
+    branch re-saved the finished battle as live. Every restart then offered to
+    "Continue the Fight", and accepting replayed a fight that was already won, landing
+    the player back on its reward screen.
+    """
+    from player_state.core import _default, _seed_roster
+    st = _default(1000001)
+    _seed_roster(st)
+    order = {r.get("_sort"): sid for sid, r in (bt.dd.rows("stage") or {}).items()
+             if r.get("_book") == bt.STARSHARD_BOOK}
+    b = bt.Battle(order[2], [{"id": 10001}, {"id": 10011}], team_level=60)
+    for u in list(b.units.values()):
+        if u.team != bt.TEAM_PLAYER:
+            u.hp = 0
+
+    ps.save_battle(st, b)
+    check("a live fight is saved", bool(ps.saved_battle(st)))
+
+    ts.battle_end_reward(b, st)
+    b.finished = True                     # what the 505 branch now does
+    ps.clear_battle(st)
+    check("ending it drops the snapshot", not ps.saved_battle(st))
+
+    # the shard pick arrives after the fight is over
+    ts.battle_replies(b, bt.REQ_SELECT_RUNE, [0], [], state=st)
+    if not getattr(b, "finished", False):
+        ps.save_battle(st, b)             # the branch that used to fire
+    check("a later RPC does not resurrect it", not ps.saved_battle(st))
+    check("and the fight is still marked finished", b.finished)
 
 if __name__ == "__main__":
     main()
