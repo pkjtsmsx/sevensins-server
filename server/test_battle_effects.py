@@ -297,6 +297,7 @@ def main():
     test_fallback_aoe()
     test_enemy_multi_target()
     test_starshard_temple_drops()
+    test_transcend_corridor_drops()
     print(f"\n{'ALL PASSED' if not _fail else f'{_fail} CHECK(S) FAILED'}")
     sys.exit(1 if _fail else 0)
 
@@ -606,6 +607,72 @@ def test_starshard_temple_drops():
     check("and still previews coins",
           set(bt.stage_drop_preview(1101)) == {bt.COIN_ITEM_ID},
           str(bt.stage_drop_preview(1101)))
+
+
+def test_transcend_corridor_drops():
+    """The Gremlin daily must pay Gremlin Pieces, on a ladder like the Temple's.
+
+    Nothing else in the game drops them, so without this the Soul Altar's five
+    Transcender Gremlin cards are dead -- the currency they cost is unobtainable.
+    `_book == 23` marks the dungeon (48 Transcend Corridor stages plus its 32 "[Double]"
+    ones) and nothing else in the pack, the same way the Temple owns book 2.
+    """
+    stages = bt.dd.rows("stage") or {}
+    corridor = [s for s, r in stages.items() if r.get("_book") == bt.TRANSCEND_BOOK]
+    check("the book-23 marker still finds the dungeon", len(corridor) == 80,
+          str(len(corridor)))
+    check("every one of them pays pieces",
+          all(bt.transcend_corridor_drops(s, random.Random(1)) for s in corridor))
+    check("and only pieces",
+          all(i in bt.GREMLIN_PIECE_ITEMS for s in corridor
+              for i, _c in bt.transcend_corridor_drops(s, random.Random(1))))
+
+    # **Every stage must beat the one before it**, same property the Temple ladder has.
+    main = sorted((r.get("_sort"), s) for s, r in stages.items()
+                  if r.get("_book") == bt.TRANSCEND_BOOK and r.get("_dmap_id") == 30014)
+    means, prev, flat = [], None, []
+    for o, sid in main:
+        w = bt.gremlin_tier_weights(sid)
+        m = sum(x * t for x, t in w) / sum(x for x, _t in w)
+        if prev is not None and m <= prev + 1e-9:
+            flat.append(o)
+        prev = m
+        means.append(m)
+    check("the corridor has all 48 stages, uniquely sorted", len(main) == 48)
+    check("every corridor stage pays better than the one before it", not flat, str(flat))
+    check("and the run spans most of the tier range", means[-1] - means[0] > 3,
+          f"{means[0]:.2f} -> {means[-1]:.2f}")
+
+    # The window is NARROWER than the Temple's on purpose: a Piece buys its Gremlin
+    # one-for-one, so a wide spread would let Trans-1 mint the top tier.
+    first = {t for _w, t in bt.gremlin_tier_weights(main[0][1])}
+    check("the first stage cannot roll the top tier",
+          len(bt.GREMLIN_PIECE_ITEMS) not in first, str(sorted(first)))
+    check("nor the last stage the bottom one",
+          1 not in {t for _w, t in bt.gremlin_tier_weights(main[-1][1])})
+
+    # The "[Double]" variant is the same dungeon at double rewards.
+    plain = bt.transcend_corridor_drops(main[0][1], random.Random(1))[0][1]
+    dbl_id = [s for s, r in stages.items()
+              if r.get("_book") == bt.TRANSCEND_BOOK and r.get("_dmap_id") == 31014
+              and r.get("_sort") == 1][0]
+    dbl = bt.transcend_corridor_drops(dbl_id, random.Random(1))[0][1]
+    check("the Double variant pays twice", dbl == plain * 2, f"{plain} vs {dbl}")
+
+    # Preview and payout must agree -- the trap that bit the Temple.
+    bad = []
+    for sid in corridor:
+        prev_p = set(bt.stage_drop_preview(sid))
+        rolled = {bt.transcend_corridor_drops(sid, random.Random(k))[0][0]
+                  for k in range(40)}
+        if not rolled <= prev_p:
+            bad.append((sid, sorted(rolled - prev_p)))
+    check("Drop Info covers everything a corridor stage rolls", not bad, str(bad[:2]))
+
+    check("a main-story stage pays no pieces", bt.transcend_corridor_drops(1101) == [])
+    check("a Temple stage still pays shards, not pieces",
+          bt.transcend_corridor_drops(1600001) == []
+          and bool(bt.starshard_temple_drops(1600001)))
 
 if __name__ == "__main__":
     main()

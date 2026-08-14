@@ -433,6 +433,95 @@ def starshard_set_icon(element, star):
     return _set_icon_cache[key]
 
 
+# ---- Transcend Corridor (the Gremlin daily) --------------------------------
+# **`_book == 23` marks the Transcender dungeon** -- 48 "Transcend Corridor" stages plus
+# the 32 of its "[Double] Transcender Hunt" variant, and nothing else in the pack. Each
+# daily dungeon carries its own exclusive book (21 Trainers Gym, 22 Evolution Abyss,
+# 23 here, 24 Treasure Raiders), the same way the Starshard Temple owns book 2.
+#
+# It pays Pieces of Transcender Gremlin, which the Soul Altar's Summoning Orbs tab then
+# exchanges for the Gremlins themselves -- item 111+n costs item 116+n. Nothing else in
+# the game drops them, so without this the whole Gremlin line is unreachable and those
+# five shop cards are dead.
+#
+# The corridor runs in five named difficulty bands and there are exactly five Piece
+# tiers, so the mapping is one-to-one:
+#     Trans-1..10   "Ground".."Ultimate"          -> ★1 Pieces
+#     Trans-11..20  the same ten, EX              -> ★2
+#     Trans-21..30  EX+                           -> ★3
+#     Trans-31..40  Ultimate                      -> ★4
+#     Trans-41..45  Ultimate+                     -> ★5
+# Banded on `_sort` rather than the name, because the three SP stages (sorts 16/27/38)
+# sit inside a band without carrying its suffix, and `_stagelv` cannot separate Ultimate
+# from Ultimate+ (both run to 545).
+TRANSCEND_BOOK = 23
+GREMLIN_PIECE_ITEMS = (116, 117, 118, 119, 120)      # ★1..★5 Pieces
+GREMLIN_PIECES_PER_CLEAR = 3
+# dmap root of the "[Double]" variant, which is the same dungeon at double rewards.
+TRANSCEND_DOUBLE_ROOT = 31014
+# The main corridor's length. The Double variant only runs to sort 32, and its depth is
+# measured against THIS so its stages line up with the corridor stages of the same sort
+# -- scaling it to its own length would stretch 32 stages of EX+ content up to ★5.
+TRANSCEND_STAGE_COUNT = 48
+# Rolled like the Temple's star, so every stage beats the one before it instead of all
+# ten inside a band tying. **Deliberately NARROWER than the Temple's window (2.0):** a
+# Piece buys its Gremlin one-for-one, so a wide spread would let Trans-1 mint ★5
+# Gremlins. At 1.5 only the neighbouring tier bleeds in.
+GREMLIN_TIER_SPREAD = 1.5
+
+
+def transcend_corridor_depth(stage_id):
+    """-> 0.0..1.0 through the Transcender dungeon, or None if not one of its stages."""
+    row = dd.row("stage", int(stage_id)) or {}
+    if row.get("_book") != TRANSCEND_BOOK:
+        return None
+    sort = int(row.get("_sort") or 1)
+    return max(0.0, min((sort - 1) / max(TRANSCEND_STAGE_COUNT - 1, 1), 1.0))
+
+
+def gremlin_tier_weights(stage_id):
+    """-> [(weight, tier index), ...]: the sliding window over the five Piece tiers."""
+    depth = transcend_corridor_depth(stage_id)
+    if depth is None:
+        return []
+    top = len(GREMLIN_PIECE_ITEMS)
+    centre = 1.0 + depth * (top - 1)
+    out = []
+    for tier in range(1, top + 1):
+        weight = 1.0 - abs(tier - centre) / GREMLIN_TIER_SPREAD
+        if weight > 0:
+            out.append((weight, tier))
+    return out
+
+
+def transcend_corridor_pool(stage_id):
+    """Every Piece tier a stage can roll -> [item id, ...]; [] if not the dungeon."""
+    return [GREMLIN_PIECE_ITEMS[t - 1]
+            for _w, t in sorted(gremlin_tier_weights(stage_id), key=lambda x: x[1])]
+
+
+def transcend_corridor_drops(stage_id, rng=None):
+    """[(item id, count)] of Gremlin Pieces for a clear, or [] if not the dungeon."""
+    import random as _r
+    rng = rng or _r
+    weights = gremlin_tier_weights(stage_id)
+    if not weights:
+        return []
+    total = sum(w for w, _t in weights)
+    roll = rng.random() * total
+    tier = weights[-1][1]
+    for weight, t in weights:
+        if roll < weight:
+            tier = t
+            break
+        roll -= weight
+    row = dd.row("stage", int(stage_id)) or {}
+    dmap = dd.row("dmap", row.get("_dmap_id")) or {}
+    root = int(dmap.get("_link") or row.get("_dmap_id") or 0)
+    count = GREMLIN_PIECES_PER_CLEAR * (2 if root == TRANSCEND_DOUBLE_ROOT else 1)
+    return [(GREMLIN_PIECE_ITEMS[tier - 1], count)]
+
+
 STAGE_DROPS = {
     # Trainers Gym (dmap 30004) -- the material dungeon for Level Training, so it pays
     # Trainers (items 101-105). 1400001 "Beginner Class" observed dropping ★2 Trainer x6.
@@ -512,6 +601,9 @@ def stage_drop_preview(stage_id):
     pool = starshard_temple_pool(stage_id)
     if pool:
         return [i for i, _slot in pool]
+    gremlins = transcend_corridor_pool(stage_id)
+    if gremlins:
+        return list(gremlins)
     row = dd.row("stage", int(stage_id)) or {}
     waves = len(dd.csv_ints(row.get("_mobGroup_datas"))) or 1
     return [COIN_ITEM_ID] * waves
@@ -1383,6 +1475,9 @@ class Battle:
         temple = starshard_temple_drops(self.stage_id)
         if temple:
             return temple
+        gremlins = transcend_corridor_drops(self.stage_id)
+        if gremlins:
+            return gremlins
         return [(COIN_ITEM_ID, COIN_PER_WAVE)] * self.wave_max
 
     def wave_cleared(self):

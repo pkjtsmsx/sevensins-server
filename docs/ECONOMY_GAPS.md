@@ -1,7 +1,8 @@
 # Economy gaps — currencies the game charges for that nothing provides
 
 Audited 2026-08-13 against commit `9c1cb00`. §7 retracted and §3 corrected the same
-day — see both. The count is now **20**, not the 22 first reported. Method: diff every cost id our build
+day — see both. The count is now **15**: 22 first reported, minus the two crystals (§3) and the
+five Gremlin Pieces (§2). Method: diff every cost id our build
 charges (the four storefronts' `CostID`, plus every gacha banner's `cost_tbl`) against
 every item id our build can actually hand out (stage drops, quest `_item_id`,
 login-bonus mail, `char_decompose` unsummon refunds, shop payouts).
@@ -24,15 +25,26 @@ one. Three cards currently violate it (see "Self-inflicted" below).
 Paid Diamond is a *separate balance* from Diamond (CurrencyType 32 vs 1), so it cannot
 be papered over by granting Diamonds. These three are the honest long-term items.
 
-## 2. Blocked on content we do not run
+## 2. Blocked on content we do not run — CLEARED 2026-08-13
 
-| id | name |
-|---|---|
-| 116–120 | ★1–★5 Pieces of Transcender Gremlin |
+| id | name | status |
+|---|---|---|
+| 116–120 | ★1–★5 Pieces of Transcender Gremlin | **now drop from Transcend Corridor** |
 
-The store card's own description says **"(Daily Dungeon Reward)"** — the client is
-telling us the source. The five Gremlin cards are otherwise complete and uncapped.
-Cheapest real fix in this whole document: give the daily dungeon a drop table.
+The store card said "(Daily Dungeon Reward)" and the dungeon is the Transcender one —
+`_book == 23`, 48 Transcend Corridor stages plus the 32 of its "[Double] Transcender
+Hunt" variant, and nothing else in the pack. Each daily dungeon owns an exclusive book
+(21 Trainers Gym, 22 Evolution Abyss, 23 here, 24 Treasure Raiders), the same way the
+Starshard Temple owns book 2 — so the marker is the book, never a stage list.
+
+Tier is rolled on a sliding window like the Temple's star, so every one of the 48 stages
+pays better than the one before it (expected tier 1.25 → 4.75, no plateau). The window
+is **narrower** than the Temple's on purpose: a Piece buys its Gremlin one-for-one, so a
+wide spread would let Trans-1 mint ★5 Gremlins. 3 Pieces a clear, doubled in the
+"[Double]" variant.
+
+The other three dailies (Gym, Abyss, Raiders) still pay the generic coin fallback and
+are the obvious next targets — their books are already identified above.
 
 ## 3. Live-ops data that never shipped in the pack — ours to invent
 
@@ -136,11 +148,11 @@ Karma is fully functional. Nothing to do here.
 
 ## Suggested order
 
-1. Fix section 5 (data only, minutes).
-2. Daily-dungeon drop table for Gremlin Pieces — the client already names the source.
-3. Fragment sources (300001/300003, 300011–300015, 543, 546, 304). These are all
+1. Drop tables for the other three dailies — Trainers Gym (book 21), Evolution Abyss
+   (22) and Treasure Raiders (24), following the Transcend Corridor pattern.
+2. Fragment sources (300001/300003, 300011–300015, 543, 546, 304). These are all
    "some dungeon or daily pays N of these"; pick a consistent home for them rather
    than scattering.
-4. Soulmirror Scrolls (Revisited) — without them two of the three Soulmirror banners
+3. Soulmirror Scrolls (Revisited) — without them two of the three Soulmirror banners
    cannot be rolled at all.
-5. Guild / Arena / IAP when those subsystems land.
+4. Guild / Arena / IAP when those subsystems land.
