@@ -299,15 +299,29 @@ def test_fallback_aoe():
     That silently single-targeted 226 skills whose parse had already identified the AoE
     (against 114 that worked), which is why "AoE skills all seem to hit one target".
     """
-    AOE = 100001611     # incomplete: "Deals 80% ATK as damage to all enemies 3 times"
-    SINGLE = 2009111    # complete: opens single-target, "all enemies" only later on
+    AOE = 100001611     # incomplete parse, design range 2 -> "All enemies"
+    SINGLE = 100000311  # complete parse, design range 1 -> "1 enemy";
+                        # its damage op carries no chance gate, so the
+                        # control cannot fail on an unlucky roll
+    PAIR = 2081113      # Phantom Star Ring III: design range 6 -> "2 enemies", and its
+                        # PROSE says "on the target" -- the case text parsing cannot see
 
     check("the AoE case really is an incomplete parse", not fx.is_complete(AOE))
     check("and aoe_damage still sees the AoE", fx.aoe_damage(AOE))
-    # The FIRST damage op is what the fallback models. A skill that opens single-target
-    # and adds an AoE clause later must NOT splash, or every follow-up hits the team.
-    check("a single-target opener is not treated as AoE", not fx.aoe_damage(SINGLE))
     check("an unknown skill id is not AoE", not fx.aoe_damage(999999999))
+
+    # The DESIGN ROW is the authority: GetTargetGroup = _target/100, GetTargetRange =
+    # _target%100, and the panel label is text 23000+_target.
+    check("the AoE skill's design range is ALL", fx.target_range(AOE) == (0, 2),
+          str(fx.target_range(AOE)))
+    check("the single skill's design range is 1", fx.target_range(SINGLE) == (0, 1),
+          str(fx.target_range(SINGLE)))
+    check("Phantom Star Ring III's design range is 2 enemies",
+          fx.target_range(PAIR) == (0, 6), str(fx.target_range(PAIR)))
+    # A "1 enemy" row must return None, not [primary] -- callers rely on None meaning
+    # "nothing to widen" so existing single-target behaviour is untouched.
+    check("a 1-enemy row widens to nothing",
+          fx.design_enemy_targets(SINGLE, None, []) is None)
 
     b = bt.Battle(1101, [{"id": 10001}, {"id": 10011}], team_level=60)
     foes = [u for u in b.units.values() if u.team != bt.TEAM_PLAYER and u.alive]
@@ -328,13 +342,21 @@ def test_fallback_aoe():
     check("damage is rolled per target, not shared",
           all(r["dmg"] < 0 for r in rows), str([r["dmg"] for r in rows]))
 
-    b2 = bt.Battle(1101, [{"id": 10001}, {"id": 10011}], team_level=60)
-    foes2 = [u for u in b2.units.values() if u.team != bt.TEAM_PLAYER and u.alive]
-    me2 = [u for u in b2.units.values() if u.team == bt.TEAM_PLAYER][0]
-    before2 = {u.order: u.hp for u in foes2}
-    json.loads(b2.attack_cmd_json(me2.order, foes2[0].order, SINGLE))
-    hurt2 = [u.order for u in foes2 if u.hp < before2[u.order]]
-    check("a single-target skill still hits exactly one", len(hurt2) == 1, str(hurt2))
+    def strike(sid):
+        b2 = bt.Battle(1101, [{"id": 10001}, {"id": 10011}], team_level=60)
+        foes2 = [u for u in b2.units.values() if u.team != bt.TEAM_PLAYER and u.alive]
+        me2 = [u for u in b2.units.values() if u.team == bt.TEAM_PLAYER][0]
+        before2 = {u.order: u.hp for u in foes2}
+        json.loads(b2.attack_cmd_json(me2.order, foes2[0].order, sid))
+        return [u.order for u in foes2 if u.hp < before2[u.order]], len(foes2)
+
+    hurt2, _n = strike(SINGLE)
+    check("a 1-enemy skill still hits exactly one", len(hurt2) == 1, str(hurt2))
+    # The payoff: a COMPLETE skill whose prose says "on the target" but whose design row
+    # says 2 enemies. It went through the effect engine and still single-targeted.
+    hurt3, n3 = strike(PAIR)
+    check("a '2 enemies' skill hits exactly two", len(hurt3) == 2, str(hurt3))
+    check("...and does not hit the whole field", n3 > 2, str(n3))
 
 if __name__ == "__main__":
     main()

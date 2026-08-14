@@ -26,6 +26,8 @@ from .core import (                                                     # noqa: 
     grant_immunity,
     has_flag,
     aoe_damage,
+    design_enemy_targets,
+    target_range,
     is_complete,
     is_immobilized,
     resolve_targets,

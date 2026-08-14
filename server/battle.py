@@ -893,11 +893,16 @@ class Battle:
             # no matter what the skill said, so every AoE whose parse fell short landed
             # on a single enemy -- 226 skills whose record had already identified the
             # AoE, against 114 that reached the effect engine and worked.
-            victims = [target]
-            if fx.aoe_damage(skill_id):
-                live = [u for u in self.units.values()
-                        if u.team != attacker.team and u.alive]
-                victims = live or [target]
+            live = [u for u in self.units.values()
+                    if u.team != attacker.team and u.alive]
+            # The DESIGN ROW is the authority on how many units a skill hits -- it is
+            # what the panel's "Range 2 enemies" label is drawn from. Prose is the
+            # fallback for the rows it does not describe, since a description often
+            # says "the target" for a skill the panel calls multi-target.
+            victims = fx.design_enemy_targets(skill_id, target, live)
+            if victims is None:
+                victims = live if fx.aoe_damage(skill_id) else [target]
+            victims = victims or [target]
             for victim in victims:
                 # Rolled per target: `damage` reads the victim's own DEF, so a shared
                 # number would over-hit the tanky and under-hit the frail.

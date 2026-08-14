@@ -71,6 +71,82 @@ def is_complete(skill_id):
     return bool(rec and rec.get("complete"))
 
 
+# ---- design-declared targeting ---------------------------------------------
+# **The design row says how many units a skill hits, and it is authoritative.**
+# `DesignSkillRow.GetTargetGroup()` is `_target / 100` and `GetTargetRange()` is
+# `_target % 100` (0x1AACCA4 / 0x1AACCC4), and the panel's "Range" label is text
+# `23000 + _target` -- which is how these ranges were read off:
+#
+#     group 0 = enemies, 1 = allies
+#     1 -> 1 target      2 -> ALL        6 -> 2      7 -> 3      8 -> 4
+#     9..12 -> 1..4 RANDOM               13/14 -> highest/lowest HP
+#     15/16 -> highest/lowest DEF        17/18 -> highest/lowest ATK   19 -> highest SPD
+#
+# This beats reading the prose. Descriptions say "inflicts Confuse on the target" even
+# for a skill the panel labels "Range 2 enemies" (Phantom Star Ring III, `_target` 6),
+# so a text parser cannot see the spread at all. By this field 5681 enemy-group skills
+# are multi-target while only 309 were spreading -- the rest, `complete` ones included,
+# were landing on a single enemy.
+#
+# The CLIENT already has all of this: the design pack ships with it, which is how the
+# panel draws the label without asking us. It does not enforce it, though -- it just
+# renders whatever DamageInfo rows the server sends.
+TARGET_GROUP_ENEMY = 0
+RANGE_ALL = 2
+RANGE_FIXED = {1: 1, 6: 2, 7: 3, 8: 4}
+RANGE_RANDOM = {9: 1, 10: 2, 11: 3, 12: 4}
+# range -> (unit attribute, take the biggest?)
+RANGE_PICK = {13: ("hp", True), 14: ("hp", False),
+              15: ("defense", True), 16: ("defense", False),
+              17: ("atk", True), 18: ("atk", False), 19: ("spd", True)}
+
+
+def target_range(skill_id):
+    """-> (group, range) straight off the design row, mirroring the two accessors."""
+    from design_data import row as _row          # local: keeps this module mock-testable
+    t = int(((_row("skill", int(skill_id)) or {}).get("_target")) or 0)
+    return t // 100, t % 100
+
+
+def design_enemy_targets(skill_id, primary, enemies):
+    """The enemies the design row says this skill strikes, or None when it does not
+    describe an enemy spread worth widening to.
+
+    None (rather than [primary]) for the single-target and unmodelled cases, so callers
+    can tell "the design says one" from "the design says three" and leave existing
+    behaviour untouched in the former.
+    """
+    group, rng = target_range(skill_id)
+    if group != TARGET_GROUP_ENEMY:
+        return None                       # ally-group skills are not ours to widen
+    live = [u for u in enemies if u.alive]
+    if not live:
+        return None
+    if rng == RANGE_ALL:
+        return live
+    n = RANGE_FIXED.get(rng)
+    if n is not None:
+        if n <= 1:
+            return None                   # "1 enemy" -- the chosen target already
+        # The player's chosen target leads, then the rest in field order. Deterministic
+        # on purpose: a fixed-count range is not a random one (9..12 are).
+        rest = [u for u in live if u is not primary]
+        if primary in live:
+            return [primary] + rest[:n - 1]
+        return rest[:n]
+    n = RANGE_RANDOM.get(rng)
+    if n is not None:
+        pool = list(live)
+        _rng.shuffle(pool)
+        return pool[:n]
+    pick = RANGE_PICK.get(rng)
+    if pick:
+        stat, biggest = pick
+        chosen = (max if biggest else min)(live, key=lambda u: getattr(u, stat, 0))
+        return [chosen]
+    return None
+
+
 def aoe_damage(skill_id):
     """True if this skill's FIRST damage op strikes every enemy.
 
@@ -391,10 +467,10 @@ class Ctx:
     resolve their own targets via ctx.targets(), and fold results into ctx.outcome."""
 
     __slots__ = ("attacker", "primary", "allies", "enemies", "reduce",
-                 "per_target", "outcome", "env")
+                 "per_target", "outcome", "env", "design")
 
     def __init__(self, attacker, primary, allies, enemies, reduce, per_target, outcome,
-                 env=None):
+                 env=None, design=None):
         self.attacker = attacker
         self.primary = primary
         self.allies = allies
@@ -403,8 +479,18 @@ class Ctx:
         self.per_target = per_target
         self.outcome = outcome
         self.env = env or {}
+        # Units the skill's own design row says it strikes; None when it says one, or
+        # when the row is not an enemy spread we model.
+        self.design = design
 
     def targets(self, token):
+        # **The design row outranks the singular default.** `enemy_target` is what the
+        # text parser emits both for a genuine single-target hit and for a description
+        # that merely SAYS "the target" while the panel reads "Range 3 enemies". An
+        # explicit token (all_enemies, self, highest_hp_enemy) is more specific than
+        # the row and is left alone.
+        if token in (None, "", "enemy_target") and self.design:
+            return list(self.design)
         return resolve_targets(token, self.attacker, self.primary,
                                self.allies, self.enemies)
 
@@ -429,11 +515,12 @@ def _apply_op(eff, ctx):
         fn(eff, ctx)
 
 
-def _run(effects, attacker, primary, allies, enemies, reduce, *, trusted=True, env=None):
+def _run(effects, attacker, primary, allies, enemies, reduce, *, trusted=True, env=None,
+         design=None):
     """Unconditional effects first, then the {"when": ...}-gated ones -- a gate like
     'if this attack defeats an enemy' must see the outcome of the plain hits."""
     outcome = _new_outcome(trusted)
-    ctx = Ctx(attacker, primary, allies, enemies, reduce, {}, outcome, env)
+    ctx = Ctx(attacker, primary, allies, enemies, reduce, {}, outcome, env, design)
     for eff in effects:
         if not eff.get("when"):
             _apply_op(eff, ctx)
@@ -480,7 +567,8 @@ def execute_skill(attacker, primary, allies, enemies, skill_id, *, damage_reduce
             (immediate if eff.get("trigger", "on_use") in IMMEDIATE_TRIGGERS
              else deferred).append(eff)
     outcome = _run(immediate, attacker, primary, allies, enemies, reduce,
-                   trusted=bool(rec.get("complete")), env=env)
+                   trusted=bool(rec.get("complete")), env=env,
+                   design=design_enemy_targets(skill_id, primary, enemies))
     outcome["deferred"] = deferred
     return outcome
 
