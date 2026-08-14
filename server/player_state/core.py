@@ -214,7 +214,8 @@ def load(player_id):
                 # fill in keys added after this account was first written
                 for k, v in _default(player_id).items():
                     st.setdefault(k, v)
-                if _seed_roster(st) | _clamp_roster_stars(st) | _refill_passes(st):
+                if (_seed_roster(st) | _clamp_roster_stars(st) | _refill_passes(st)
+                        | _purge_orphan_sp_quests(st)):
                     _save_locked(st)
                 return st
             except Exception:
@@ -223,6 +224,33 @@ def load(player_id):
         _seed_roster(st)
         _save_locked(st)
         return st
+
+
+def _purge_orphan_sp_quests(state):
+    """Drop sp_quests entries for quests belonging to systems we do not run.
+
+    **These are old damage that persists.** Before UNSUPPORTED_QUEST_TYPES existed,
+    bump_quest_counter advanced every quest sharing a `_case_id`, event/OFA/battle-pass
+    rows included -- so three gacha pulls armed forty-odd quests across twenty chains at
+    once. bump_quest_counter has skipped those types for a while now, but nothing ever
+    removed the entries it had already written, and the client renders them: the goal
+    list comes out in the wrong order and shows steps from chains the player has not
+    started. A device save carried 40 such entries against 1 real one.
+
+    Keyed on the design row's `_type`, so a quest that no longer exists in the pack is
+    also dropped -- it can never be displayed or claimed either. Returns True if
+    anything changed, so load() knows to rewrite the file.
+    """
+    sp = state.get("sp_quests")
+    if not sp:
+        return False
+    rows = bt.dd.rows("quest") or {}
+    doomed = [k for k in sp
+              if (rows.get(int(k)) or {}).get("_type") in UNSUPPORTED_QUEST_TYPES
+              or int(k) not in rows]
+    for k in doomed:
+        del sp[k]
+    return bool(doomed)
 
 
 def save(state):
