@@ -438,35 +438,25 @@ def reconcile_stage_quests(state):
     the answer converges on the state instead of depending on the order events
     happened in.
 
-    `_pre_quest` is honoured so a chain cannot leap ahead: clearing ST-7 early arms
-    step 43 only once step 42 is actually done, which is the same rule the client
-    applies to display.
+    **Bump the COUNTER; never mark the quest completed.** `complete_quests` -- the cmd
+    257 claim path -- is what writes `quests[id] = 1`, so writing it here instead makes
+    the client treat the goal as ALREADY CLAIMED: it renders as done, no Collect Reward
+    button ever appears, and the payout is silently skipped. That is exactly what the
+    first version of this did to Netherworld Note step 38.
     """
     cleared = {int(sid) for sid in state.get("stages", {})}
-    newly = []
-    for qid, row in bt.dd.rows("quest").items():
+    touched = []
+    for _qid, row in bt.dd.rows("quest").items():
         if row.get("_case_id") != QUEST_CASE_CLEAR_STAGE_ID:
             continue
         if row.get("_type") in UNSUPPORTED_QUEST_TYPES:
             continue
-        if int(row.get("_case_v1") or 0) not in cleared:
+        stage = int(row.get("_case_v1") or 0)
+        if stage not in cleared:
             continue
-        if not quest_completed(state, row.get("_pre_quest") or 0):
-            continue
-        key = str(qid)
-        if _quest_is_sp(row):
-            e = state["sp_quests"].get(key)
-            if e and e.get("status") == SP_QUEST_COMPLETE:
-                continue
-            state["sp_quests"][key] = {"id": int(qid), "a_time": 0,
-                                       "cnt": row.get("_case_cnt") or 1,
-                                       "status": SP_QUEST_COMPLETE}
-        else:
-            if key in state["quests"]:
-                continue
-            state["quests"][key] = 1
-        newly.append(int(qid))
-    return newly
+        touched += bump_quest_counter(state, QUEST_CASE_CLEAR_STAGE_ID,
+                                      case_v1=stage, to=row.get("_case_cnt") or 1)
+    return touched
 
 
 def complete_stage_quests(state, stage_id, cases=(QUEST_CASE_CLEAR_STAGE_ID,)):

@@ -1023,11 +1023,13 @@ def battle_end_reward(battle, state):
         # nothing bumping them left "Complete any Kizuna Quest 1 time" stuck at 0/1 no
         # matter how many Kizuna stages were cleared. quest_sync_msg below carries it.
         # Quests that name THIS stage (case 4) -- "Clear Temple of Starshard Stage 5"
-        # and the Note's other Temple steps. Nothing called complete_stage_quests at
-        # all, so those sat unfinished however many times the stage was cleared.
-        done_here = ps.complete_stage_quests(state, battle.stage_id)
+        # and the Note's other Temple steps. Bump the counter so the client offers
+        # Collect Reward; marking them complete here would skip the claim and the
+        # payout with it (see reconcile_stage_quests).
+        done_here = ps.bump_quest_counter(state, ps.QUEST_CASE_CLEAR_STAGE_ID,
+                                          case_v1=int(battle.stage_id))
         if done_here:
-            log(f"    -> stage-clear quests completed: {done_here}")
+            log(f"    -> stage-clear quest counters {done_here}")
         cat = ps.stage_category(battle.stage_id)
         touched = ps.bump_stage_category_quests(state, battle.stage_id)
         if touched:
