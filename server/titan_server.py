@@ -911,7 +911,8 @@ def battle_end_reward(battle, state):
     bars = []
     if won:
         xp = ps.stage_battle_xp(battle.stage, battle.wave_max)
-        bars = ps.grant_battle_xp(state, ps.battle_team(state), xp)
+        bars = ps.grant_battle_xp(
+            state, ps.battle_team(state, int(state.get("battle_team_index", 0))), xp)
         if bars:
             ups = [b for b in bars if b["lv"] > b["olv"]]
             log(f"    -> battle xp: +{xp} each to {len(bars)} party members"
@@ -2905,7 +2906,18 @@ def handle(conn, addr):
                             STAGE_REQ_EXECUTE, STAGE_REQ_NEWBIE):
                         # Execute carries [stage_id, team]; the newbie variant sends no
                         # args at all and always means the tutorial stage.
+                        #
+                        # **The team arg is 1-BASED and we were ignoring it**, so every
+                        # fight fielded formation 0 however the player had switched
+                        # teams. `RequestServerStageExecuteByAutoLoop` (0x180C5C8)
+                        # sends `loopData.teamID + 1`, and teamID is the 0-based
+                        # formation index -- hence the -1 here. Remembered in state so
+                        # the XP payout and a resumed battle use the same party.
                         stage_id = intargs[0] if intargs else NEWBIE_STAGE_ID
+                        team_ix = (int(intargs[1]) - 1) if len(intargs) > 1 else 0
+                        team_ix = max(0, min(team_ix,
+                                             len(state.get("formations") or [0]) - 1))
+                        state["battle_team_index"] = team_ix
                         # A daily-dungeon stage (_ap_type 2) costs one of item _ap_v1 --
                         # the Training Gym Pass and friends. Charge it here, or every
                         # run is free and the counter never moves.
@@ -2922,9 +2934,12 @@ def handle(conn, addr):
                             else:
                                 log(f"    -> stage {stage_id} entry REFUSED -- no "
                                     f"item {iid}")
-                        log(f"    -> stage execute reply (stage {stage_id})")
+                        party = ps.battle_team(state, team_ix)
+                        log(f"    -> stage execute reply (stage {stage_id}, "
+                            f"team {team_ix + 1}: "
+                            f"{[e.get('uid') if isinstance(e, dict) else e for e in party]})")
                         send(MSG_RPC, stage_execute_reply())
-                        cur_battle = bt.Battle(stage_id, ps.battle_team(state),
+                        cur_battle = bt.Battle(stage_id, party,
                                                state.get("team_level", 1),
                                                state.get("team_star"),
                                                state.get("team_super_star", 0),
