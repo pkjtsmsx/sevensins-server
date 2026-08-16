@@ -1026,6 +1026,13 @@ def battle_end_reward(battle, state):
         touched = ps.bump_stage_category_quests(state, battle.stage_id)
         if touched:
             log(f"    -> stage family {cat}: quest counters {touched}")
+        # "Complete 1 battle with full-set <suit> Starshards" (`_case_id` 2006). The
+        # party's roster uids come off the player units -- mobs carry none.
+        party = [u.uid for u in battle.units.values()
+                 if u.team == bt.TEAM_PLAYER and u.uid]
+        suited = ps.bump_full_suit_quests(state, party)
+        if suited:
+            log(f"    -> full-set suit quests: {suited}")
         ps.save(state)
         # The client caches StageSyncData at login, so without this push it does not
         # learn about the clear until the next relaunch -- which is what made the

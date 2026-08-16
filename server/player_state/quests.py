@@ -9,6 +9,7 @@ import re
 import battle as bt
 
 from .core import (
+    BP_STORAGE_EQUIPMENT,
     ITEM_ACTION_CURRENCY,
     ITEM_ACTION_ENERGY,
     SP_QUEST_COMPLETE,
@@ -16,6 +17,7 @@ from .core import (
     _quest_is_sp,
     add_char,
     bump_quest_counter,
+    char_equips,
     grant_reward,
 )
 
@@ -291,6 +293,56 @@ def bump_stage_category_quests(state, stage_id):
     cat = stage_category(stage_id)
     if cat is not None and cat != CATEGORY_ANY:
         touched += bump_quest_counter(state, QUEST_CASE_CLEAR_CATEGORY, case_v1=cat)
+    return touched
+
+
+# ---- "clear a stage wearing a full set" (`_case_id` 2006) -------------------
+#
+# Quest 31029 is "Complete 1 battle with full-set Endearment Starshards", and it sat at
+# 0/1 forever because nothing here knew the case. Case 2006 is really "clear a stage
+# while <condition>", and its `_case_v1` is overloaded: the goal-chain rows name a
+# **suit id** (1 = Endearment on 31029, 5 = Nightshade on 50175) while the ~40 "Activate
+# <cast>'s Ex Break value +1, and complete any stage" rows put a soulmirror item id
+# there instead. Passing an explicit `case_v1` keeps the two apart -- we only ever bump
+# the suit we actually saw worn, so the Ex Break rows stay untouched (they need the
+# soulmirror system's own hook, which does not exist yet).
+#
+# A suit comes off the ITEM row, not the instance: item `_param1` names the
+# DesignEquipment row and that row's `_suitID` is the set. "Full set" is all SIX
+# starshard slots (equips 0..5) carrying the same suit -- the six actions 111..116.
+QUEST_CASE_CLEAR_WITH_SUIT = 2006
+RUNE_SLOT_COUNT = 6
+
+
+def _rune_suit(item_id):
+    equip = bt.dd.row("equipment", (bt.dd.row("item", int(item_id)) or {}).get("_param1"))
+    return (equip or {}).get("_suitID")
+
+
+def full_suits_worn(state, char_uids):
+    """-> {suit id} for which some cast in `char_uids` wears a COMPLETE 6-slot set."""
+    by_uid = {e.get("uid"): e for e in
+              state["backpack"].get(str(BP_STORAGE_EQUIPMENT), {}).values()}
+    suits = set()
+    for char_uid in char_uids:
+        entry = state["roster"].get(str(char_uid))
+        if not entry:
+            continue
+        worn = char_equips(entry)[:RUNE_SLOT_COUNT]
+        if not all(worn):
+            continue
+        seen = {_rune_suit(by_uid[u]["iid"]) for u in worn if u in by_uid}
+        if len(seen) == 1 and None not in seen:
+            suits |= seen
+    return suits
+
+
+def bump_full_suit_quests(state, char_uids):
+    """Credit case-2006 counters for every full set the party wore. -> keys touched."""
+    touched = []
+    for suit in sorted(full_suits_worn(state, char_uids)):
+        touched += bump_quest_counter(state, QUEST_CASE_CLEAR_WITH_SUIT,
+                                      case_v1=suit)
     return touched
 
 
