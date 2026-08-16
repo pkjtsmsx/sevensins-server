@@ -91,6 +91,18 @@ def main():
         ops = parsed_ops(effects, sid)
         kinds = {f["op"] for f in ops}
 
+        # A damaging skill aimed at enemies must never damage its own side. This is
+        # what "Eternal Love attacks the caster" was: the damage op inherited its target
+        # from a heal phrase sharing the sentence, and the skill only started doing it
+        # once its parse became `complete` and the effect engine took over from the
+        # simple damage path.
+        if (int(row.get("_target") or 0) // 100) == 0:
+            for f in ops:
+                if f["op"] == "damage" and f.get("target") in ("self", "all_allies"):
+                    findings["self_damage"].append(
+                        {"skill": int(sid), "name": row.get("_name_en"),
+                         "target": f.get("target")})
+
         want = DAMAGE_PROSE.search(prose)
         if want and "damage" not in kinds:
             findings["damage_missing"].append(
@@ -136,7 +148,8 @@ def main():
                 {"group": gid, "levels": ks, "pcts": vals})
 
     print(f"skills checked: {sum(1 for r in skills.values() if r.get('_type') != STATUS_TYPE)}")
-    for cat in ("damage_missing", "status_missing", "scaling_hole", "scaling_irregular"):
+    for cat in ("self_damage", "damage_missing", "status_missing",
+                "scaling_hole", "scaling_irregular"):
         rows = findings[cat]
         print(f"\n== {cat}: {len(rows)}")
         for r in rows[:args.limit]:

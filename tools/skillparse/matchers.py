@@ -135,7 +135,20 @@ RIDER_PREFIX_RE = re.compile(
 # with one of these -- an effect verb or a subject. A bare 'and Fragile' / 'and Listless
 # effects' (a status list) has no such opener, so it stays joined to its op.
 EFFECT_START = re.compile(
+    # An adverb may sit between the connector and the verb ("and RANDOMLY pursue an
+    # enemy target"), and without allowing it the clause never split -- so the damage
+    # inherited "the caster's CRIT" from earlier in the sentence as its target.
+    r"(?:randomly|additionally|also|permanently|immediately|further)?\s*"
     r"(?:deals?|inflicts?|grants?|restores?|reduces?|decreases?|increases?|removes?|"
+    # heals/pursues/applies start their own effect too: without `heals?` the sentence
+    # "Deals 200% ATK as damage AND HEALS the STR Type ally ... by 100% of the caster's
+    # ATK" stayed one segment, so the damage op read "the caster's" as ITS target and
+    # the cast hit itself.
+    # A lookahead, not a bare word: "heals?" also matches the status NAME "Heal Block"
+    # ("inflicts Revive Block and Heal Block on the target"), and cutting there split a
+    # status list. Require a target word to follow, which a verb has and a name does not.
+    r"(?:heals?|recovers?)(?=\s+(?:the|all|\d+|one|two|three|an?\b))|"
+    r"pursues?(?=\s)|applies(?=\s+(?:a|an|the)\b)|"
     r"gains?|opens?|extends?|stuns?|freezes?|silences?|the caster|the target|"
     r"has an?|open an?|\d+%\s+(?:fixed\s+)?chance)\b", re.I)
 

@@ -67,6 +67,28 @@ def parse_clause(clause, catalog):
     return uniq
 
 
+def _fix_impossible_targets(row, blocks):
+    """A damaging skill aimed at ENEMIES can never damage the caster -- the design row
+    says so, and it outranks anything read out of prose.
+
+    "Deals 200% ATK as damage and heals the STR Type ally ... by 100% of THE CASTER's
+    ATK" resolved the damage to `self`, and the cast attacked itself in game. The prose
+    fix (segmenting on heal verbs) handles that sentence; this is the guard for the
+    class of it. `DesignSkillRow.GetTargetGroup()` is `_target / 100`: 0 enemies,
+    1 allies -- so on an enemy-group skill, self-damage is by construction wrong.
+    """
+    if (int(row.get("_target") or 0) // 100) != 0:
+        return
+    for block in blocks:
+        for eff in block["effects"]:
+            if (eff.get("op") == "damage"
+                    and eff.get("target") in ("self", "all_allies")):
+                # Both directions of the same error: the damage inherited a target from
+                # a HEAL phrase sharing the sentence ("Deals 160% ATK as damage and
+                # recovers all allies..."), so the skill hit its own team.
+                eff["target"] = "enemy_target"
+
+
 def parse_skill(row, catalog):
     prose, defined = strip_status_defs(clean(row.get("_note1_en")))
     blocks = split_named_blocks(prose)
@@ -80,6 +102,7 @@ def parse_skill(row, catalog):
             elif clause.strip() and not is_noop_clause(clause):
                 unparsed.append(clause.strip())
         out_blocks.append({"name": name, "effects": effects})
+    _fix_impossible_targets(row, out_blocks)
     return {"id": row.get("_id"), "type": row.get("_type"),
             "target": row.get("_target"), "hits": row.get("_count"),
             "defined_statuses": defined, "blocks": out_blocks, "unparsed": unparsed}
