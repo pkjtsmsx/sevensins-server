@@ -63,7 +63,8 @@ GACHA_BOX_ID = 1001
 # banners were evidently retired before EoS. Ids 761/771 and 766/776 have no sprite row
 # at all -- using them is what produced dead duplicate tabs.
 SPR_BANNER_SINS, SPR_TAB_SINS = 762, 772               # the combined ★5 banner
-SPR_BANNER_AWAKER, SPR_TAB_AWAKER = 767, 777           # Awaker Summon
+SPR_BANNER_ENCHANTED, SPR_TAB_ENCHANTED = 767, 777    # "In the Enchanted Stars"
+SPR_BANNER_AWAKER, SPR_TAB_AWAKER = 767, 777           # same art, older label
 SPR_BANNER_DEBUT, SPR_TAB_DEBUT = 763, 773
 SPR_BANNER_ANGEL, SPR_TAB_ANGEL = 765, 775             # Virtue Soulmirrors
 SPR_BANNER_SOULMIRROR, SPR_TAB_SOULMIRROR = 764, 774   # Sin Soulmirrors
@@ -160,6 +161,24 @@ GACHA_TEN_DIAMOND_PRICE = 1000
 GACHA_RATE_5 = 0.025
 GACHA_RATE_4 = 0.09
 
+# ---- per-banner cast pools -------------------------------------------------
+#
+# `_alignment` separates the cast: 100 Sins / 101 Virtues / 102 Riders (the ★5 story
+# cast), 103 ★5 Awakers, 104 ★4 Awakers, 9001 ★3 fodder. The generic banner rolls
+# everything; a NAMED banner rolls its own slice with its featured casts rate-upped.
+#
+# **All of this is invented.** No DesignGacha* form ships in the pack, so pools, rates
+# and pickups are ours -- but the FEATURED CASTS are not guesses: they are read off the
+# banner artwork. `atlas_banner_gacha06_en` ("In the Enchanted Stars") pictures
+# ★5 SEERE "Foxy Scryer" (10501) and ★5 NONNA "Lightning Rider" (10581), both
+# alignment 103, and captions itself "Chance to get ★5 Cast / 10-Summon & Get 1 ★4".
+# That is an Awaker banner, so its pool is 103/104 rather than the whole cast.
+GACHA_PICKUP_SHARE = 0.5      # share of the ★5 slot reserved for the featured casts
+CAST_POOL_DEFAULT = {"star5": (100, 101, 102, 103), "star4": (104,), "pickup": ()}
+CAST_POOLS = {
+    3101: {"star5": (103,), "star4": (104,), "pickup": (10501, 10581)},
+}
+
 
 def gacha_free_available(state):
     """Is today's free daily pull still unused? Shares the 4AM period with the passes."""
@@ -215,6 +234,22 @@ REGULAR_BOXES = [
     # One cast banner covering every unit, bought with Awaker Scrolls, carrying the
     # daily free pull. Uses the combined ★5 art (all three factions) rather than the
     # Awaker-specific art, since the pool is not Awaker-only.
+    # **Box id 3101 is not arbitrary: it is what quest 32001 asks for.** Netherworld
+    # Note step 35 is "Summon 1 Cast in [In the Enchanted Stars] gacha box", case 13
+    # with `_case_v1` 3101. No DesignGacha* form ships in the design pack at all -- box
+    # definitions were live-ops data -- so every banner here is ours to number, and
+    # giving the standing cast banner the id the goal names makes the step reachable as
+    # designed instead of fudging the counter. (3444/3450/3471, "Rise of Solar Prime",
+    # are event banners we do not run.)
+    #
+    # **The ART for it DID ship**: `icon/banner/atlas_banner_gacha06_en`, sprite 767,
+    # captioned "In the Enchanted Stars" and featuring 10501 SEERE "Foxy Scryer" and
+    # 10581 NONNA "Lightning Rider". It was sitting unused under the name
+    # SPR_BANNER_AWAKER -- the box was live data, the atlas was not.
+    (3101, SPR_BANNER_ENCHANTED, SPR_TAB_ENCHANTED,
+     "In the Enchanted Stars", True, 202, 0),
+    # The all-cast banner stays: it is the ONLY way to roll Sins, Virtues and Riders,
+    # since 3101 is Awaker-only (see CAST_POOLS). It keeps the daily free pull.
     (1002, SPR_BANNER_SINS, SPR_TAB_SINS, "Summon", True, 202, 1),
     # Soulmirrors are the ITEM gacha (魂鏡 are items), so char_only must be False or
     # ShowGachaAnim skips straight to the results screen.
@@ -435,7 +470,14 @@ def gacha_commit(state):
         else:
             add_char(state, row[1], star=row[3])
     state["gacha_count"] = state.get("gacha_count", 0) + 1
-    bump_quest_counter(state, QUEST_CASE_GACHA)
+    # **`_case_v1` on case 13 is the BOX id, a discriminator** -- 32001 names 3101 and
+    # the "Rise of Solar Prime" rows name 3444/3450/3471. Bumping on the case id alone
+    # credited every gacha quest in the game off a single pull on any banner (the same
+    # trap case 2003 documents). Bump the generic family (v1 0) plus this box.
+    bump_quest_counter(state, QUEST_CASE_GACHA, case_v1=0)
+    box = state.pop("gacha_pending_box", None)
+    if box:
+        bump_quest_counter(state, QUEST_CASE_GACHA, case_v1=int(box))
     state["gacha_pending"] = []
     return pending
 
@@ -459,6 +501,7 @@ def gacha_draw(state, count=10, cost=None, box_id=None):
                                     SOULMIRROR_GACHA_BOXES[int(box_id)])
         state["gacha_pending"] = results
         state["gacha_pending_cost"] = list(cost) if cost else None
+        state["gacha_pending_box"] = int(box_id)
         return results
     rows = bt.dd.rows("char")
     # Playable cast lives in the 10000..19999 id band (Lucifer 10001, Leviathan
@@ -485,8 +528,8 @@ def gacha_draw(state, count=10, cost=None, box_id=None):
     #   align 9001        fodder               _rarity 2 (R)   -> ★3
     # The single cast banner covers EVERY unit, so ★5 spans all four of the first group
     # -- it used to be Awakers only, which silently excluded the 73 real ★5 casts.
-    STAR5 = (100, 101, 102, 103)
-    STAR4, FODDER = (104,), (9001,)
+    pool = CAST_POOLS.get(int(box_id or 0), CAST_POOL_DEFAULT)
+    FODDER = (9001,)
 
     def _bucket(alignments, listed=True):
         return [r for r in rows.values()
@@ -494,8 +537,11 @@ def gacha_draw(state, count=10, cost=None, box_id=None):
                 and (bool(r.get("_order")) or not listed)
                 and any(r.get("_growStar") or [])]
 
-    five, four, fod = (_bucket(STAR5), _bucket(STAR4),
+    five, four, fod = (_bucket(pool["star5"]), _bucket(pool["star4"]),
                        _bucket(FODDER, listed=False))
+    pickup = [r for r in (rows.get(str(cid)) or rows.get(cid)
+                          for cid in pool.get("pickup", ()))
+              if r and any(r.get("_growStar") or [])]
     if not (five and four and fod):
         return []
     # The TUTORIAL roll is scripted -- 1x 5★, 1x 4★, 8x fodder -- and must stay that way;
@@ -511,7 +557,10 @@ def gacha_draw(state, count=10, cost=None, box_id=None):
         for _ in range(count):
             r = random.random()
             if r < GACHA_RATE_5:
-                plan.append((five, 5))
+                # Rate-up: half of the ★5 slot goes to the banner's featured casts,
+                # split evenly between them (see GACHA_PICKUP_SHARE).
+                plan.append((pickup if (pickup and random.random()
+                                        < GACHA_PICKUP_SHARE) else five, 5))
             elif r < GACHA_RATE_5 + GACHA_RATE_4:
                 plan.append((four, 4))
             else:
@@ -529,6 +578,7 @@ def gacha_draw(state, count=10, cost=None, box_id=None):
     # held until the player keeps this roll (see gacha_commit)
     state["gacha_pending"] = results
     state["gacha_pending_cost"] = list(cost) if cost else None
+    state["gacha_pending_box"] = int(box_id) if box_id is not None else None
     return results
 
 
