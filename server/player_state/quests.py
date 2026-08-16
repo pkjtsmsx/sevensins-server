@@ -18,6 +18,7 @@ from .core import (
     _quest_is_sp,
     add_char,
     bump_quest_counter,
+    quest_completed,
     char_equips,
     grant_reward,
 )
@@ -140,6 +141,13 @@ def char_reward_of(item_id):
 # and corroborated by all 516 rows carrying it being named "攻略主線劇情 (N)".
 # Other condition types are not modelled, so only stage-clear quests complete.
 QUEST_CASE_CLEAR_STAGE = 1002
+# **Case 4 is the OTHER "clear a stage" case, and it is the one the Netherworld Note
+# uses.** 1002's `_case_v1` is a chapter root ("Episode 1 (Normal) stages all cleared",
+# v1 1101), while case 4 names a single real STAGE id -- 31036 "Clear Temple of
+# Starshard Stage 5" is v1 1600005, and the six live `_type 1` rows are exactly the
+# Note's Temple steps 5/7/9/11/13/15. Handling only 1002 left every one of them stuck
+# after the clear. The remaining 21 case-4 rows are `_type 7` and stay filtered out.
+QUEST_CASE_CLEAR_STAGE_ID = 4
 # Which dictionary a completion has to go in is decided by **`_case_type` (row +0xA8)**,
 # NOT `_type` (+0x94). PlayerQuest.QuestHasCompleted does `LDR W8,[X0,#0xA8]` and then
 #   1 -> Quest_Datas.quests.ContainsKey(id)
@@ -420,9 +428,56 @@ def bump_full_suit_quests(state, char_uids):
     return touched
 
 
-def complete_stage_quests(state, stage_id):
+def reconcile_stage_quests(state):
+    """Complete case-4 quests whose stage is ALREADY in the cleared set. -> ids.
+
+    A live clear is not enough on its own: the Temple (and every other chain) walks the
+    player forward, so a goal that names ST-5 becomes unreachable the moment ST-6 is
+    unlocked -- the GO button no longer offers it. Anything cleared before its quest
+    existed, or before this hook did, would stay stuck forever. Run this at login so
+    the answer converges on the state instead of depending on the order events
+    happened in.
+
+    `_pre_quest` is honoured so a chain cannot leap ahead: clearing ST-7 early arms
+    step 43 only once step 42 is actually done, which is the same rule the client
+    applies to display.
+    """
+    cleared = {int(sid) for sid in state.get("stages", {})}
+    newly = []
+    for qid, row in bt.dd.rows("quest").items():
+        if row.get("_case_id") != QUEST_CASE_CLEAR_STAGE_ID:
+            continue
+        if row.get("_type") in UNSUPPORTED_QUEST_TYPES:
+            continue
+        if int(row.get("_case_v1") or 0) not in cleared:
+            continue
+        if not quest_completed(state, row.get("_pre_quest") or 0):
+            continue
+        key = str(qid)
+        if _quest_is_sp(row):
+            e = state["sp_quests"].get(key)
+            if e and e.get("status") == SP_QUEST_COMPLETE:
+                continue
+            state["sp_quests"][key] = {"id": int(qid), "a_time": 0,
+                                       "cnt": row.get("_case_cnt") or 1,
+                                       "status": SP_QUEST_COMPLETE}
+        else:
+            if key in state["quests"]:
+                continue
+            state["quests"][key] = 1
+        newly.append(int(qid))
+    return newly
+
+
+def complete_stage_quests(state, stage_id, cases=(QUEST_CASE_CLEAR_STAGE_ID,)):
     """Mark every stage-clear quest satisfied by clearing `stage_id`. Returns the
     ids newly completed, so the caller can decide whether a push is worthwhile.
+
+    **Only case 4 is wired up by default, on purpose.** Case 1002's `_case_v1` reads
+    like a chapter root ("Episode 1 (Normal) stages all cleared", v1 1101) and 1101 is
+    ALSO a real stage id (1-1), so completing 1002 rows off a single clear would mark
+    whole-chapter goals done after one stage. Case 4 names the exact stage and is
+    unambiguous. Pass `cases` explicitly once 1002's semantics are settled.
 
     Completion is stored in TWO different places depending on the quest's
     **`_case_type`** (see QUEST_CASE_TYPE_MAIN above -- NOT `_type`, which is a
@@ -434,7 +489,7 @@ def complete_stage_quests(state, stage_id):
     """
     newly = []
     for qid, row in bt.dd.rows("quest").items():
-        if (row.get("_case_id") != QUEST_CASE_CLEAR_STAGE
+        if (row.get("_case_id") not in cases
                 or row.get("_case_v1") != int(stage_id)):
             continue
         # Same scope limit as bump_quest_counter: never complete event/OFA/BP/special

@@ -59,3 +59,6 @@ certs/
 
 # Release payloads built by hand (APKs + 2.5 GB asset tar)
 dist/
+
+# ---- Banner art extracted from the bundles (43MB, re-extractable) ----
+banner_art/

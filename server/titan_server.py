@@ -1022,6 +1022,12 @@ def battle_end_reward(battle, state):
         # client cannot re-derive these -- GetQuestValue reads a server counter -- so
         # nothing bumping them left "Complete any Kizuna Quest 1 time" stuck at 0/1 no
         # matter how many Kizuna stages were cleared. quest_sync_msg below carries it.
+        # Quests that name THIS stage (case 4) -- "Clear Temple of Starshard Stage 5"
+        # and the Note's other Temple steps. Nothing called complete_stage_quests at
+        # all, so those sat unfinished however many times the stage was cleared.
+        done_here = ps.complete_stage_quests(state, battle.stage_id)
+        if done_here:
+            log(f"    -> stage-clear quests completed: {done_here}")
         cat = ps.stage_category(battle.stage_id)
         touched = ps.bump_stage_category_quests(state, battle.stage_id)
         if touched:
@@ -1408,6 +1414,14 @@ def handle(conn, addr):
                 state = ps.load(pid)
                 # backpack_msg reads this to prefix its cmd-83 info refresh.
                 _bp_ctx.state = state
+                # Case-4 goals name a single stage, and the chains walk the player past
+                # it -- once ST-6 unlocks, the GO button will not offer ST-5 again. Fold
+                # already-cleared stages in at login so the answer follows the state
+                # rather than the order things happened in.
+                healed = ps.reconcile_stage_quests(state)
+                if healed:
+                    ps.save(state)
+                    log(f"    -> stage-clear quests reconciled: {healed}")
                 # Catch accounts that finished the tutorial in a prior session (or before
                 # this reset existed): fold them to base before the login sync is built.
                 if ps.maybe_reset_tutorial_casts(state):
