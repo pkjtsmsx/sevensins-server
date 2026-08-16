@@ -446,6 +446,41 @@ def autorun_cancel(state):
     return state.pop("autorun", None)
 
 
+# Kinds the rating evaluator could judge BEFORE 2026-08-16: everything else reported 0
+# and so was never paid, however many times the stage was cleared.
+LEGACY_RATING_KINDS = (1, 2, 3)
+
+
+def migrate_rating_masks(state):
+    """Clear rating bits that were stored as earned but never actually paid. -> count.
+
+    Every clear used to write a flat 15 into `state["stages"][id]` -- all four stars --
+    while only kinds 1/2/3 were ever evaluated or paid. Now that the mask decides what
+    a clear owes, that legacy 15 would lock a player out of the grimoire fragments and
+    posters they never received. So drop the bits for rows whose kind the old code
+    could not judge, leaving them to be earned once, properly.
+
+    Runs ONCE per account (guarded by a flag): re-running would clear bits that have
+    since been legitimately earned, which would re-open the farm this closed.
+    """
+    if state.get("_rating_masks_migrated"):
+        return 0
+    fixed = 0
+    for sid, mask in list((state.get("stages") or {}).items()):
+        mask = int(mask or 0)
+        row = bt.dd.row("stage", int(sid)) or {}
+        keep = 0
+        for i in range(4):
+            cells = bt.dd.csv_ints(row.get(f"_rating_datas{i + 1}"))
+            if cells and cells[0] in LEGACY_RATING_KINDS and (mask >> i) & 1:
+                keep |= 1 << i
+        if keep != mask:
+            state["stages"][sid] = keep
+            fixed += 1
+    state["_rating_masks_migrated"] = 1
+    return fixed
+
+
 def stage_json(state, now=None):
     """PlayerStage.StageSyncData. `stages` maps stage id -> rating bitmask and is
     what GetStageRating reads; the other three dicts use LuaTableConverter and must
