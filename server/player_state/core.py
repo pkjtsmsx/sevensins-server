@@ -529,6 +529,41 @@ def _char_id_json(entry, star, super_star=0, karma=None, skins=()):
 # ...and as a CURRENCY key, which is what state["currency"] is indexed by.
 CURRENCY_COIN = 16
 
+# **Diamonds are TWO balances and the client quietly spends both.**
+# `PlayerCurrency.Balance` (0x18F8298) special-cases type 1:
+#     Balance(Cash) = BalanceDetailed(1) + BalanceDetailed_RealCash()
+# and `BalanceDetailed_RealCash` (0x18F83F0) reads type **32** (48 for `IsDMMUser`).
+# The lobby tooltip says it in words: "Free diamond will be consumed first. Paid
+# diamond will cover the insufficient part." So every affordability check the client
+# makes is against free + paid, and a server that debits only key 1 refuses purchases
+# the player was shown as affordable -- gacha drew, displayed the roll, then granted
+# nothing once free diamonds dropped below the price.
+CURRENCY_CASH = 1          # CurrencyType.Cash -- free diamonds
+CURRENCY_CASH_PAID = 32    # RealCash; DMM builds use 48, which we do not serve
+
+
+def diamond_balance(state):
+    """What the client's `Balance(CurrencyType.Cash)` reports: free + paid."""
+    cur = state["currency"]
+    return (int(cur.get(str(CURRENCY_CASH), 0))
+            + int(cur.get(str(CURRENCY_CASH_PAID), 0)))
+
+
+def spend_diamonds(state, amount):
+    """Charge diamonds free-first, paid for the remainder. -> True if affordable."""
+    amount = int(amount)
+    if amount <= 0:
+        return True
+    cur = state["currency"]
+    free = int(cur.get(str(CURRENCY_CASH), 0))
+    paid = int(cur.get(str(CURRENCY_CASH_PAID), 0))
+    if free + paid < amount:
+        return False
+    take_free = min(free, amount)
+    cur[str(CURRENCY_CASH)] = free - take_free
+    cur[str(CURRENCY_CASH_PAID)] = paid - (amount - take_free)
+    return True
+
 
 def item_count(state, item_id, cbp_type=None):
     """How many of an item the player is holding."""
@@ -1282,6 +1317,9 @@ def spend_cost(state, item_id, amount):
     row = bt.dd.row("item", item_id) or {}
     if row.get("_action") == ITEM_ACTION_CURRENCY and row.get("_param1"):
         key = str(int(row["_param1"]))
+        # Diamonds (item 1) draw on the paid balance too -- see spend_diamonds.
+        if key == str(CURRENCY_CASH):
+            return spend_diamonds(state, amount)
         have = int(state["currency"].get(key, 0))
         if have < amount:
             return False

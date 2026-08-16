@@ -123,8 +123,19 @@ def main():
     ok2, _s, why2, _n = ps.buy_shop_goods(st, 2201, 1)
     check("second exceeds the daily cap", not ok2, why2)
 
+    # Diamonds are two balances: free is spent first and PAID covers the shortfall,
+    # exactly as PlayerCurrency.Balance(Cash) prices it for the client.
     st = fresh()
     st["currency"]["1"] = 0
+    st["currency"][str(ps.CURRENCY_CASH_PAID)] = 10 ** 7
+    okp, _s, whyp, _n = ps.buy_shop_goods(st, 2101, 1)
+    check("paid diamonds cover an empty free balance", okp, whyp)
+    check("and the charge came off the paid balance",
+          int(st["currency"][str(ps.CURRENCY_CASH_PAID)]) < 10 ** 7)
+
+    st = fresh()
+    st["currency"]["1"] = 0
+    st["currency"][str(ps.CURRENCY_CASH_PAID)] = 0
     ok3, _s, why3, _n = ps.buy_shop_goods(st, 2101, 1)
     check("cannot buy without diamonds", not ok3, why3)
 

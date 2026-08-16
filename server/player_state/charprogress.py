@@ -17,6 +17,7 @@ from .core import (
     char_rarity,
     grant_karma,
     has_item,
+    spend_diamonds,
     spend_item,
     uid,
 )
@@ -40,7 +41,7 @@ INHERIT_MATERIAL_IDS = (12, 21, 13, 14, 23)        # Inherit Gem (Sin/Virtue/Rid
 INHERIT_DIAMOND_COSTS = (2000, 1500, 1500, 1000, 500)
 INHERIT_COST_ITEM, INHERIT_COST_DIAMOND = 1, 2     # RequestLimitImpart costType
 INHERIT_ITEM_COUNT = 1                             # the panel always charges exactly 1
-CURRENCY_CASH = 1                                  # CurrencyType.Cash -- diamonds
+CURRENCY_CASH = 1                                  # CurrencyType.Cash -- free diamonds
 MIN_INHERIT_RARITY = 4                             # "Only casts of ★4 rarity or better"
 
 # How many inherits we grant per group. The real value was server-authoritative and is
@@ -108,10 +109,10 @@ def inherit_char(state, in_uid, out_uid, cost_type):
 
     if cost_type == INHERIT_COST_DIAMOND:
         cost = INHERIT_DIAMOND_COSTS[idx]
-        if int(state["currency"].get(str(CURRENCY_CASH), 0)) < cost:
+        # spend_diamonds, not a plain key-1 debit: the client prices this against
+        # free + paid (PlayerCurrency.Balance), so must we.
+        if not spend_diamonds(state, cost):
             return False, 0, 0, 0, "not enough diamonds"
-        state["currency"][str(CURRENCY_CASH)] = \
-            int(state["currency"].get(str(CURRENCY_CASH), 0)) - cost
     else:
         item = INHERIT_MATERIAL_IDS[idx]
         if not spend_item(state, item, INHERIT_ITEM_COUNT):
