@@ -14,7 +14,7 @@ Wire-format notes live next to each builder; the key names are NOT the C# field 
   CharData  : pro_chars / group_tbl / id_tbl / formations / acPeriod / ...
   Backpack  : "sid" (LuaTableConverter) inside BackpackItemsData
 """
-import json, math, os, threading, time
+import json, math, os, shutil, threading, time
 
 import battle as bt
 import design_data as dd
@@ -219,7 +219,23 @@ def load(player_id):
                     _save_locked(st)
                 return st
             except Exception:
-                pass
+                # **NEVER fall through to a fresh account here.** The old code did, and
+                # writing that default straight back DESTROYED the save: a transient
+                # failure in the normalisation helpers -- design_data raising because the
+                # cache was cold and this interpreter has no TypeTreeGeneratorAPI -- was
+                # enough to turn a 100 KB account into a tutorial state, silently.
+                # Preserve the file, hand back what could be read, and let the caller
+                # see a real error if even that failed.
+                stamp = time.strftime("%Y%m%d-%H%M%S")
+                keep = f"{p}.unreadable-{stamp}"
+                try:
+                    shutil.copy2(p, keep)
+                except Exception:
+                    keep = "(copy failed)"
+                raise RuntimeError(
+                    f"refusing to overwrite {p}: it could not be loaded cleanly "
+                    f"(kept a copy at {keep}). Fix the cause, do not delete the file."
+                )
         st = _default(player_id)
         _seed_roster(st)
         _save_locked(st)
