@@ -5,6 +5,7 @@ Split out of the former monolithic core.py; depends only on .core.
 
 
 import json
+import re
 
 import battle as bt
 
@@ -322,6 +323,50 @@ def awaker_pool(star, alignments=None):
                 out.append((cid, int(iid)))
         _awaker_pool_cache[key] = sorted(out)
     return _awaker_pool_cache[key]
+
+
+# The "Random ★N <suit>" boxes, items 1001..1030 -- what the Netherworld Note pays for
+# its Temple steps, and `_action 2` like every other box, so they land nowhere and the
+# reward popup strips them. Claiming step 38 filed an unholdable item 1014 in the bag
+# and showed the player nothing.
+#
+# **Do not hand-list these; `_param1` encodes them.** It reads `52 | star | suit`:
+# 5211 = ★1 Endearment, 5234 = ★3 Slayer, 5265 = ★6 Nightshade. (The EN names are
+# useless here -- all five suits in a tier are captioned "Random ★N Endearment", a
+# copy-paste in the localisation. `_param1` also happens to collide with real
+# `equipment` row ids, which is a coincidence: 5251+ do not exist there at all, so it
+# is not an equipment reference.)
+#
+# A shard's suit is its own item `_param1` -> DesignEquipment `_suitID`, and the star
+# is `_rarity`; the slot is the action, 111..116 -> 1..6.
+RANDOM_RUNE_BOX = re.compile(r"^52(\d)(\d)$")
+
+
+def random_rune_box(item_id):
+    """-> (star, suit id) for a 1001..1030 box, or None."""
+    row = bt.dd.row("item", int(item_id)) or {}
+    if row.get("_action") != 2:
+        return None
+    m = RANDOM_RUNE_BOX.match(str(row.get("_param1") or ""))
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def rune_star_suit_pool(star, suit):
+    """Starshard item ids of `suit` at `_rarity` == star, any slot or grade."""
+    key = ("star", star, suit)
+    if key not in _rune_pool_cache:
+        eq = bt.dd.rows("equipment") or {}
+        pool = []
+        for iid, row in (bt.dd.rows("item") or {}).items():
+            if int(row.get("_action") or 0) not in range(111, 117):
+                continue
+            if int(row.get("_rarity") or 0) != star:
+                continue
+            if (eq.get(row.get("_param1")) or {}).get("_suitID") != suit:
+                continue
+            pool.append(int(iid))
+        _rune_pool_cache[key] = sorted(pool)
+    return _rune_pool_cache[key]
 
 
 def rune_bundle_pool(element, grade):
@@ -746,6 +791,18 @@ def grant_goods(state, item_id, amount, rng=None):
                 got = rng.choice(pool)
                 uids.extend(grant_goods(state, got, 1, rng)[0])
             return uids, got, max(1, amount)
+
+    # A "Random ★N <suit>" box (1001..1030): roll a shard of that suit and star.
+    star_suit = random_rune_box(item_id)
+    if star_suit:
+        pool = rune_star_suit_pool(*star_suit)
+        if pool:
+            from .gear import grant_rune       # local: gear imports core, not us
+            got = None
+            for _ in range(max(1, amount)):
+                got = rng.choice(pool)
+                grant_rune(state, got, rune_slot(got) or 1)
+            return [], got, max(1, amount)
 
     # A random STARSHARD box: roll a real shard so the player gets something they can
     # actually equip, and report the one they got.
