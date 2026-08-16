@@ -49,8 +49,26 @@ def _num(tok):
     return WORDNUM.get(tok, int(tok) if tok.isdigit() else None)
 
 
+# Adjective forms of a status gate: "if the target is STUNNED" means "is affected by
+# Stun". Only the unambiguous ones -- these read as states, never as verbs, in a gate.
+STATUS_ADJECTIVES = {
+    "stunned": "Stun", "frozen": "Freeze", "charmed": "Charm", "dazed": "Daze",
+    "silenced": "Silence", "sealed": "Seal", "poisoned": "Poison", "burned": "Burn",
+    "taunted": "Taunt", "petrified": "Petrify", "confused": "Confuse",
+}
+ADJECTIVE_RE = re.compile(r"\bis\s+(not\s+)?(" + "|".join(STATUS_ADJECTIVES) + r")\b",
+                          re.I)
+
+
+def _expand_adjectives(text):
+    def sub(m):
+        neg = m.group(1) or ""
+        return f"is {neg}affected by {STATUS_ADJECTIVES[m.group(2).lower()]}"
+    return ADJECTIVE_RE.sub(sub, text)
+
+
 def _strip(text):
-    t = text.strip()
+    t = _expand_adjectives(text.strip())
     t = re.sub(r"^if\b\s*", "", t, flags=re.I)
     while True:
         t2 = RIDER_RE.sub("", t).strip(" ,.-")
@@ -179,9 +197,54 @@ def _atom(t):
     if re.fullmatch(r"(?:this|the|the\s+current|current|it)\s+(?:attack\s+)?is\s+"
                     r"(?:a\s+)?[Cc]ritical(?:\s+[Hh]it)?", t, re.I):
         return {"kind": "crit"}
+    # "the caster attacks a target with the Fallen Angel Mark" -- a status gate on the
+    # TARGET, written from the attacker's side. 19 skills, all of them damage riders.
+    m = re.fullmatch(r"(?:the\s+caster\s+)?attacks?\s+(?:a|an|the)\s+target\s+"
+                     r"(?:with|carrying|affected\s+by)\s+(?:the\s+)?(.+)", t, re.I)
+    if m:
+        name = m.group(1).strip().rstrip(".")
+        if name:
+            return {"kind": "status", "subject": "target", "negate": False,
+                    "names": [name]}
+    # "the caster has no removable debuffs" -- a class gate, negated. The class names
+    # (_buff/_debuff/_dot/_hot) are what the status gate already speaks.
+    m = re.fullmatch(r"(?:the\s+)?(caster|target)\s+has\s+(no|any)\s+"
+                     r"(?:removable\s+)?(buffs?|debuffs?)", t, re.I)
+    if m:
+        return {"kind": "status",
+                "subject": "self" if m.group(1).lower() == "caster" else "target",
+                "negate": m.group(2).lower() == "no",
+                "names": ["_buff" if m.group(3).lower().startswith("buff")
+                          else "_debuff"]}
+    # unit_count: "there are still at least 3 enemies on the field",
+    # "there are 2 enemies or below (includes 2)", "there are at most 2 allies left".
+    # **"more than N ... (includes N)" means >= N**, not > N -- the parenthetical is the
+    # game telling you the bound is inclusive, and 19 skills hang on it.
+    m = re.fullmatch(
+        r"there\s+are\s+(?:still\s+)?"
+        r"(?:(at\s+least|more\s+than|at\s+most|less\s+than|fewer\s+than)\s+)?"
+        r"(\d+|" + "|".join(WORDNUM) + r")\s+(enemies|enemy|allies|ally)"
+        r"(?:\s+or\s+(below|above|more|less|fewer))?"
+        r"(?:\s*\(includes?\s+\d+\))?"
+        r"(?:\s+(?:left|surviv\w+|remain\w*|on\s+the\s+field(?:\s+surviv\w+)?))*",
+        t, re.I)
+    if m:
+        n = _num(m.group(2))
+        word, tail = (m.group(1) or "").lower().replace(" ", ""), (m.group(3) or "")
+        side = "enemy" if m.group(3).lower().startswith("enem") else "ally"
+        inclusive = "(include" in t.lower()
+        cmp_ = {"atleast": "ge", "morethan": "ge" if inclusive else "gt",
+                "atmost": "le", "lessthan": "lt", "fewerthan": "lt"}.get(word)
+        if cmp_ is None:
+            tail = (m.group(4) or "").lower()
+            cmp_ = {"below": "le", "less": "le", "fewer": "le",
+                    "above": "ge", "more": "ge"}.get(tail, "ge")
+        if n is not None:
+            return {"kind": "unit_count", "side": side, "cmp": cmp_, "n": n}
     # kill: "this attack defeats an enemy" / "fails to defeat the enemy"
     m = re.fullmatch(r"(?:this|the)\s+attack\s+(?:successfully\s+|sucessfully\s+)?"
-                     r"(defeats?|does\s+not\s+defeat|fails\s+to\s+defeat)\s+"
+                     r"(defeats?|does\s+not\s+defeat|doesn't\s+defeat|"
+                     r"fails\s+to\s+defeat)\s+"
                      r"(?:an|the)\s+enemy", t, re.I)
     if m:
         return {"kind": "kill", "negate": "defeat" != m.group(1).lower()[:6]}

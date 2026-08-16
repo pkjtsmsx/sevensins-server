@@ -155,6 +155,17 @@ def _kill(c, ctx):
     return not died if c.get("negate") else died
 
 
+@cond("unit_count")
+def _unit_count(c, ctx):
+    """How many units of a side are still standing -- "if there are still at least 3
+    enemies on the field". Counts the LIVE units in the same pools the other gates use.
+    """
+    # `any_enemy`/`any_ally` are the pool names _pool knows, and both already filter to
+    # the living -- "all_enemies" would fall through to the TARGET branch and count 1.
+    pool = _pool("any_enemy" if c.get("side") == "enemy" else "any_ally", ctx)
+    return _CMP[c["cmp"]](len(pool), c["n"])
+
+
 @cond("turn_parity")
 def _turn_parity(c, ctx):
     turn = (getattr(ctx, "env", None) or {}).get("turn")

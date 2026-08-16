@@ -294,6 +294,7 @@ def main():
     test_forced_targeting()
     test_battle_start_and_counter()
     test_full_battles()
+    test_unit_count_gate()
     test_fallback_aoe()
     test_enemy_multi_target()
     test_starshard_temple_drops()
@@ -302,6 +303,31 @@ def main():
     print(f"\n{'ALL PASSED' if not _fail else f'{_fail} CHECK(S) FAILED'}")
     sys.exit(1 if _fail else 0)
 
+
+
+def test_unit_count_gate():
+    """`unit_count` counts the SIDE's living units, not the target.
+
+    The first version passed "all_enemies" to _pool, which knows only
+    any_enemy/any_ally/self and falls through to the target -- so the gate compared 1
+    against the threshold and every "if there are still at least 3 enemies" rider was
+    dead. Count them for real, and prove it changes when one dies.
+    """
+    b = bt.Battle(1101, [{"id": 10001}, {"id": 10011}], team_level=60)
+    foes = [u for u in b.units.values() if u.team != bt.TEAM_PLAYER]
+    me = [u for u in b.units.values() if u.team == bt.TEAM_PLAYER][0]
+    ctx = fx.Ctx(me, foes[0], [me], foes, None, {}, {"self": {}, "status_events": []})
+    n = len(foes)
+    check("counts every living enemy",
+          fx.eval_cond({"kind": "unit_count", "side": "enemy", "cmp": "ge", "n": n}, ctx),
+          str(n))
+    check("and is false one above that",
+          not fx.eval_cond({"kind": "unit_count", "side": "enemy",
+                            "cmp": "ge", "n": n + 1}, ctx))
+    foes[0].hp = 0
+    check("a corpse stops counting",
+          not fx.eval_cond({"kind": "unit_count", "side": "enemy",
+                            "cmp": "ge", "n": n}, ctx))
 
 
 def test_fallback_aoe():

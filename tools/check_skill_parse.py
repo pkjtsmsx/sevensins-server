@@ -32,6 +32,8 @@ from collections import Counter, defaultdict
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "server"))
 import battle as bt                                            # noqa: E402
+sys.path.insert(0, os.path.join(ROOT, "tools"))
+from skillparse.text import clean, strip_status_defs           # noqa: E402
 
 EFFECTS = os.path.join(ROOT, "server", "battle_data", "skill_effects.json")
 DAMAGE_PROSE = re.compile(r"(\d+)%\s*ATK\s+as\s+damage", re.I)
@@ -82,7 +84,10 @@ def main():
     for sid, row in skills.items():
         if row.get("_type") == STATUS_TYPE:
             continue
-        prose = row.get("_note1_en") or ""
+        # Use the SAME prose the parser sees: damage inside a "* Name: ..." gloss
+        # belongs to that STATUS (a DoT tick or a conditional bonus the catalog models),
+        # not to the skill, and flagging it just buries the real gaps.
+        prose, _defs = strip_status_defs(clean(row.get("_note1_en") or ""))
         ops = parsed_ops(effects, sid)
         kinds = {f["op"] for f in ops}
 

@@ -21,6 +21,8 @@ TYPO_FIXES = (
     (re.compile(r"\bdelas\b", re.I), "Deals"),
     (re.compile(r"\bali+es\b", re.I), "allies"),
     (re.compile(r"\btatget\b", re.I), "target"),
+    # "Deals290% ATK as damage" -- the space is simply missing (2 skills)
+    (re.compile(r"\b(deals?)(\d)", re.I), r"\1 \2"),
     (re.compile(r"\baffeted\b", re.I), "affected"),
     (re.compile(r"\b(deals?)\s+damage\s+(?=\d+\s*%)", re.I), r"\1 "),
 )
