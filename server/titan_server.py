@@ -2097,7 +2097,7 @@ def handle(conn, addr):
                         char_uid = strargs[-1] if strargs else ""
                         want = list(strargs[:-1])
                         try:
-                            slots = ps.wear_runes(state, char_uid, want)
+                            slots, stolen = ps.wear_runes(state, char_uid, want)
                         except (KeyError, ValueError) as exc:
                             # No `char_wear_rune_fail` cmd exists, so there is nothing
                             # honest to answer with -- log it and leave the array alone.
@@ -2106,6 +2106,15 @@ def handle(conn, addr):
                             ps.save(state)
                             worn = [u for u in slots if u]
                             log(f"    -> {char_uid} wearing {len(worn)} equip(s): {worn}")
+                            # Whoever we took a piece off needs its own 549 FIRST --
+                            # receivedUpdateEquip only rewrites charDic[strargs.last],
+                            # so without this the old wearer keeps showing the
+                            # starshard until the next login sync.
+                            for other_uid, other_slots in stolen.items():
+                                log(f"    -> {other_uid} lost a piece to {char_uid}")
+                                send(MSG_RPC, uint_msg(
+                                    PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
+                                    list(other_slots) + [other_uid]))
                             # Exactly CHAR_EQUIP_SLOTS + 1 strargs, uid last, or
                             # receivedUpdateEquip returns without a word.
                             send(MSG_RPC, uint_msg(
@@ -2119,7 +2128,7 @@ def handle(conn, addr):
                         char_uid = strargs[0] if strargs else ""
                         equip_uid = strargs[1] if len(strargs) > 1 else ""
                         try:
-                            slot, slots = ps.wear_bloodpact(
+                            slot, slots, stolen = ps.wear_bloodpact(
                                 state, char_uid, equip_uid)
                         except (KeyError, ValueError) as exc:
                             log(f"    !! wear_bloodpact refused for "
@@ -2128,6 +2137,11 @@ def handle(conn, addr):
                             ps.save(state)
                             log(f"    -> {char_uid} bloodpact slot {slot} = "
                                 f"{equip_uid or '(cleared)'}")
+                            for other_uid, other_slots in stolen.items():
+                                log(f"    -> {other_uid} lost the pact to {char_uid}")
+                                send(MSG_RPC, uint_msg(
+                                    PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
+                                    list(other_slots) + [other_uid]))
                             send(MSG_RPC, uint_msg(
                                 PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
                                 slots + [char_uid]))
@@ -2216,7 +2230,7 @@ def handle(conn, addr):
                         char_uid = strargs[1] if len(strargs) > 1 else ""
                         slot = intargs[0] if intargs else -1
                         try:
-                            slots = ps.wear_soulmirror(
+                            slots, stolen = ps.wear_soulmirror(
                                 state, char_uid, equip_uid, slot)
                         except (KeyError, ValueError) as exc:
                             log(f"    !! wear_soulfrag refused for "
@@ -2225,6 +2239,12 @@ def handle(conn, addr):
                             ps.save(state)
                             log(f"    -> {char_uid} soulmirror slot {slot} = "
                                 f"{equip_uid or '(cleared)'}")
+                            for other_uid, other_slots in stolen.items():
+                                log(f"    -> {other_uid} lost the mirror "
+                                    f"to {char_uid}")
+                                send(MSG_RPC, uint_msg(
+                                    PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
+                                    list(other_slots) + [other_uid]))
                             send(MSG_RPC, uint_msg(
                                 PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
                                 slots + [char_uid]))
@@ -2343,7 +2363,7 @@ def handle(conn, addr):
                         # SendDecomposeBloodpactReq(uid_list): strargs = the pact uids,
                         # no intargs. Opens a PanelWaitingBlock, so always answer.
                         try:
-                            reward, gone = ps.dismantle_bloodpacts(
+                            reward, gone, affected = ps.dismantle_bloodpacts(
                                 state, list(strargs))
                         except (LookupError, ValueError) as exc:
                             log(f"    !! dismantle refused: {exc}")
@@ -2353,6 +2373,11 @@ def handle(conn, addr):
                             ps.save(state)
                             log(f"    -> dismantled {len(strargs)} pact(s) "
                                 f"-> {reward}")
+                            for other_uid, other_slots in affected.items():
+                                log(f"    -> {other_uid} lost a destroyed piece")
+                                send(MSG_RPC, uint_msg(
+                                    PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
+                                    list(other_slots) + [other_uid]))
                             send(MSG_RPC, backpack_msg(
                                 BACKPACK_RPLY_DECOMPOSE_BLOODPACT, [1],
                                 [json.dumps(reward, separators=(",", ":"))]))
@@ -2371,7 +2396,7 @@ def handle(conn, addr):
                         # no intargs. ALWAYS answer -- the request opened a
                         # PanelWaitingBlock and only cmd 120 closes it.
                         try:
-                            reward, gone = ps.dismantle_soulmirrors(
+                            reward, gone, affected = ps.dismantle_soulmirrors(
                                 state, list(strargs))
                         except (LookupError, ValueError) as exc:
                             log(f"    !! soulmirror dismantle refused: {exc}")
@@ -2384,6 +2409,11 @@ def handle(conn, addr):
                             ps.save(state)
                             log(f"    -> dismantled {len(strargs)} soulmirror(s) "
                                 f"-> {reward}")
+                            for other_uid, other_slots in affected.items():
+                                log(f"    -> {other_uid} lost a destroyed piece")
+                                send(MSG_RPC, uint_msg(
+                                    PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
+                                    list(other_slots) + [other_uid]))
                             # HandleDecomposeSoulFragRply (0x18EBD60): intargs[0] must
                             # be 1, then it RemoveAt(0)s that flag and walks whatever is
                             # left in PAIRS -- [itemId, amount, itemId, amount, ...] --
@@ -2410,7 +2440,7 @@ def handle(conn, addr):
                         # SendTransmuteSoulFragReq(uid_list): strargs = the mirrors to
                         # fuse, no intargs. PanelWaitingBlock again -- always answer.
                         try:
-                            new, gone, coins = ps.fuse_soulmirrors(
+                            new, gone, coins, affected = ps.fuse_soulmirrors(
                                 state, list(strargs))
                         except (LookupError, ValueError) as exc:
                             log(f"    !! soulmirror fuse refused: {exc}")
@@ -2420,6 +2450,11 @@ def handle(conn, addr):
                             ps.save(state)
                             log(f"    -> fused {len(strargs)} soulmirror(s) for "
                                 f"{coins} coins -> item {new['iid']} ({new['uid']})")
+                            for other_uid, other_slots in affected.items():
+                                log(f"    -> {other_uid} lost a destroyed piece")
+                                send(MSG_RPC, uint_msg(
+                                    PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
+                                    list(other_slots) + [other_uid]))
                             # HandleTransmuteSoulFragRply (0x18EBF9C): intargs[0] == 1,
                             # then it reads intargs[1] as the item id and intargs[2] as
                             # the amount -- ONE ItemStruct, no loop. **All three ints
@@ -2448,7 +2483,7 @@ def handle(conn, addr):
                         from_i = intargs[0] if intargs else 0
                         to_i = intargs[1] if len(intargs) > 1 else 0
                         try:
-                            tgt, skill, coins, gone = ps.mix_bloodpact(
+                            tgt, skill, coins, gone, affected = ps.mix_bloodpact(
                                 state, from_uid, to_uid, from_i, to_i)
                         except (LookupError, ValueError) as exc:
                             log(f"    !! forge refused: {exc}")
@@ -2459,6 +2494,11 @@ def handle(conn, addr):
                             ps.save(state)
                             log(f"    -> forged skill {skill} from {from_uid}[{from_i}]"
                                 f" into {to_uid}[{to_i}] for {coins} coins")
+                            for other_uid, other_slots in affected.items():
+                                log(f"    -> {other_uid} lost a destroyed piece")
+                                send(MSG_RPC, uint_msg(
+                                    PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
+                                    list(other_slots) + [other_uid]))
                             send(MSG_RPC, backpack_msg(
                                 BACKPACK_RPLY_MIX_BLOODPACT, [1], []))
                             send(MSG_RPC, backpack_msg(

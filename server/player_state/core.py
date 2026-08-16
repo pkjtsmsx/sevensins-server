@@ -1306,6 +1306,27 @@ def add_char(state, char_id, lv=1, star=None, super_star=0):
     return uid
 
 
+def unequip_everywhere(state, uids, keep=None):
+    """Take `uids` off every cast wearing them. -> {char_uid: rebuilt 18-slot array}.
+
+    Every path that DESTROYS a piece (dismantle, fuse, a forge material) has to do
+    this, or a cast keeps an equips slot pointing at a uid that no longer exists. The
+    returned map is not bookkeeping -- the caller must send a `char_update_equip` (549)
+    for each entry, because `PlayerChar.receivedUpdateEquip` (0x169A428) only rewrites
+    the one cast named in the request. `keep` is a char uid to leave out of the map
+    (the requester, whose own 549 the caller sends anyway).
+    """
+    gone = {str(u) for u in uids if u}
+    affected = {}
+    for char_uid, entry in state["roster"].items():
+        cur = char_equips(entry)
+        if any(u in gone for u in cur):
+            entry["equips_list"] = [("" if u in gone else u) for u in cur]
+            if char_uid != keep:
+                affected[char_uid] = entry["equips_list"]
+    return affected
+
+
 def spend_cost(state, item_id, amount):
     """Deduct a cost that may be a CURRENCY rather than a bag item.
 

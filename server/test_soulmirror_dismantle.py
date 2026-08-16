@@ -74,7 +74,7 @@ def test_dismantle():
     b["attr"][ps.RUNE_ATTR_LEVEL] = 15
     before_essence = ps.item_count(state, ps.SOULFRAG_ENHANCE_MATERIAL)
 
-    reward, gone = ps.dismantle_soulmirrors(state, [a["uid"], b["uid"]])
+    reward, gone, _aff = ps.dismantle_soulmirrors(state, [a["uid"], b["uid"]])
 
     # One aggregated line, both mirrors' worth.
     assert len(reward) == 1, reward
@@ -183,7 +183,7 @@ def test_fuse_uniform_is_deterministic():
             for _ in range(ps.SOULFRAG_TRANSMUTE_NUM)]
     coins_before = int(state["currency"][str(ps.CURRENCY_COIN)])
 
-    new, gone, coins = ps.fuse_soulmirrors(state, uids)
+    new, gone, coins, _aff = ps.fuse_soulmirrors(state, uids)
 
     row = __import__("battle").dd.row("item", int(new["iid"]))
     assert int(row["_param3"]) == char_id, row
@@ -221,7 +221,7 @@ def test_fuse_mixed_stays_legal():
         state = fresh_state()
         uids = [a_fusable_mirror(state, c, sorted(pool[c])[i % 3])["uid"]
                 for i, c in enumerate(chars)]
-        new, _gone, _coins = ps.fuse_soulmirrors(state, uids,
+        new, _gone, _coins, _aff = ps.fuse_soulmirrors(state, uids,
                                                  rng=random.Random(seed))
         row = __import__("battle").dd.row("item", int(new["iid"]))
         char_id, action = int(row["_param3"]), int(row["_action"])
@@ -288,7 +288,7 @@ def test_push_carries_only_what_changed():
     iid = a_mirror(4, 1)
     keep = [ps.grant_soulmirror(state, iid)["uid"] for _ in range(3)]
     doomed = ps.grant_soulmirror(state, iid)["uid"]
-    _reward, gone = ps.dismantle_soulmirrors(state, [doomed])
+    _reward, gone, _aff = ps.dismantle_soulmirrors(state, [doomed])
 
     blob = json.loads(ps.backpacks_all_json(
         state, {ps.BP_STORAGE_SOULFRAG, ps.BP_STORAGE_NORMAL},
@@ -306,7 +306,7 @@ def test_push_carries_only_what_changed():
     uids = [a_fusable_mirror(state, char_id, actions[0])["uid"]
             for _ in range(ps.SOULFRAG_TRANSMUTE_NUM)]
     a_fusable_mirror(state, char_id, actions[0])          # a bystander
-    new, gone, _coins = ps.fuse_soulmirrors(state, uids)
+    new, gone, _coins, _aff = ps.fuse_soulmirrors(state, uids)
     slots = json.loads(ps.backpacks_all_json(
         state, {ps.BP_STORAGE_SOULFRAG},
         {ps.BP_STORAGE_SOULFRAG: gone},

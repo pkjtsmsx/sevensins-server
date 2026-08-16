@@ -35,7 +35,12 @@ RUNE_PRIMARY_ATTRS = 1
 
 
 def wear_runes(state, char_uid, equips):
-    """Apply a char_wear_rune request. -> the stored 18-slot array.
+    """Apply a char_wear_rune request. -> (the stored 18-slot array, stolen-from).
+
+    `stolen-from` maps every OTHER cast we took a piece off to its rebuilt array; the
+    caller must push a `char_update_equip` for each, or the client keeps showing the
+    starshard on its old wearer as well (`PlayerChar.receivedUpdateEquip` is the only
+    thing that clears `DBCharData`, and it only touches the uid it is handed).
 
     Raises KeyError for an unknown cast and ValueError for a uid we do not hold, so the
     caller can decline instead of sending a reply the client would choke on.
@@ -47,23 +52,30 @@ def wear_runes(state, char_uid, equips):
     # overwrite the slots the client actually sent -- padding the rest with "" would
     # silently strip bloodpacts and anything else living in slots 6..17.
     slots = char_equips(entry)
-    for i, uid in enumerate(list(equips)[:CHAR_EQUIP_SLOTS]):
+    sent = list(equips)[:CHAR_EQUIP_SLOTS]
+    for i, uid in enumerate(sent):
         slots[i] = str(uid or "")
     owned = {e.get("uid") for e in state["backpack"]
              .get(str(BP_STORAGE_EQUIPMENT), {}).values()}
-    for uid in slots:
+    # Validate ONLY the slots this request carried. The rest of the array is
+    # soulmirrors (6..14) and bloodpacts (12..14), which live in other storages --
+    # checking them against storage 2 refused every starshard change on a cast that
+    # happened to wear a soulmirror, and the client had already applied it locally.
+    for uid in slots[:len(sent)]:
         if uid and uid not in owned:
             raise ValueError(f"equip uid {uid!r} is not in storage {BP_STORAGE_EQUIPMENT}")
     # One piece can only be worn once: drop it from whoever else was wearing it.
     worn = {u for u in slots if u}
+    stolen = {}
     for other_uid, other in state["roster"].items():
         if other_uid == char_uid:
             continue
         cur = char_equips(other)
         if any(u in worn for u in cur):
             other["equips_list"] = [("" if u in worn else u) for u in cur]
+            stolen[other_uid] = other["equips_list"]
     entry["equips_list"] = slots
-    return slots
+    return slots, stolen
 
 
 # ---- upgrading starshards (Backpack 99 EnchantGem_Req -> 100 + a 145 push) --

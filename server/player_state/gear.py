@@ -30,6 +30,7 @@ from .core import (
     soulfrag_slot,
     spend_item,
     uid,
+    unequip_everywhere,
 )
 
 
@@ -40,7 +41,7 @@ def soulfrag_owner(item_id):
 
 
 def wear_soulmirror(state, char_uid, equip_uid, index):
-    """Apply a char_wear_soulfrag request. -> the stored 18-slot array.
+    """Apply a char_wear_soulfrag request. -> (18-slot array, stolen-from).
 
     `index` comes from the client (the jump-table value), so it is authoritative for
     WHERE the piece goes; we validate that it agrees with the item's own action rather
@@ -50,6 +51,7 @@ def wear_soulmirror(state, char_uid, equip_uid, index):
     if index not in SOULFRAG_SLOT_INDEX.values():
         raise ValueError(f"index {index} is not a Soulmirror slot")
     slots = char_equips(entry)
+    stolen = {}
     if equip_uid:
         owned = {e.get("uid"): e for e in state["backpack"]
                  .get(str(BP_STORAGE_SOULFRAG), {}).values()}
@@ -61,15 +63,18 @@ def wear_soulmirror(state, char_uid, equip_uid, index):
         if want != index:
             raise ValueError(
                 f"Soulmirror {piece['iid']} belongs at index {want}, not {index}")
-        # One piece, one wearer.
+        # One piece, one wearer. Whoever loses it needs its OWN char_update_equip --
+        # see wear_runes; receivedUpdateEquip only rewrites the uid it is handed.
         for other_uid, other in state["roster"].items():
             cur = char_equips(other)
             if equip_uid in cur:
                 other["equips_list"] = [("" if u == equip_uid else u) for u in cur]
+                if other_uid != char_uid:
+                    stolen[other_uid] = other["equips_list"]
         slots = char_equips(entry)
     slots[index] = str(equip_uid or "")
     entry["equips_list"] = slots
-    return slots
+    return slots, stolen
 
 
 # ---- bloodpacts (storage 4, equips slots 12..14) ----------------------------
@@ -166,11 +171,14 @@ def grant_bloodpact(state, item_id, level=0):
 
 
 def wear_bloodpact(state, char_uid, equip_uid):
-    """Apply a char_wear_bloodpact request. -> (slot index, the 18-slot array).
+    """Apply a char_wear_bloodpact request. -> (slot index, 18-slot array, stolen-from).
 
     The request names no slot, so we place it in the first free one of 12..14 (or the
     slot it already occupies). An empty `equip_uid` clears every bloodpact slot, since
     there is no index to say which.
+
+    `stolen-from` maps every other cast the pact was taken off to its rebuilt array;
+    the caller must push a `char_update_equip` for each of them too (see wear_runes).
     """
     entry = state["roster"][char_uid]
     slots = char_equips(entry)
@@ -178,22 +186,25 @@ def wear_bloodpact(state, char_uid, equip_uid):
         for i in bloodpact_slots():
             slots[i] = ""
         entry["equips_list"] = slots
-        return None, slots
+        return None, slots, {}
     owned = {e.get("uid"): e for e in state["backpack"]
              .get(str(BP_STORAGE_BLOODPACT), {}).values()}
     if equip_uid not in owned:
         raise ValueError(f"{equip_uid!r} is not in storage {BP_STORAGE_BLOODPACT}")
     # One pact, one wearer.
+    stolen = {}
     for other_uid, other in state["roster"].items():
         cur = char_equips(other)
         if equip_uid in cur:
             other["equips_list"] = [("" if u == equip_uid else u) for u in cur]
+            if other_uid != char_uid:
+                stolen[other_uid] = other["equips_list"]
     slots = char_equips(entry)
     target = next((i for i in bloodpact_slots() if not slots[i]),
                   BLOODPACT_SLOT_BASE)
     slots[target] = equip_uid
     entry["equips_list"] = slots
-    return target, slots
+    return target, slots, stolen
 
 
 def find_bloodpact(state, uid):
@@ -272,13 +283,11 @@ def mix_bloodpact(state, from_uid, to_uid, from_index, to_index):
 
     state["currency"][str(CURRENCY_COIN)] = have - cost
     target.setdefault("attr", {})[f"{RUNE_ATTR_SUB}{int(to_index)}"] = int(skill)
-    # The material is destroyed -- take it off whoever was wearing it first.
-    for _uid, other in state["roster"].items():
-        cur = char_equips(other)
-        if from_uid in cur:
-            other["equips_list"] = [("" if u == from_uid else u) for u in cur]
+    # The material is destroyed -- take it off whoever was wearing it first, and hand
+    # those casts back so the caller can push their char_update_equip.
+    affected = unequip_everywhere(state, [from_uid])
     del state["backpack"][str(BP_STORAGE_BLOODPACT)][src_sid]
-    return target, int(skill), cost, src_sid
+    return target, int(skill), cost, src_sid, affected
 
 
 def dismantle_bloodpacts(state, uids):
@@ -291,12 +300,13 @@ def dismantle_bloodpacts(state, uids):
 
     The return comes from the `bloodpact2` table at `[grade - 1][lv]` -- the panel showed
     2500 for an unenhanced LR, which is exactly that cell.
-    -> ([[item id, amount]], [removed sid, ...]).
+    -> ([[item id, amount]], [removed sid, ...], {char uid: equips}).
     """
     tbl = bloodpact_game_rule()["bloodpact2"]["formula"][0]
     item_id = int(tbl["id"])
     gained = 0
     removed = []
+    affected = {}
     for uid in uids:
         sid, entry = find_bloodpact(state, uid)
         if entry is None:
@@ -305,10 +315,7 @@ def dismantle_bloodpacts(state, uids):
         row = tbl["tbl"][max(0, min(grade, len(tbl["tbl"]))) - 1]
         lv = int(entry.get("attr", {}).get(RUNE_ATTR_LEVEL, 0))
         gained += row[min(lv, len(row) - 1)]
-        for _u, other in state["roster"].items():
-            cur = char_equips(other)
-            if uid in cur:
-                other["equips_list"] = [("" if u == uid else u) for u in cur]
+        affected.update(unequip_everywhere(state, [uid]))
         del state["backpack"][str(BP_STORAGE_BLOODPACT)][sid]
         removed.append(sid)
     # Item 2 is the coin entry, so the payout lands in the coin currency.
@@ -317,7 +324,7 @@ def dismantle_bloodpacts(state, uids):
             int(state["currency"].get(str(CURRENCY_COIN), 0)) + gained
     else:
         grant_item(state, item_id, gained)
-    return [[item_id, gained]], removed
+    return [[item_id, gained]], removed, affected
 
 
 # ---- equipment padlock (Backpack 105 EquipLock -> 106) ----------------------
@@ -451,7 +458,8 @@ def soulmirror_refund(rarity, sf_type, lv):
 
 
 def dismantle_soulmirrors(state, uids):
-    """Dismantle Soulmirrors for their material. -> ([[item id, amount], ...], [sid]).
+    """Dismantle Soulmirrors for their material.
+    -> ([[item id, amount], ...], [sid], {char uid: equips}).
 
     `SendDecomposeSoulFragReq` (0x18E9100) sends cmd 119 with `strargs` = the uids and
     **no intargs**, and opens a `PanelWaitingBlock` first -- so an unanswered request is
@@ -465,6 +473,7 @@ def dismantle_soulmirrors(state, uids):
     """
     per_item = {}
     removed = []
+    affected = {}
     seen = set()
     for uid in uids:
         if uid in seen:
@@ -484,16 +493,14 @@ def dismantle_soulmirrors(state, uids):
         per_item[item] = per_item.get(item, 0) + amount
         # A worn mirror has to come off the cast as well, or its equips slot keeps
         # pointing at a uid that no longer exists.
-        for _u, other in state["roster"].items():
-            cur = char_equips(other)
-            if uid in cur:
-                other["equips_list"] = [("" if u == uid else u) for u in cur]
+        affected.update(unequip_everywhere(state, [uid]))
         del state["backpack"][str(BP_STORAGE_SOULFRAG)][sid]
         removed.append(sid)
     for item, amount in per_item.items():
         if amount:
             grant_item(state, item, amount)
-    return [[item, amount] for item, amount in per_item.items()], removed
+    return ([[item, amount] for item, amount in per_item.items()], removed,
+            affected)
 
 
 # ---- fuse / transmute (Backpack 117 -> 118) --------------------------------
@@ -570,7 +577,7 @@ def soulmirror_items_for(rarity, char_id, action):
 
 
 def fuse_soulmirrors(state, uids, rng=None):
-    """Fuse Soulmirrors into one. -> (new entry, [consumed sid], coins spent).
+    """Fuse Soulmirrors into one. -> (new entry, [consumed sid], coins, affected).
 
     The OUTCOME RULE is read off `PanelSoulFrag.GetTransmutePredictText` (0x163F248),
     which is what the player is shown before confirming and therefore what the server
@@ -651,16 +658,14 @@ def fuse_soulmirrors(state, uids, rng=None):
     # impossible rather than merely unlikely.
     new = grant_soulmirror(state, out_item, rng=rng)
     removed = []
+    affected = {}
     for sid, _entry, mirror_uid in picked:
-        for _u, other in state["roster"].items():
-            cur = char_equips(other)
-            if mirror_uid in cur:
-                other["equips_list"] = [("" if u == mirror_uid else u) for u in cur]
+        affected.update(unequip_everywhere(state, [mirror_uid]))
         del state["backpack"][str(BP_STORAGE_SOULFRAG)][sid]
         removed.append(sid)
     assert str(new["sid"]) not in {str(s) for s in removed}
     state["currency"][str(CURRENCY_COIN)] = have - coins
-    return new, removed, coins
+    return new, removed, coins, affected
 
 
 def roll_rune(state, item_id, slot, level=0, enhance=0, rng=None, reserved=()):
