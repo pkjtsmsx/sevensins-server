@@ -98,7 +98,8 @@ def main():
         # simple damage path.
         if (int(row.get("_target") or 0) // 100) == 0:
             for f in ops:
-                if f["op"] == "damage" and f.get("target") in ("self", "all_allies"):
+                if (f["op"] == "damage" and not f.get("self_inflicted")
+                        and f.get("target") in ("self", "all_allies")):
                     findings["self_damage"].append(
                         {"skill": int(sid), "name": row.get("_name_en"),
                          "target": f.get("target")})

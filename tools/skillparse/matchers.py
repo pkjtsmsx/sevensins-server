@@ -250,10 +250,28 @@ def parse_segment(text, trigger, catalog):
     for m in re.finditer(r"deals?\s+(\d+)%?\s+HP-based\s+absolute\s+damage", text, re.I):
         effects.append({**base, "op": "damage", "pct_target_maxhp": int(m.group(1)),
                         "times": 1, "target": target_of(text) or "enemy_target"})
+    # **Deliberate self-harm.** "Deals 12% Max HP damage to enemies, then TAKES 25% Max
+    # HP damage after the action" (Hot Spring Special) is a real drawback, not a parse
+    # error -- and it must be marked as such, or the enemy-group guard in
+    # driver._fix_impossible_targets would flip it into extra damage on the enemy and
+    # turn a cost into a bonus. `self_inflicted` is what tells that guard to keep off.
+    for m in re.finditer(r"(?:takes?|suffers?)\s+(\d+)%\s+(?:of\s+)?Max\s+HP\s+"
+                         r"(?:as\s+)?damage|"
+                         r"loses?\s+(\d+)%\s+(?:of\s+(?:its|the caster's)\s+)?"
+                         r"(?:Max\s+)?HP", text, re.I):
+        pct = int(m.group(1) or m.group(2))
+        effects.append({**base, "op": "damage", "pct_target_maxhp": pct, "times": 1,
+                        "target": "self", "self_inflicted": True})
+    # "deals X% ATK as damage to itself/the caster"
+    for m in re.finditer(r"deals?\s+(\d+)%\s+ATK\s+as\s+damage\s+to\s+"
+                         r"(?:itself|the\s+caster|himself|herself)", text, re.I):
+        effects.append({**base, "op": "damage", "pct_atk": int(m.group(1)), "times": 1,
+                        "target": "self", "self_inflicted": True})
     # "% Max HP as damage" + optional chance-status: "Deals X% MAX HP as damage with a
     # Y% chance of inflicting <Status> on the target." Damage is % of the target's Max HP
     # (ignores DEF); the status is chance-gated (the dispatcher rolls eff["chance"]).
-    for m in re.finditer(r"deals?\s+(\d+)%\s+MAX\s+HP\s+as\s+damage"
+    # "as" is optional: "Deals 12% Max HP damage to enemies" omits it.
+    for m in re.finditer(r"deals?\s+(\d+)%\s+MAX\s+HP\s+(?:as\s+)?damage"
                          r"(?:\s+with\s+a\s+(\d+)%\s+chance\s+of\s+inflicting\s+"
                          r"([A-Za-z][A-Za-z ]+?)\s+on\s+"
                          r"(the target|the enemy[\w ]*|all enemies))?", text, re.I):

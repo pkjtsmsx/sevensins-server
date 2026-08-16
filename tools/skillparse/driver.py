@@ -81,6 +81,8 @@ def _fix_impossible_targets(row, blocks):
         return
     for block in blocks:
         for eff in block["effects"]:
+            if eff.get("self_inflicted"):
+                continue          # a stated drawback ("then takes 25% Max HP damage")
             if (eff.get("op") == "damage"
                     and eff.get("target") in ("self", "all_allies")):
                 # Both directions of the same error: the damage inherited a target from

@@ -294,6 +294,7 @@ def main():
     test_forced_targeting()
     test_battle_start_and_counter()
     test_full_battles()
+    test_self_inflicted_damage_survives()
     test_unit_count_gate()
     test_fallback_aoe()
     test_enemy_multi_target()
@@ -303,6 +304,26 @@ def main():
     print(f"\n{'ALL PASSED' if not _fail else f'{_fail} CHECK(S) FAILED'}")
     sys.exit(1 if _fail else 0)
 
+
+
+def test_self_inflicted_damage_survives():
+    """A stated drawback must keep hitting the caster.
+
+    Hot Spring Special is "Deals 12% Max HP damage to enemies, THEN TAKES 25% Max HP
+    damage after the action" on an ENEMY-group skill -- exactly the shape the
+    enemy-group guard rewrites when a damage op wrongly targets the caster. The guard
+    has to tell a drawback apart from a mis-parse, or it turns a cost into a bonus.
+    """
+    rec = fx.skill_effects(2042101) or {}
+    dmg = [f for b in rec.get("blocks", []) for f in b["effects"] if f["op"] == "damage"]
+    mine = [f for f in dmg if f.get("self_inflicted")]
+    theirs = [f for f in dmg if not f.get("self_inflicted")]
+    check("the drawback still targets the caster",
+          bool(mine) and mine[0]["target"] == "self", str(dmg))
+    check("and carries its Max HP percentage",
+          bool(mine) and mine[0].get("pct_target_maxhp") == 25, str(mine))
+    check("while the attack itself still hits the enemy",
+          bool(theirs) and theirs[0]["target"] == "enemy_target", str(theirs))
 
 
 def test_unit_count_gate():
