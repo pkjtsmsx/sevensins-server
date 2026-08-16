@@ -312,7 +312,11 @@ def test_fallback_aoe():
     That silently single-targeted 226 skills whose parse had already identified the AoE
     (against 114 that worked), which is why "AoE skills all seem to hit one target".
     """
-    AOE = 100001611     # incomplete parse, design range 2 -> "All enemies"
+    # **Chosen dynamically, not pinned.** This fixture has to be a skill whose parse is
+    # still INCOMPLETE, and the parser keeps improving -- 100001611 was the original
+    # pick and a later matcher completed it, failing the check for the right reason but
+    # testing nothing. Ask the data for a current example instead.
+    AOE = fx.any_incomplete_aoe()
     SINGLE = 100000311  # complete parse, design range 1 -> "1 enemy";
                         # its damage op carries no chance gate, so the
                         # control cannot fail on an unlucky roll

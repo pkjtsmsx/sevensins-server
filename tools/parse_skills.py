@@ -74,9 +74,51 @@ def main():
 
     if "--write" in sys.argv:
         path = os.path.join(SERVER, "battle_data", "skill_effects.json")
+        _report_regressions(path, out)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(out, f, ensure_ascii=False, indent=1, sort_keys=True)
         print(f"wrote {path}")
+
+
+def _effect_set(entry):
+    return {(f.get("op"), f.get("status"), f.get("pct_atk"), f.get("times"))
+            for block in (entry or {}).get("blocks", []) for f in block["effects"]}
+
+
+def _report_regressions(path, fresh):
+    """Diff a regeneration against the file it is about to replace.
+
+    **The parse is re-derived from scratch every run, deliberately** -- freezing the
+    skills that look "complete" would create a second source of truth that drifts, and
+    "complete" does not mean correct: Luminous Vortex parsed three clean effects and
+    still dealt no damage for months because a typo hid its damage clause. Freezing it
+    would have locked that in, and blocked the 83 + 553 skills later fixes improved.
+
+    What a freeze is really protecting against is a change quietly LOSING effects, so
+    check for that directly instead: anything a skill had before and does not have now
+    is printed loudly. Gains are summarised; losses are named.
+    """
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as fh:
+        old = json.load(fh)
+    gained = lost = 0
+    losses = []
+    for sid, entry in fresh.items():
+        before, after = _effect_set(old.get(sid)), _effect_set(entry)
+        if after - before:
+            gained += 1
+        if before - after:
+            lost += 1
+            losses.append((sid, sorted(before - after)))
+    for sid in old.keys() - fresh.keys():
+        lost += 1
+        losses.append((sid, ["(skill dropped entirely)"]))
+    print(f"vs the file on disk: {gained} skill(s) gained effects, {lost} LOST")
+    for sid, gone in losses[:20]:
+        print(f"   REGRESSION {sid}: lost {gone}")
+    if len(losses) > 20:
+        print(f"   ... and {len(losses) - 20} more")
 
 
 if __name__ == "__main__":

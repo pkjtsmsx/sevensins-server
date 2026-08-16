@@ -28,6 +28,7 @@ from .core import (                                                     # noqa: 
     aoe_damage,
     design_enemy_targets,
     target_range,
+    any_incomplete_aoe,
     is_complete,
     is_immobilized,
     resolve_targets,

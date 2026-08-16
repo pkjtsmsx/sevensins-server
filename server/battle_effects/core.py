@@ -71,6 +71,22 @@ def is_complete(skill_id):
     return bool(rec and rec.get("complete"))
 
 
+def any_incomplete_aoe():
+    """A skill id whose parse is INCOMPLETE but whose design row says all-enemies.
+
+    For tests: the population of incomplete parses shrinks as the matchers improve, so
+    pinning one id means the fixture eventually stops testing what it claims to (a
+    pinned pick did exactly that once a verb matcher completed it). Ask the data.
+    """
+    skill_effects(0)                       # force the table to load
+    for sid in sorted(_skills or {}, key=int):
+        if (not _skills[sid].get("complete")
+                and target_range(sid) == (0, 2)
+                and aoe_damage(sid)):
+            return int(sid)
+    raise AssertionError("no incomplete all-enemies skill left -- update the fixture")
+
+
 # ---- design-declared targeting ---------------------------------------------
 # **The design row says how many units a skill hits, and it is authoritative.**
 # `DesignSkillRow.GetTargetGroup()` is `_target / 100` and `GetTargetRange()` is

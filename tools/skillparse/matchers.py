@@ -9,9 +9,19 @@ import re
 from .targets import target_of
 from .text import WORDNUM
 
-# Verb forms of a status ("stuns" = apply Stun). Extend as encountered.
+# Verb forms of a status ("stuns" = apply Stun). The cross-check against `_actID`
+# (tools/check_skill_parse.py) says this is the single biggest parse gap: 564 flags
+# where the prose uses the status as a VERB, led by taunt (286) and charm (52), which
+# were simply absent from this map.
 VERB_STATUS = {"stun": "Stun", "freeze": "Freeze", "silence": "Silence",
-               "poison": "Poison", "burn": "Burn", "seal": "Seal", "daze": "Daze"}
+               "poison": "Poison", "burn": "Burn", "seal": "Seal", "daze": "Daze",
+               "taunt": "Taunt", "charm": "Charm"}
+# What may follow the verb for it to read as an action on somebody: "stun ONE RANDOM
+# enemy", "taunt THE enemy with the highest ATK", "charm 2 enemies". Without this the
+# pattern only caught "stuns" and "stun the", missing most of the real phrasings --
+# and it must NOT catch "removes Taunt FROM all allies" or "immunity to Freeze".
+VERB_OBJECT = (r"(?=\s+(?:the|all|one|two|three|a|an|\d+|random|another|"
+               r"target|enem|ally|allies))")
 
 DUR_RE = re.compile(r"for (\d+|" + "|".join(WORDNUM) + r") turns?", re.I)
 CHANCE_RE = re.compile(r"(\d+)% (?:fixed )?chance to", re.I)
@@ -328,14 +338,19 @@ def parse_segment(text, trigger, catalog):
     for verb, status in VERB_STATUS.items():
         if re.search(rf"\bimmunity to {verb}", text, re.I):
             continue
-        vm = re.search(rf"\b{verb}s\b|\b{verb} the\b", text, re.I)
+        # Either an explicit object ("stun ONE random enemy") or the plural form on its
+        # own ("inflicts stuns and increases...", "freezes and reduces..."), which is
+        # what the original pattern caught and the object form alone would drop.
+        vm = (re.search(rf"\b{verb}(?:s|es)\b", text, re.I)
+              or re.search(rf"\b{verb}\b" + VERB_OBJECT, text, re.I))
         if vm:
             # target sits right after the verb ("Freeze the target"), not earlier in
             # the segment ("the caster has a chance to Freeze the target").
             effects.append({**base, "op": "apply_status", "status": status,
                             "target": target_of(text[vm.end():]) or "enemy_target",
                             "duration": _dur(text)})
-            break
+            # no break: "stun and charm" is two effects, and stopping at the first
+            # silently dropped the rest
     # apply status: "inflicts/grants <A> [and <B>] on/to <target> [for N turns]"
     m = re.search(r"(?:inflicts?|grants?|inflict|grant)\s+(?:the\s+\w+\s+|all\s+\w+\s+)?"
                   r"(.+?)(?:\s+(?:on|to)\s+(.+?))?(?:\s+for\s+\d+\s+turns?)?[.]?$", text, re.I)
