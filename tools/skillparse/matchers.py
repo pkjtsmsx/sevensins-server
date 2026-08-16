@@ -23,6 +23,49 @@ VERB_STATUS = {"stun": "Stun", "freeze": "Freeze", "silence": "Silence",
 VERB_OBJECT = (r"(?=\s+(?:the|all|one|two|three|a|an|\d+|random|another|"
                r"target|enem|ally|allies))")
 
+STACK_PREFIX = re.compile(r"^\s*(?:\d+|" + "|".join(WORDNUM) + r")\s+stacks?\s+of\s+",
+                          re.I)
+EFFECT_SUFFIX = re.compile(r"\s+effects?\s*$", re.I)
+
+
+def _status_phrase(chunk, catalog):
+    """-> the catalog status a prose fragment names, or None.
+
+    Prose wraps the bare name three ways the exact lookup missed: a trailing noun
+    ("grants the caster Critical EFFECT", 204 flags), a stack count ("grants the caster
+    1 STACK OF Malefics", 141), and plain case differences.
+    """
+    chunk = STACK_PREFIX.sub("", (chunk or "").strip())
+    chunk = EFFECT_SUFFIX.sub("", chunk).strip()
+    hit = _catalog_name(chunk, catalog)
+    if hit:
+        return hit
+    # The chunk often runs to the end of the clause ("Malefics effect before action").
+    # Drop trailing words one at a time -- bounded, and every candidate still has to BE
+    # a catalog status, so this cannot invent one.
+    words = chunk.split()
+    for cut in range(1, min(5, len(words)) + 1):
+        hit = _catalog_name(" ".join(words[:-cut]), catalog)
+        if hit:
+            return hit
+    return None
+
+
+def _catalog_name(name, catalog):
+    """-> the catalog's spelling of `name`, or None if it is not a status at all.
+    Prose case is unreliable ("removes taunt and headwind"), so fold it."""
+    name = (name or "").strip().strip("'")
+    if not name:
+        return None
+    if name in catalog:
+        return name
+    low = name.casefold()
+    for known in catalog:
+        if known.casefold() == low:
+            return known
+    return None
+
+
 DUR_RE = re.compile(r"for (\d+|" + "|".join(WORDNUM) + r") turns?", re.I)
 CHANCE_RE = re.compile(r"(\d+)% (?:fixed )?chance to", re.I)
 
@@ -326,7 +369,25 @@ def parse_segment(text, trigger, catalog):
     if m:
         effects.append({**base, "op": "extend_status", "status": m.group(1).strip(),
                         "duration": int(m.group(2))})
-    # cleanse: "removes X and Y effects from all allies"
+    # cleanse, possessive/bare forms: "removes the target's Shield",
+    # "removes all allies' Daze", "removes Injured and Fracture". The `... effects
+    # from <target>` shape below was the only one handled, and it is a minority: the
+    # `_actID` cross-check found ~1200 flags in these forms. Every name is validated
+    # against the catalog, so "removes the target's Move Gauge by 35%" (not a status)
+    # cannot match.
+    m = re.search(r"(?:removes?|clears?|dispels?)\s+"
+                  r"(?:(?:the|all)\s+(?:target|caster|enem\w+|all\w*|"
+                  r"friendly\s+\w+)(?:'s|s')\s+)?"
+                  r"([A-Za-z][A-Za-z' ]*?(?:\s+and\s+[A-Za-z][A-Za-z' ]*?)*)"
+                  r"(?:\s+effects?)?(?=[,.]|\s+(?:from|for|by|on|to|with|when|if)\b|$)",
+                  text, re.I)
+    if m:
+        names = [n.strip() for n in re.split(r"\s+and\s+|,\s*", m.group(1))]
+        names = [n for n in names if _catalog_name(n, catalog)]
+        if names:
+            effects.append({**base, "op": "cleanse",
+                            "statuses": [_catalog_name(n, catalog) for n in names],
+                            "target": target_of(text) or "all_allies"})
     m = re.search(r"removes?\s+(.+?)\s+effects?\s+from\s+(.+)", text, re.I)
     if m:
         statuses = re.split(r"\s+and\s+|,\s*", m.group(1))
@@ -352,25 +413,41 @@ def parse_segment(text, trigger, catalog):
             # no break: "stun and charm" is two effects, and stopping at the first
             # silently dropped the rest
     # apply status: "inflicts/grants <A> [and <B>] on/to <target> [for N turns]"
-    m = re.search(r"(?:inflicts?|grants?|inflict|grant)\s+(?:the\s+\w+\s+|all\s+\w+\s+)?"
-                  r"(.+?)(?:\s+(?:on|to)\s+(.+?))?(?:\s+for\s+\d+\s+turns?)?[.]?$", text, re.I)
+    # "inflicting"/"granting" matter: "with a 50% chance of INFLICTING Confuse" is 373
+    # of the flags the `_actID` cross-check raises, and the old pattern only took
+    # inflict/inflicts.
+    m = re.search(r"(?:inflict|grant)(?:s|ing)?\s+"
+                  # only strip an actual TARGET phrase: `all \\w+` used to eat the
+                  # first two words of "All DMG Reduction", leaving "Reduction"
+                  r"(?:the\s+(?:caster|target|enemy|ally)\s+|"
+                  r"all\s+(?:allies|enemies)\s+)?"
+                  r"(.+?)(?:\s+(?:on|to)\s+(.+?))?(?:\s+for\s+\d+\s+turns?)?[.]?$",
+                  text, re.I)
     if m:
         # split "Freeze and Fragile" / "Gale on all allies and Slow on all enemies"
         chunk = m.group(1)
-        pairs = re.findall(r"([A-Z][A-Za-z ]+?)\s+on\s+(all allies|all enemies|the target|the enemy[\w ]*)",
+        # Title-case runs only: `[A-Z][A-Za-z ]+?` began at the first capital in the
+        # sentence, so "...with a chance of inflicting Daze on the target" captured
+        # everything from "ATK" onward as the status name.
+        # Title-case runs, optionally joined by "and" ("inflicts Headwind and Slack on
+        # the target" -- dropping the join cost 261 skills their second status, which
+        # the regeneration gate caught).
+        _name = r"[A-Z][A-Za-z]*(?:\s+[A-Z][A-Za-z]*){0,3}"
+        pairs = re.findall(rf"({_name}(?:\s+and\s+{_name})*)"
+                           r"\s+on\s+(all allies|all enemies|the target|the enemy[\w ]*)",
                            text)
         if pairs:
             for names, tgt in pairs:
                 for nm in re.split(r"\s+and\s+|,\s*", names):
-                    nm = nm.strip()
-                    if nm in catalog:
+                    nm = _status_phrase(nm, catalog)
+                    if nm:
                         effects.append({**base, "op": "apply_status", "status": nm,
                                         "target": target_of(tgt) or "enemy_target",
                                         "duration": _dur(text)})
         else:
             for nm in re.split(r"\s+and\s+|,\s*", chunk):
-                nm = nm.strip()
-                if nm in catalog:
+                nm = _status_phrase(nm, catalog)
+                if nm:
                     effects.append({**base, "op": "apply_status", "status": nm,
                                     "target": target_of(m.group(2) or text) or "enemy_target",
                                     "duration": _dur(text)})

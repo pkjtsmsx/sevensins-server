@@ -15,8 +15,13 @@ WORDNUM = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
 #   * "Deals damage 110% ATK as damage" -- 25 skills, a redundant "damage" before the
 #     percentage. Anchored on a following digit so the legitimate
 #     "deals damage on <target> by N% ATK" phrasing (its own matcher) is left alone.
+# Misspellings of words the matchers key on, all counted across the shipped EN text:
+#   aliies 38, affeted 25, alies 15, tatget 1
 TYPO_FIXES = (
     (re.compile(r"\bdelas\b", re.I), "Deals"),
+    (re.compile(r"\bali+es\b", re.I), "allies"),
+    (re.compile(r"\btatget\b", re.I), "target"),
+    (re.compile(r"\baffeted\b", re.I), "affected"),
     (re.compile(r"\b(deals?)\s+damage\s+(?=\d+\s*%)", re.I), r"\1 "),
 )
 
