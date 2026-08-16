@@ -20,8 +20,35 @@ VERB_STATUS = {"stun": "Stun", "freeze": "Freeze", "silence": "Silence",
 # enemy", "taunt THE enemy with the highest ATK", "charm 2 enemies". Without this the
 # pattern only caught "stuns" and "stun the", missing most of the real phrasings --
 # and it must NOT catch "removes Taunt FROM all allies" or "immunity to Freeze".
+# The trailing \b matters: without it "an" matched the first two letters of "and", so
+# "immunity to Confuse, Charm and Injured" parsed as APPLYING Charm.
 VERB_OBJECT = (r"(?=\s+(?:the|all|one|two|three|a|an|\d+|random|another|"
-               r"target|enem|ally|allies))")
+               r"target|enem\w*|all\w*)\b)")
+
+# What may sit between the verb and the status name. Spelled out rather than a loose
+# `\\w+` because a greedy prefix ate the first two words of "All DMG Reduction" and left
+# "Reduction" -- the single most-missed status. The optional count/with-clause covers
+# "grants 2 allies with the highest ATK Champion Wings"; the trailing article covers
+# "grants the caster a shield".
+TARGET_PREFIX = (
+    r"(?:(?:the\s+)?(?:\d+|one|two|three)?\s*"
+    r"(?:all\s+)?(?:allies|ally|enemies|enemy|target|caster)"
+    r"(?:\s+with\s+the\s+(?:highest|lowest)\s+\w+)?"
+    r"(?:\s+an?)?\s+)?"
+)
+
+# "gains immunity to Charm, Freeze and Headwind" / "is permanently immune to Charm and
+# Confuse". Title-case names only, so "immunity to the two allies" (where the immunity
+# is part of the status NAME "CC Immunity") cannot match.
+_NAMES = (r"(?:[A-Z][A-Za-z]*(?:\s+[A-Z][A-Za-z]*){0,3})"
+          r"(?:(?:\s*,\s*|\s+and\s+)[A-Z][A-Za-z]*(?:\s+[A-Z][A-Za-z]*){0,3})*")
+# Both word orders occur: "immunity to Charm, Freeze and Headwind" and
+# "gains permanent Freeze, Charm and Def Break Immunity".
+IMMUNE_RE = re.compile(rf"immun(?:ity|e)\s+to\s+({_NAMES})"
+                       rf"|({_NAMES})\s+Immunity\b")
+
+CONNECTOR = re.compile(r"\s+(?:with|while|before|after|when|if|that|until|and\s+then)\s+",
+                       re.I)
 
 STACK_PREFIX = re.compile(r"^\s*(?:\d+|" + "|".join(WORDNUM) + r")\s+stacks?\s+of\s+",
                           re.I)
@@ -36,6 +63,10 @@ def _status_phrase(chunk, catalog):
     1 STACK OF Malefics", 141), and plain case differences.
     """
     chunk = STACK_PREFIX.sub("", (chunk or "").strip())
+    # The chunk often runs on into the next clause ("Rigidity WITH a 30% chance to
+    # taunt the target"). Cut at a connector first; the right-trim below is bounded and
+    # cannot reach back that far on its own.
+    chunk = CONNECTOR.split(chunk, 1)[0]
     chunk = EFFECT_SUFFIX.sub("", chunk).strip()
     hit = _catalog_name(chunk, catalog)
     if hit:
@@ -115,6 +146,15 @@ def split_segments(text, catalog):
     by a new effect opener (EFFECT_START); a status-list 'and' is not."""
     segs, last = [], 0
     for m in re.finditer(r"(?:,\s*|\s+and\s+)", text):
+        # Never cut inside an immunity list: "immunity to Charm, Freeze and Headwind"
+        # would split at Freeze (a status that is also an effect-opening verb), leaving
+        # the tail as a verbless fragment and the caster immune to Charm alone.
+        if (re.search(r"immun(?:ity|e)\s+to\s+[A-Za-z, ]*$", text[last:m.start()], re.I)
+                # ...or the trailing-Immunity order, which reads as a list only once
+                # the word at the END is seen: "Freeze, Charm and Def Break Immunity"
+                or re.match(r"[A-Za-z, ]*\bImmunity\b",
+                            text[m.end():].split(".")[0])):
+            continue
         if EFFECT_START.match(text, m.end()):
             seg = text[last:m.start()].strip()
             if seg:
@@ -416,13 +456,49 @@ def parse_segment(text, trigger, catalog):
     # "inflicting"/"granting" matter: "with a 50% chance of INFLICTING Confuse" is 373
     # of the flags the `_actID` cross-check raises, and the old pattern only took
     # inflict/inflicts.
-    m = re.search(r"(?:inflict|grant)(?:s|ing)?\s+"
-                  # only strip an actual TARGET phrase: `all \\w+` used to eat the
-                  # first two words of "All DMG Reduction", leaving "Reduction"
-                  r"(?:the\s+(?:caster|target|enemy|ally)\s+|"
-                  r"all\s+(?:allies|enemies)\s+)?"
-                  r"(.+?)(?:\s+(?:on|to)\s+(.+?))?(?:\s+for\s+\d+\s+turns?)?[.]?$",
-                  text, re.I)
+    # An immunity clause names statuses it protects AGAINST; the generic matcher below
+    # would otherwise report one of them as an application. Blank that span rather than
+    # skipping the clause, since "gains immunity to Freeze, grants Gale on all allies"
+    # does both.
+    # Immunity clauses first: they name statuses the caster is protected FROM, and the
+    # generic grant matcher below would otherwise report one as an application. Both
+    # spellings occur ("gains immunity to X", "is permanently immune to X"), lists run
+    # to three or more, and the span each consumes is blanked out of `ungranted` so a
+    # clause that does both ("immunity to Freeze, grants Gale on all allies") keeps its
+    # grant. Blanking by a loose `immunity to ...` instead ate "grants CC IMMUNITY TO
+    # the two allies", where the immunity is the status NAME.
+    ungranted = text
+    for im in IMMUNE_RE.finditer(text):
+        if im.group(2) is not None:
+            # Trailing order. Two ways it lies: "CC Immunity"/"Freeze Immunity" are
+            # status NAMES in their own right, and "grants the caster Determination and
+            # CC Immunity" is a grant, not a protection. Require the gains/permanent
+            # framing and reject a phrase the catalog already knows as one status.
+            if _catalog_name(im.group(2) + " Immunity", catalog):
+                continue
+            lead = text[max(0, im.start() - 24):im.start()].lower()
+            if not re.search(r"\b(gains?|permanent(?:ly)?|is|are|has)\b", lead):
+                continue
+        names = [_catalog_name(n, catalog)
+                 for n in re.split(r"\s*,\s*|\s+and\s+",
+                                   im.group(1) or im.group(2) or "")]
+        names = [n for n in names if n]
+        if not names:
+            continue
+        for nm in names:
+            effects.append({**base, "op": "immunity", "status": nm,
+                            "duration": _dur(text), "target": "self"})
+        ungranted = (ungranted[:im.start()] + " " * (im.end() - im.start())
+                     + ungranted[im.end():])
+    m = re.search(r"(?:inflict|grant)(?:s|ing)?\s+" + TARGET_PREFIX +
+                  # "on|to" only introduces a TARGET when a target word follows --
+                  # otherwise it splits status names that contain one
+                  # ("grants the caster Ready TO Go" captured just "Ready").
+                  r"(.+?)(?:\s+(?:on|to)\s+"
+                  r"(?=(?:the|all|one|two|three|\d+|random|both|"
+                  r"STR|AGI|TEC|enem\w+|all\w*|target)\b)(.+?))?"
+                  r"(?:\s+for\s+\d+\s+turns?)?[.]?$",
+                  ungranted, re.I)
     if m:
         # split "Freeze and Fragile" / "Gale on all allies and Slow on all enemies"
         chunk = m.group(1)
@@ -435,7 +511,7 @@ def parse_segment(text, trigger, catalog):
         _name = r"[A-Z][A-Za-z]*(?:\s+[A-Z][A-Za-z]*){0,3}"
         pairs = re.findall(rf"({_name}(?:\s+and\s+{_name})*)"
                            r"\s+on\s+(all allies|all enemies|the target|the enemy[\w ]*)",
-                           text)
+                           ungranted)
         if pairs:
             for names, tgt in pairs:
                 for nm in re.split(r"\s+and\s+|,\s*", names):
