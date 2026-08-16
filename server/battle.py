@@ -191,6 +191,30 @@ MAX_SUPER_STAR = 6
 #   3 -> 11123 "Clear in at most {0} turns"
 #   4 -> 11124 "Clear with Kizuna quest's leading cast"; 5..22 are other modes
 RATING_CLEARED, RATING_MAX_DEATHS, RATING_MAX_TURNS = 1, 2, 3
+# **Kinds 11..15 are "clear with at least [3] ally casts of a JOB", and the job is the
+# kind itself minus 10.** DesignChar `_job` is 2 STR / 3 AGI / 4 TEC (text 12013/12014/
+# 12015 in that order), and the Hell Express bears it out: B01 is kind 14 and the panel
+# reads "at least 1 TEC ally cast(s)", B02 is kind 12 and reads STR. Label text is
+# 11216, "Clear with at least {1} {0} ally cast(s)".
+#
+# This is what pays the GRIMOIRE FRAGMENTS: 60 of the Hell Express's rating rows are
+# kinds 12/13/14, carrying items 541/542/544 and the selector boxes. Reporting 0 for
+# them (the old catch-all) is why clearing the line paid nothing but coin and diamonds.
+RATING_JOB_BASE = 10
+RATING_JOB_MIN = (11, 12, 13, 14, 15)
+# **Kind 20 is "be affected by <status> at most N times".** The row is
+# [20, item, count, SKILL id, times] -- 6002 is skill "Fracture" (ATK down), 6004 is
+# "Slow" (SPD down), and the panel renders text 11222 for it: "Fracture 5 time(s) at
+# most". The EN string names no subject, but the CN pairs it with 11225
+# (「{0}」至少{1}次通關) whose EN spells the subject out as "**Receive** {0} {1} time(s)
+# at least" -- same construction, so 20 is the "at most" half of that receive pair,
+# i.e. it counts what lands on OUR casts, not what we inflict.
+RATING_STATUS_MAX = 20
+# Kind 5 is "Level Up" (text 11125): did a party member gain a level off this clear?
+# The battle cannot know -- XP is granted by the caller after the fight -- so the
+# caller sets `levelled` before reading the flags. It stays False for a loss, which is
+# right: no XP is paid for one.
+RATING_LEVEL_UP = 5
 # `_rating_datas1..4` -- four is the whole set the stage table carries.
 RATING_SLOTS = 4
 
@@ -869,6 +893,11 @@ def _status_from_state(d):
     return st
 
 
+def _char_job(char_id):
+    """DesignChar `_job`: 2 STR / 3 AGI / 4 TEC. -> 0 when the row is unknown."""
+    return int((dd.row("char", int(char_id)) or {}).get("_job") or 0)
+
+
 class Battle:
     """One run of one stage: a list of waves, each a mob group from the design data."""
 
@@ -897,6 +926,10 @@ class Battle:
         self.round = 1
         self.damage_sum = 0
         self.units = {}
+        # status name -> times it landed on a PLAYER unit this run (rating kind 20)
+        self.status_taken = {}
+        # set by the reward path once battle XP has been applied (rating kind 5)
+        self.levelled = False
         self.turn_order = []
         # Auto-battle, toggled by PlayerBattleServerCmd.Auto (501). Server-driven:
         # see auto_move().
@@ -1241,6 +1274,7 @@ class Battle:
         # all off the first row reaches every affected unit.
         if rows:
             rows[0]["status"] = self._status_wire(status_events)
+        self._tally_statuses(status_events)
 
         cmd = json.loads(self.battle_cmd_json(
             cur_team=attacker.team if attacker else TEAM_PLAYER))
@@ -1425,6 +1459,20 @@ class Battle:
         return avg_list[idx] if 0 <= idx < len(avg_list) else 0
 
     # -- clear rewards ----------------------------------------------------
+    def _tally_statuses(self, events):
+        """Count statuses that landed on OUR casts, for rating kind 20.
+
+        `_apply_status` reports every application through `outcome["status_events"]`
+        with the unit it hit, so this is the one funnel every source passes through --
+        skills, passives and DoT re-applications alike.
+        """
+        for ev in events or ():
+            unit = ev.get("unit")
+            if unit is not None and unit.team == TEAM_PLAYER:
+                name = ev.get("name")
+                if name:
+                    self.status_taken[name] = self.status_taken.get(name, 0) + 1
+
     def rating_rows(self):
         """The stage's rating conditions, in `_rating_datas1..4` order.
 
@@ -1464,16 +1512,50 @@ class Battle:
                 ok = cleared and self.deaths <= limit
             elif kind == RATING_MAX_TURNS:
                 ok = cleared and self.round <= limit
+            elif kind == RATING_LEVEL_UP:
+                ok = cleared and self.levelled
+            elif kind == RATING_STATUS_MAX:
+                # [3] is the skill id, [4] the allowance. The catalog is keyed by the
+                # skill's own `_name_en`, which is what the tally counts.
+                name = (dd.row("skill", row[3]) or {}).get("_name_en") if len(row) > 3 else None
+                allowed = row[4] if len(row) > 4 else 0
+                ok = cleared and (not name
+                                  or self.status_taken.get(name, 0) <= allowed)
+            elif kind in RATING_JOB_MIN:
+                # Composition, not performance: judged over the party as fielded, dead
+                # members included -- the condition is what you brought, not what
+                # survived.
+                want = kind - RATING_JOB_BASE
+                have = sum(1 for u in self.units.values()
+                           if u.team == TEAM_PLAYER and _char_job(u.char_id) == want)
+                ok = cleared and have >= max(1, limit)
             else:
                 ok = False
             flags.append(1 if ok else 0)
         return flags
 
-    def rating_rewards(self):
-        """[(item_id, count), ...] for the conditions this run newly satisfied."""
+    def rating_mask(self, flags=None):
+        """The conditions met this run as a bitmask, bit i = `_rating_datas{i+1}`.
+
+        This is the same shape `state["stages"][id]` stores and `GetStageRating` reads
+        for the star row on the stage select -- which is why writing a flat 15 there
+        was wrong twice over: it claimed stars the player had not earned, and it left
+        nothing to compare against when deciding what to pay.
+        """
+        flags = self.rating_flags() if flags is None else flags
+        return sum(1 << i for i, ok in enumerate(flags) if ok)
+
+    def rating_rewards(self, already=0):
+        """[(item_id, count), ...] for conditions met this run and NOT already earned.
+
+        `already` is the stored mask for this stage. Rating rewards are one-time per
+        condition in the real game; paying them on every clear turned a Hell Express
+        stage into a 50-fragment-per-run Grimoire farm.
+        """
         return [(row[1], row[2])
-                for row, ok in zip(self.rating_rows(), self.rating_flags())
-                if ok and len(row) > 2]
+                for i, (row, ok) in enumerate(zip(self.rating_rows(),
+                                                  self.rating_flags()))
+                if ok and len(row) > 2 and not (already >> i) & 1]
 
     def drops(self):
         """[(item_id, count), ...] for the Drops row of the results panel.

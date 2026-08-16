@@ -908,7 +908,6 @@ def battle_end_reward(battle, state):
     """
     won = battle.wave_cleared()
     drops = battle.drops()
-    rating_rewards = battle.rating_rewards() if won else []
     bars = []
     if won:
         xp = ps.stage_battle_xp(battle.stage, battle.wave_max)
@@ -917,6 +916,14 @@ def battle_end_reward(battle, state):
             ups = [b for b in bars if b["lv"] > b["olv"]]
             log(f"    -> battle xp: +{xp} each to {len(bars)} party members"
                 + (f", {len(ups)} levelled up" if ups else ""))
+    # **XP first, ratings second.** Rating kind 5 is "Level Up", which is only knowable
+    # once the clear's XP has been applied -- reading the flags before this point made
+    # that condition permanently false.
+    battle.levelled = any(b["lv"] > b["olv"] for b in bars)
+    # Ratings are one-time per condition: pay only what this run newly earned, judged
+    # against the mask already stored for the stage.
+    earned_before = int(state["stages"].get(str(battle.stage_id)) or 0) if state else 0
+    rating_rewards = battle.rating_rewards(earned_before) if won else []
     reward = {
         # index 0 is unread by the ctor; 1 keeps it looking like the gacha rows
         # Element [0] is ignored by BattleReward..ctor (it reads [1]=id, [2]=count), so
@@ -1013,7 +1020,10 @@ def battle_end_reward(battle, state):
                  json.dumps([0] * len(rune_pick), separators=(",", ":"))]))
             log(f"    -> starshard select: {len(rune_pick)} candidates "
                 f"{[e['iid'] for e in rune_pick]}")
-        state["stages"][str(battle.stage_id)] = 15
+        # Accumulate the rating mask rather than claiming all four stars: it is what
+        # the stage-select star row shows AND what the next clear checks before paying.
+        state["stages"][str(battle.stage_id)] = (earned_before
+                                                 | battle.rating_mask())
         # Best clear length, which is what the auto-play panel calls "Stage Clear
         # Record" and multiplies by 10s to estimate a sweep. With `bestrec` empty it
         # reads -1 Turn(s) and the estimate is nonsense.
@@ -1420,6 +1430,12 @@ def handle(conn, addr):
                 # it -- once ST-6 unlocks, the GO button will not offer ST-5 again. Fold
                 # already-cleared stages in at login so the answer follows the state
                 # rather than the order things happened in.
+                # One-time: strip rating bits the old evaluator claimed but never
+                # paid, so those conditions can still be earned (see the function).
+                remasked = ps.migrate_rating_masks(state)
+                if remasked:
+                    ps.save(state)
+                    log(f"    -> rating masks migrated on {remasked} stage(s)")
                 healed = ps.reconcile_stage_quests(state)
                 if healed:
                     ps.save(state)
