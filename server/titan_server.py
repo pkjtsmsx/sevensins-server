@@ -147,8 +147,42 @@ def uint64_msg(index, cmd, intargs=(), strargs=(), req_id=0):
                              strings=[list(strargs)]))
 
 
+# **Every backpack push has to re-stash the cmd-83 info rows, or the client rolls the
+# item COUNTS back to the login snapshot.**
+#   - cmd 83 `HandleBackpackInfosRply` (0x18E9B2C) does not apply anything: it only
+#     stores strargs[0] in `syncBpInfosJson`.
+#   - a storage sync 84-87 with dataEnd=1 ends in `HandleSyncSubBackpackRply`
+#     (0x18E9C18) -> `SyncdBackpackDatas` (0x18EDEA0), which calls
+#     `SetBackpackInfo(syncBpInfosJson)` -- i.e. it REPLAYS whatever the last 83 said.
+#   - cmd 145 carries its own info rows and applies them, but does NOT touch
+#     `syncBpInfosJson`.
+# So a 145 that raised the Soulmirror counter to 52 was silently undone by the very
+# next cmd-84 push replaying the login-era "42", which is why the count looked frozen
+# until some later action happened to be the last thing on the wire. Prefixing an 83
+# to every one of these keeps the stash in step.
+#
+# It has to be its OWN message: packing the 83 and the 84 as two RPCs in one
+# `rpc_pack` list hung the client at 31% of the loading bar -- it acts on the first
+# RPC of a message and drops the rest, so the storage syncs never arrived. `send`
+# therefore emits the refresh as a separate frame, keyed off the tag below.
+BP_INFO_REFRESH_CMDS = (84, 85, 86, 87, 145)
+_bp_ctx = threading.local()      # .state -- whose info rows ride along with a push
+
+
+class _BpMsg(bytes):
+    """A backpack push that remembers its cmd, so `send` can precede it with an 83."""
+    cmd = None
+
+
 def backpack_msg(cmd, intargs=(), strargs=()):
-    return uint64_msg(0xC4A53FC0, cmd, intargs, strargs)
+    msg = _BpMsg(uint64_msg(0xC4A53FC0, cmd, intargs, strargs))
+    msg.cmd = cmd
+    return msg
+
+
+def backpack_info_msg(state):
+    """The bare cmd-83 refresh -- built directly so it carries no tag of its own."""
+    return uint64_msg(0xC4A53FC0, 83, [], [ps.backpack_info_json(state)])
 
 
 def twostr_msg(index, cmd, g0=(), g1=()):
@@ -934,11 +968,14 @@ def battle_end_reward(battle, state):
             msgs.append(backpack_msg(84, [1],
                                      [ps.backpack_json(state, ps.BP_STORAGE_NORMAL)]))
         if "equipment" in buckets:
-            # Storage 2 = StorageEquipment, the Starshards inventory. Backpack reply
-            # cmd is 83 + storage, so 85 here.
-            msgs.append(backpack_msg(85, [1],
-                                     [ps.backpack_json(state,
-                                                       ps.BP_STORAGE_EQUIPMENT)]))
+            # Storage 2 = StorageEquipment, the Starshards inventory. The bare storage
+            # sync (85) carries the list but NOT the info rows the "Inventory n/999"
+            # counter reads, so a battle drop left the counter behind -- same defect
+            # the auto-play and rune-select paths already avoid by sending 145.
+            msgs.append(backpack_msg(BACKPACK_CHANGE, [0],
+                                     [ps.backpacks_all_json(
+                                         state, {ps.BP_STORAGE_EQUIPMENT}),
+                                      ps.backpack_info_json(state)]))
         # The tutorial fight also hands over Jacqueline, and she is NOT listed on the
         # results panel -- she just appears in the roster afterwards. Guarded on owning
         # her already so replaying 1-1 does not keep minting copies.
@@ -1326,6 +1363,12 @@ def handle(conn, addr):
     conn.settimeout(120)
 
     def send(mtype, body):
+        # A backpack push whose cmd replays or carries the info rows goes out behind a
+        # fresh cmd 83, or SyncdBackpackDatas later restores the login-era counts --
+        # see BP_INFO_REFRESH_CMDS.
+        if (getattr(body, "cmd", None) in BP_INFO_REFRESH_CMDS
+                and getattr(_bp_ctx, "state", None) is not None):
+            send(mtype, backpack_info_msg(_bp_ctx.state))
         frame = make_header(mtype, len(body)) + body
         conn.sendall(s2c.crypt(frame))
         log(f"[>] type={mtype} size={len(body)} body={body.hex()}")
@@ -1356,6 +1399,8 @@ def handle(conn, addr):
                 # username is the titan token "titan_token_<player_id>"
                 pid = user.rsplit("_", 1)[-1] or "1000001"
                 state = ps.load(pid)
+                # backpack_msg reads this to prefix its cmd-83 info refresh.
+                _bp_ctx.state = state
                 # Catch accounts that finished the tutorial in a prior session (or before
                 # this reset existed): fold them to base before the login sync is built.
                 if ps.maybe_reset_tutorial_casts(state):
@@ -1530,10 +1575,18 @@ def handle(conn, addr):
                         if not ps.gacha_is_redraw_box(box_id):
                             # Push whatever the pull actually changed.
                             if ps.gacha_is_soulmirror_box(box_id):
+                                # BACKPACK_CHANGE, not the bare storage sync: cmd 86
+                                # carries the item list only, so the Soulmirror panel's
+                                # "n/999" (GetBpFixCount -> the cmd-83 INFO rows) kept
+                                # the pre-pull figure until some later fuse/dismantle/
+                                # upgrade happened to resend the infos. 145 carries
+                                # both and raises BackpackEvent 1, the one an open
+                                # panel refreshes on.
                                 send(MSG_RPC, backpack_msg(
-                                    86, [1],
-                                    [ps.backpack_json(
-                                        state, ps.BP_STORAGE_SOULFRAG)]))
+                                    BACKPACK_CHANGE, [0],
+                                    [ps.backpacks_all_json(
+                                        state, {ps.BP_STORAGE_SOULFRAG}),
+                                     ps.backpack_info_json(state)]))
                             else:
                                 send(MSG_RPC, uint_msg(
                                     PLAYER_CHAR, 528, [1, 1],
