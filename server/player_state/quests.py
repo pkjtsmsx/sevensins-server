@@ -225,18 +225,28 @@ def complete_quests(state, quest_ids):
 # Nothing bumped this at all, which is why "Complete any Kizuna Quest 1 time" stayed at
 # 0/1 however many Kizuna stages were cleared.
 #
-# A stage's family is its dmap's ROOT: `dmap._link`, or the dmap itself when `_link` is
-# 0 (the daily dungeons are their own roots; story chapters and tower floors point up).
+# **The family is the stage's `_book`, NOT a hand-listed set of dmap roots.** Each of
+# these families owns an exclusive book, and matching on roots missed content three
+# ways (all found 2026-08-15, same class of bug as the Kizuna range):
+#   * story roots were listed as 1001..1006, but chapters 29-34 ("Death Giver", "Power
+#     of the Gemstone", "Reversal of Fate", ...) hang off roots **1011/1012, which have
+#     no dmap row at all** -- 210 late-story stages credited nothing;
+#   * 23 listed only 30014, missing 31014 "[Double] Transcender Hunt" (32 stages);
+#   * 24 listed only 30003, missing 31003 "[Double] Treasure Hunt" (32 stages).
+#     21 and 22 happened to list both of their roots, which is what made the omission
+#     look deliberate rather than an oversight.
+# Books outside this map stay uncredited on purpose: 6 (Hell Express), 7 (events like
+# "Sunshine Warfare"), 8, 9-11, 31 (LIMBO SURVIVOR) and 99 are not case-5 families.
 QUEST_CASE_CLEAR_CATEGORY = 5
 CATEGORY_ANY = 7
-STAGE_CATEGORY_ROOTS = {
-    0: (1001, 1002, 1003, 1004, 1005, 1006),   # the six story chapters
-    2: (40011,),                               # Starshard Railway, incl. the Temple
-    21: (30004, 31004),                        # Trainers Gym (+ its "Double" variant)
-    22: (30002, 31002),                        # Rank Up / Evolution Abyss
-    23: (30014,),                              # Transcend Corridor
-    24: (30003,),                              # Treasure Raiders
-    # 8 (Guild Boss) has no dmap -- the guild subsystem does not exist yet.
+CATEGORY_BOOKS = {
+    0: 0,      # main story, all chapters
+    2: 2,      # Starshard Railway / Temple
+    21: 21,    # Trainers Gym      (+ "[Double] Power-up Gym")
+    22: 22,    # Rank Up / Evolution Abyss
+    23: 23,    # Transcend Corridor (+ "[Double] Transcender Hunt")
+    24: 24,    # Treasure Raiders   (+ "[Double] Treasure Hunt")
+    # 8 (Guild Boss) has no stages -- the guild subsystem does not exist yet.
 }
 # **A "Kizuna Quest" is NOT the Kizuna Tower.** The in-game panel titled "Kizuna
 # Quests" lists one entry per cast ("Cupid's Envoy: Ravinia", "The Undaunted: Marilu",
@@ -262,12 +272,10 @@ _root_category_cache = None
 
 
 def _root_category_index():
+    """Kizuna dmap roots only -- every other family is decided by `_book`."""
     global _root_category_cache
     if _root_category_cache is None:
         idx = {}
-        for cat, roots in STAGE_CATEGORY_ROOTS.items():
-            for r in roots:
-                idx[int(r)] = cat
         karma_gated = {int(r.get("_dmap_id") or 0)
                        for r in (bt.dd.rows("stage") or {}).values()
                        if str(r.get("_prepriendly_datas") or "").strip()}
@@ -286,11 +294,19 @@ def _root_category_index():
 
 
 def stage_category(stage_id):
-    """Which case-5 family a stage belongs to, or None if we do not model it."""
+    """Which case-5 family a stage belongs to, or None if we do not model it.
+
+    Kizuna is decided by the dmap root (a karma gate, or a Kizuna Tower name) because
+    its book 17 also holds event maps; everything else is decided by the book, which
+    survives the missing dmap rows the story chapters have.
+    """
     row = bt.dd.row("stage", int(stage_id)) or {}
     dmap_id = int(row.get("_dmap_id") or 0)
     dmap = bt.dd.row("dmap", dmap_id) or {}
-    return _root_category_index().get(int(dmap.get("_link") or dmap_id))
+    kizuna = _root_category_index().get(int(dmap.get("_link") or dmap_id))
+    if kizuna is not None:
+        return kizuna
+    return CATEGORY_BOOKS.get(row.get("_book"))
 
 
 def bump_stage_category_quests(state, stage_id):
