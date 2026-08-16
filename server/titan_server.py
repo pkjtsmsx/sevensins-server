@@ -2381,10 +2381,16 @@ def handle(conn, addr):
                         except (LookupError, ValueError) as exc:
                             log(f"    !! gem upgrade refused for {uid!r}: {exc}")
                         else:
+                            # Cases 21 (levels in total), 26 (best level reached) and
+                            # 27 (how many shards at level >= v1) all hang off this
+                            # one action -- see bump_rune_upgrade_quests.
+                            qtouched = ps.bump_rune_upgrade_quests(state, gained)
                             ps.save(state)
                             log(f"    -> {uid} +{gained} lv "
                                 f"(now {entry['attr'][ps.RUNE_ATTR_LEVEL]}) "
                                 f"for {cost} coins")
+                            if qtouched:
+                                log(f"    -> starshard quest counters {qtouched}")
                             send(MSG_RPC, backpack_msg(
                                 BACKPACK_RPLY_ENCHANT_GEM, [0], []))
                             # BackpackEvent 1 is the only event an already-open panel
@@ -2396,6 +2402,8 @@ def handle(conn, addr):
                                  ps.backpack_info_json(state)]))
                             send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
                                                    [ps.currency_json(state)]))
+                            if qtouched:
+                                send(MSG_RPC, quest_sync_msg(state))
                     elif (index == BACKPACK_SERVER
                           and cmd == BACKPACK_REQ_EQUIP_LOCK):
                         # SendEquipLockReq(equip_uid, toLock): intargs=[toLock],

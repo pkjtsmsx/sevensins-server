@@ -10,6 +10,7 @@ import battle as bt
 
 from .core import (
     BP_STORAGE_EQUIPMENT,
+    RUNE_ATTR_LEVEL,
     ITEM_ACTION_CURRENCY,
     ITEM_ACTION_ENERGY,
     SP_QUEST_COMPLETE,
@@ -293,6 +294,51 @@ def bump_stage_category_quests(state, stage_id):
     cat = stage_category(stage_id)
     if cat is not None and cat != CATEGORY_ANY:
         touched += bump_quest_counter(state, QUEST_CASE_CLEAR_CATEGORY, case_v1=cat)
+    return touched
+
+
+# ---- starshard upgrade goals (`_case_id` 21 / 26 / 27) ---------------------
+#
+# Three different questions about the same action, none of them a plain event count:
+#
+#   21  "Upgrade Starshards for N levels in total" (20701..20752) -- CUMULATIVE, so it
+#       is the only one of the three that is a real increment.
+#   26  "Level up any Starshard to N" (50143 -> 12, 50163 -> 15) -- the HIGH-WATER
+#       level of the single best shard. Netherworld Note step 31 (quest 31030) is this
+#       case with `_case_cnt` **3**, even though its English text says "+5"; the data
+#       is what the client compares against.
+#   27  "Upgrade any <cnt> Starshards to level +<v1>" (31037/31044/31049/31055/31062/
+#       31069, 103646..103650) -- HOW MANY shards sit at level >= `_case_v1`, so `v1`
+#       is a discriminator and every distinct threshold needs its own recompute.
+#
+# 26 and 27 are recomputed from the bag and stored with `to=` (a max, not an assign),
+# because they are state rather than events -- see bump_quest_counter.
+QUEST_CASE_RUNE_LEVELS_TOTAL = 21
+QUEST_CASE_RUNE_BEST_LEVEL = 26
+QUEST_CASE_RUNE_AT_LEVEL = 27
+
+
+def _rune_levels(state):
+    return [int((e.get("attr") or {}).get(RUNE_ATTR_LEVEL, 0))
+            for e in state["backpack"].get(str(BP_STORAGE_EQUIPMENT), {}).values()]
+
+
+def _at_level_thresholds():
+    return {int(r.get("_case_v1") or 0) for r in bt.dd.rows("quest").values()
+            if r.get("_case_id") == QUEST_CASE_RUNE_AT_LEVEL}
+
+
+def bump_rune_upgrade_quests(state, gained_levels):
+    """Credit cases 21/26/27 after a starshard gained `gained_levels`. -> keys touched."""
+    touched = list(bump_quest_counter(state, QUEST_CASE_RUNE_LEVELS_TOTAL,
+                                      amount=int(gained_levels)))
+    levels = _rune_levels(state)
+    touched += bump_quest_counter(state, QUEST_CASE_RUNE_BEST_LEVEL,
+                                  to=max(levels, default=0))
+    for threshold in sorted(_at_level_thresholds()):
+        at = sum(1 for lv in levels if lv >= threshold)
+        touched += bump_quest_counter(state, QUEST_CASE_RUNE_AT_LEVEL,
+                                      to=at, case_v1=threshold)
     return touched
 
 

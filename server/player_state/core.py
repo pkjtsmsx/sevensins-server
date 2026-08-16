@@ -709,8 +709,15 @@ def quest_completed(state, qid):
     return bool(e) and e.get("status") == SP_QUEST_COMPLETE
 
 
-def bump_quest_counter(state, case_id, amount=1, case_v1=None):
+def bump_quest_counter(state, case_id, amount=1, case_v1=None, to=None):
     """Advance every quest counter with this _case_id, then record any completions.
+
+    `to` switches from INCREMENT to a high-water SET: the counter becomes
+    `max(current, to)` and `amount` is ignored. Some cases are not events but derived
+    state -- case 26 is "the best level any one starshard has reached" and case 27 is
+    "how many starshards are at level >= _case_v1" -- and those have to be recomputed
+    and stored, not added to. Taking the max rather than assigning keeps a quest that
+    is already armed from un-arming itself when the player dismantles a shard.
 
     `case_v1` narrows the match to rows whose `_case_v1` equals it, and is REQUIRED for
     any case where that column is a discriminator rather than a parameter. Case 2003
@@ -763,13 +770,16 @@ def bump_quest_counter(state, case_id, amount=1, case_v1=None):
                 state["sp_quests"][qkey] = e
             if e.get("status") == SP_QUEST_COMPLETE:
                 continue                       # already claimed; do not re-arm it
-            e["cnt"] = int(e.get("cnt", 0)) + amount
+            e["cnt"] = (max(int(e.get("cnt", 0)), int(to)) if to is not None
+                        else int(e.get("cnt", 0)) + amount)
             touched.append(qkey)
             continue
         key = case_key(row)
         if key in touched:
             continue
-        state["quest_db"][key] = state["quest_db"].get(key, 0) + amount
+        cur = state["quest_db"].get(key, 0)
+        state["quest_db"][key] = (max(cur, int(to)) if to is not None
+                                  else cur + amount)
         touched.append(key)
     return touched
 
