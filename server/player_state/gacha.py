@@ -257,14 +257,9 @@ REGULAR_BOXES = [
      "Sin Soulmirrors", False, 1400430, 0),
     (1005, SPR_BANNER_ANGEL, SPR_TAB_ANGEL,
      "Virtue Soulmirrors", False, 1400414, 0),
-    # The Riders. Bought with **5829 "Soulmirror Scroll"**, the generic scroll-shop one,
-    # because the Riders never had a standing soulmirror banner and so there is no
-    # "Rider Soulmirror Scroll (Revisited)" to match 1400430/1400414 -- the 1400400 block
-    # has Sin and Virtue entries and nothing for 102. (213 "Rider Summon Orb" looks
-    # tempting but is `_class 2`, a BOX item that opens on tap, not a currency.) Gems
-    # are on every banner anyway, so the scroll is not the only way in.
-    (1006, SPR_BANNER_RIDER, SPR_TAB_RIDER,
-     "Rider Soulmirrors", False, 5829, 0),
+    # No Rider banner: gacha09_en covers "Virtues & Riders" (see SOULMIRROR_GACHA_BOXES).
+    # That the Riders have no scroll of their own -- the 1400400 block has Sin and Virtue
+    # entries and nothing for 102 -- was the clue, read the wrong way round at the time.
 ]
 
 
@@ -334,11 +329,12 @@ GACHA_OBJ_ITEM = 2
 # [[sevensins-soulmirrors]]), split by the OWNING character's `_alignment`:
 # 100 Sins / 101 Virtues / 102 Riders. A mirror's `_param3` names its character.
 #
-# **All three ★5 casts need a box, not just two.** Alignment 102 (the Riders -- ESMIRA,
-# CHINO, SUTALR and both THYRZA rows) is rarity 5 exactly like the Sins and Virtues and
-# owns a full set of mirrors at every grade 1..5, but with only 1004/1005 published
-# there was no way to obtain any of them at all. 1006 closes that.
-SOULMIRROR_GACHA_BOXES = {1004: 100, 1005: 101, 1006: 102}
+# **TWO banners, not three -- the artwork says so.** `atlas_banner_gacha09_en` is
+# captioned "SOUL MIRRORS SUMMON / Virtues & Riders" and pictures Esmira, Rider of
+# Death, alongside Gabriel, Metatron and Uriel. So the Riders (alignment 102) ride on
+# the Virtue banner; they never had one of their own. An invented 1006 was the wrong
+# reading of "alignment 102 has mirrors but no box".
+SOULMIRROR_GACHA_BOXES = {1004: (100,), 1005: (101, 102)}
 # Mirror grade (`_param2`): 1 普通 N / 2 優良 R / 3 稀有 SR / 4 史詩 UR / 5 傳說 LR.
 # Weighted to match the published char rates so the banner's advertised odds stay
 # coherent; the real per-banner table was live-ops data we do not have.
@@ -384,7 +380,10 @@ def soulmirror_shared_chars():
     """
     global _shared_mirror_chars_cache
     if _shared_mirror_chars_cache is None:
-        banner_casts = set(SOULMIRROR_GACHA_BOXES.values())
+        # values are TUPLES of alignments (1005 carries Virtues AND Riders), so flatten
+        # -- comparing an int against a set of tuples matches nothing and made every
+        # cast "shared", which collapsed both banners into the same pool.
+        banner_casts = {a for v in SOULMIRROR_GACHA_BOXES.values() for a in v}
         _shared_mirror_chars_cache = {
             cid for cid, alignment in _mirror_owning_chars().items()
             if alignment not in banner_casts}
@@ -396,7 +395,8 @@ def _soulmirror_gacha_pool(alignment):
 
     That cast's own mirrors plus the shared ones (see soulmirror_shared_chars).
     """
-    chars = {cid for cid, a in _mirror_owning_chars().items() if a == alignment}
+    wanted = (alignment,) if isinstance(alignment, int) else tuple(alignment)
+    chars = {cid for cid, a in _mirror_owning_chars().items() if a in wanted}
     chars |= soulmirror_shared_chars()
     pool = {}
     for iid, row in (bt.dd.rows("item") or {}).items():

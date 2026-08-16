@@ -143,8 +143,12 @@ def test_banner_is_published_and_well_formed():
     st["gacha_count"] = 1                    # past the tutorial box
     boxes = json.loads(ps.gacha_json(st))
     by_id = {b["id"]: b for b in boxes}
-    assert 1006 in by_id, sorted(by_id)
-    box = by_id[1006]
+    # 1005 carries "Virtues & Riders" -- gacha09_en's own caption -- so the Riders have
+    # no banner of their own and an invented 1006 was wrong. Check the banner that does
+    # exist, and assert the mistaken one does NOT come back.
+    assert 1006 not in by_id, sorted(by_id)
+    assert 1005 in by_id, sorted(by_id)
+    box = by_id[1005]
 
     # Soulmirrors are an ITEM gacha: char_only would make ShowGachaAnim skip the
     # summon animation straight to the results screen.
@@ -159,7 +163,7 @@ def test_banner_is_published_and_well_formed():
     cats = {row[1] for row in box["cost_tbl"]}
     assert cats == {1, 2}, box["cost_tbl"]
     scrolls = {row[2] for row in box["cost_tbl"] if row[1] == 2}
-    assert scrolls == {5829}, scrolls
+    assert scrolls == {1400414}, scrolls
     assert all(row[3] > 0 for row in box["cost_tbl"]), box["cost_tbl"]
 
     # Sort order must stay dense and unique or tabs collide.
@@ -168,7 +172,7 @@ def test_banner_is_published_and_well_formed():
     # Every banner uses a distinct tab sprite, else two tabs look identical.
     tabs = [b["banner"] for b in boxes]
     assert len(set(tabs)) == len(tabs), tabs
-    print("banner 1006 published and well-formed OK")
+    print("banner 1005 published and well-formed OK")
 
 
 if __name__ == "__main__":
