@@ -7,8 +7,25 @@ WORDNUM = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
            "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
 
 
+# **Typos in the game's own EN text that hide a damage clause from the matchers.**
+# Both were found by asking which skills promise "N% ATK as damage" in prose but parsed
+# no damage op at all -- the answer was 58 skills that dealt their statuses and nothing
+# else. "Luminous Vortex" (2037111..) is the reported one.
+#   * "Delas 210% ATK as damage"        -- 33 skills, a straight misspelling of Deals
+#   * "Deals damage 110% ATK as damage" -- 25 skills, a redundant "damage" before the
+#     percentage. Anchored on a following digit so the legitimate
+#     "deals damage on <target> by N% ATK" phrasing (its own matcher) is left alone.
+TYPO_FIXES = (
+    (re.compile(r"\bdelas\b", re.I), "Deals"),
+    (re.compile(r"\b(deals?)\s+damage\s+(?=\d+\s*%)", re.I), r"\1 "),
+)
+
+
 def clean(text):
-    return COLOR_RE.sub("", text or "").replace("\n", " ").strip()
+    text = COLOR_RE.sub("", text or "").replace("\n", " ").strip()
+    for pattern, repl in TYPO_FIXES:
+        text = pattern.sub(repl, text)
+    return text
 
 
 def strip_status_defs(text):
