@@ -246,8 +246,16 @@ STAGE_CATEGORY_ROOTS = {
 # 1440-stage stat grind ("Bond of TEC") that does not appear in the EN build at all.
 # Both are credited here: the towers cost nothing to include and cannot fire while they
 # are unreachable, and quest 51007 ("Complete any Kizuna Stage") reads as covering both.
+#
+# **A dmap RANGE was the wrong test (fixed 2026-08-15).** 22000..23000 caught only 47 of
+# the 122 Kizuna dmaps; the rest sit in the 20000 ("Pride: Lucifer", "Abyssal Prime:
+# Lucifer"), 21000 and 220000 bands, so clearing one of those credited nothing and
+# quest 31020 only moved for the handful of casts that happened to land in the 22000
+# band. The data has a real discriminator: a Kizuna stage is gated on the cast's Karma
+# rank, which is `_prepriendly_datas` on the STAGE row ("Requires cast's Karma Rank N").
+# Every stage of every dmap in those four bands carries it and nothing else does -- no
+# dmap mixes gated with ungated stages -- so derive the dmap set from the stages.
 KIZUNA_CATEGORY = 1
-KIZUNA_QUEST_DMAP_LO, KIZUNA_QUEST_DMAP_HI = 22000, 23000
 KIZUNA_TOWER_ROOT_NAME = "Kizuna Tower"
 
 _root_category_cache = None
@@ -260,9 +268,13 @@ def _root_category_index():
         for cat, roots in STAGE_CATEGORY_ROOTS.items():
             for r in roots:
                 idx[int(r)] = cat
+        karma_gated = {int(r.get("_dmap_id") or 0)
+                       for r in (bt.dd.rows("stage") or {}).values()
+                       if str(r.get("_prepriendly_datas") or "").strip()}
+        karma_gated.discard(0)
         for did, row in (bt.dd.rows("dmap") or {}).items():
             did = int(did)
-            if KIZUNA_QUEST_DMAP_LO <= did < KIZUNA_QUEST_DMAP_HI:
+            if did in karma_gated:
                 idx[did] = KIZUNA_CATEGORY
             # The towers need a NAME test, not a range: 41401/41404/41407… sit in the
             # same span but are event maps ("The Deathblow", "Beauty Pageant").
