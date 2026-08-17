@@ -157,6 +157,15 @@ GACHA_DIAMOND_ITEM = 1          # CurrencyType.Cash
 GACHA_SINGLE_DIAMOND_PRICE = 120
 GACHA_TEN_DIAMOND_PRICE = 1000
 
+# "In the Enchanted Stars" is bought with ONE currency and nothing else. Item 1400009
+# 邊境之遺 "Limbo Legacy" says so itself: "Can be obtained in Main Story Normal stages,
+# Hard 5-10, 6-10, 7-10, etc. Used for summoning In the Enchanted Stars gacha box." So
+# this box gets neither the gem rows nor a scroll -- two rows, 80 and 800, which is what
+# the live banner charged.
+GACHA_LIMBO_LEGACY_ITEM = 1400009
+LIMBO_LEGACY_SINGLE_PRICE = 80
+LIMBO_LEGACY_TEN_PRICE = 800
+
 # Published pull rates. The remaining 88.5% is 3★ fodder.
 GACHA_RATE_5 = 0.025
 GACHA_RATE_4 = 0.09
@@ -174,9 +183,16 @@ GACHA_RATE_4 = 0.09
 # alignment 103, and captions itself "Chance to get ★5 Cast / 10-Summon & Get 1 ★4".
 # That is an Awaker banner, so its pool is 103/104 rather than the whole cast.
 GACHA_PICKUP_SHARE = 0.5      # share of the ★5 slot reserved for the featured casts
-CAST_POOL_DEFAULT = {"star5": (100, 101, 102, 103), "star4": (104,), "pickup": ()}
+# `filler` is the tier the remaining ~88.5% of pulls draws from, as (alignments, star).
+# It is per-banner because a banner bought with a SCARCE currency should not be paying
+# out ★3 minions: 3101 costs Limbo Legacy, which only drops from a handful of stages, so
+# its filler is the ★4 Awakers instead. That makes every non-★5 pull on that banner a
+# ★4 -- deliberate, and the reason the tier is data rather than the hardcoded (9001,).
+CAST_POOL_DEFAULT = {"star5": (100, 101, 102, 103), "star4": (104,), "pickup": (),
+                     "filler": ((9001,), 3)}
 CAST_POOLS = {
-    3101: {"star5": (103,), "star4": (104,), "pickup": (10501, 10581)},
+    3101: {"star5": (103,), "star4": (104,), "pickup": (10501, 10581),
+           "filler": ((104,), 4)},
 }
 
 
@@ -210,6 +226,28 @@ def _cost_standard(scroll_item, free_single=False):
         # work -- it leaves discount at 0 and skips the whole branch.
         rows[0] = rows[0] + [0]
     return rows
+
+
+def _cost_limbo_legacy():
+    """The Enchanted Stars pair: single and ten, Limbo Legacy only.
+
+    costCat **2**, the bag-item category, because 1400009 is `_action 0` -- an ordinary
+    backpack item like the 202/203 scrolls, not a currency (item 1/2 carry `_action 5`
+    ITEM_ACTION_CURRENCY and live in `currency`). Category 1 would point the client's
+    own affordability test at the wrong wallet and grey both buttons out.
+
+    Cost: this puts them at button indices 2 and 3 (`drawType + 2*costCat - 3`) rather
+    than 0 and 1, so they sit in the right-hand pair with the gem slots empty. Cosmetic;
+    revisit if the gap looks wrong in game.
+    """
+    return _cost(True, True, GACHA_LIMBO_LEGACY_ITEM,
+                 price_single=LIMBO_LEGACY_SINGLE_PRICE,
+                 price_ten=LIMBO_LEGACY_TEN_PRICE, cat=2)
+
+
+# Boxes that do NOT take the standard gems+scroll set. Keyed by box id so the
+# REGULAR_BOXES rows stay uniform.
+COST_OVERRIDES = {3101: _cost_limbo_legacy}
 
 
 # After the tutorial pull the newbie box is replaced by the standing banners, which is
@@ -283,11 +321,13 @@ def gacha_json(state):
                                 _cost(False, True, price_ten=GACHA_COST_AMOUNT),
                                 redraw=1, newbie=1, sort=1))
     free = gacha_free_available(state)
-    boxes += [_gacha_box(bid, img, ban,
-                         _cost_standard(scroll, free_single=bool(dly) and free),
-                         sort=len(boxes) + i + 1, char_only=co, daily=dly)
-              for i, (bid, img, ban, _name, co, scroll, dly)
-              in enumerate(REGULAR_BOXES)]
+    n = len(boxes)
+    for i, (bid, img, ban, _name, co, scroll, dly) in enumerate(REGULAR_BOXES):
+        override = COST_OVERRIDES.get(bid)
+        costs = (override() if override
+                 else _cost_standard(scroll, free_single=bool(dly) and free))
+        boxes.append(_gacha_box(bid, img, ban, costs,
+                                sort=n + i + 1, char_only=co, daily=dly))
     return json.dumps(boxes, separators=(",", ":"))
 
 
@@ -474,10 +514,16 @@ def gacha_commit(state):
     # the "Rise of Solar Prime" rows name 3444/3450/3471. Bumping on the case id alone
     # credited every gacha quest in the game off a single pull on any banner (the same
     # trap case 2003 documents). Bump the generic family (v1 0) plus this box.
-    bump_quest_counter(state, QUEST_CASE_GACHA, case_v1=0)
+    #
+    # Count SUMMONS, not button presses: "[Daily] Summon 10 times" (10035, case 13
+    # `_case_cnt` 10) is satisfied by one ten-pull, which is plainly how it reads. One
+    # pending row IS one summon on both paths -- casts and Soulmirrors alike -- so the
+    # row count is the pull count.
+    pulls = len(pending)
+    bump_quest_counter(state, QUEST_CASE_GACHA, pulls, case_v1=0)
     box = state.pop("gacha_pending_box", None)
     if box:
-        bump_quest_counter(state, QUEST_CASE_GACHA, case_v1=int(box))
+        bump_quest_counter(state, QUEST_CASE_GACHA, pulls, case_v1=int(box))
     state["gacha_pending"] = []
     return pending
 
@@ -529,7 +575,7 @@ def gacha_draw(state, count=10, cost=None, box_id=None):
     # The single cast banner covers EVERY unit, so ★5 spans all four of the first group
     # -- it used to be Awakers only, which silently excluded the 73 real ★5 casts.
     pool = CAST_POOLS.get(int(box_id or 0), CAST_POOL_DEFAULT)
-    FODDER = (9001,)
+    fill_aligns, fill_star = pool.get("filler", CAST_POOL_DEFAULT["filler"])
 
     def _bucket(alignments, listed=True):
         return [r for r in rows.values()
@@ -537,8 +583,10 @@ def gacha_draw(state, count=10, cost=None, box_id=None):
                 and (bool(r.get("_order")) or not listed)
                 and any(r.get("_growStar") or [])]
 
-    five, four, fod = (_bucket(pool["star5"]), _bucket(pool["star4"]),
-                       _bucket(FODDER, listed=False))
+    # 9001 fodder is unlisted (_order 0); the cast alignments are not, so a filler tier
+    # made of real casts still has to pass the listed check.
+    five, four = _bucket(pool["star5"]), _bucket(pool["star4"])
+    fod = _bucket(fill_aligns, listed=fill_aligns != (9001,))
     pickup = [r for r in (rows.get(str(cid)) or rows.get(cid)
                           for cid in pool.get("pickup", ()))
               if r and any(r.get("_growStar") or [])]
@@ -548,7 +596,7 @@ def gacha_draw(state, count=10, cost=None, box_id=None):
     # it is the spread the scripted first-pull sequence is written around. The gate is
     # the same one gacha_json uses to decide whether to show the newbie box at all.
     if not state.get("gacha_count"):
-        plan = [(five, 5), (four, 4)] + [(fod, 3)] * (count - 2)
+        plan = [(five, 5), (four, 4)] + [(fod, fill_star)] * (count - 2)
     else:
         # Published rates: 5★ 2.5%, 4★ 9%, 3★ 88.5%, with 4★-or-better GUARANTEED in a
         # 10-pull. Rolled per pull -- reusing the tutorial's fixed spread made every
@@ -564,7 +612,7 @@ def gacha_draw(state, count=10, cost=None, box_id=None):
             elif r < GACHA_RATE_5 + GACHA_RATE_4:
                 plan.append((four, 4))
             else:
-                plan.append((fod, 3))
+                plan.append((fod, fill_star))
         if count >= 10 and not any(star >= 4 for _b, star in plan):
             plan[random.randrange(len(plan))] = (four, 4)
     results = []

@@ -40,6 +40,9 @@ re/mars-java/
 apkpatch/*.apk
 apkpatch/*.idsig
 *.keystore
+# Asset tars and superseded design packs staged for release
+apkpatch/*.tar
+apkpatch/old_packs/
 
 # ---- hostapp: gradle build output + stageServer-generated python copy ----
 hostapp/app/build/

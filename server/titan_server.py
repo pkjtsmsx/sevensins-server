@@ -1441,6 +1441,25 @@ def handle(conn, addr):
                 if healed:
                     ps.save(state)
                     log(f"    -> stage-clear quests reconciled: {healed}")
+                # Daily/weekly/monthly missions are once-per-account unless something
+                # re-arms them; do it before the Daily Login credit below so the fresh
+                # window is the one that gets the tick.
+                rearmed = ps.reset_periodic_missions(state)
+                if rearmed:
+                    ps.save(state)
+                    log(f"    -> missions re-armed for the new window: {rearmed}")
+                if ps.bump_mission_login(state):
+                    ps.save(state)
+                    log("    -> mission credit: Daily Login")
+                if ps.expire_roulette_day(state):
+                    ps.save(state)
+                    log("    -> roulette daily spins reset")
+                # The login-bonus ladder only ever moves because the server moved it --
+                # the client has no claim RPC (see player_state.advance_login_bonus), so
+                # this has to happen before the mail list and the bonus sync are built.
+                for day, item, count in ps.advance_login_bonus(state):
+                    ps.save(state)
+                    log(f"    -> login bonus day {day}: mailed item {item} x{count}")
                 # Catch accounts that finished the tutorial in a prior session (or before
                 # this reset existed): fold them to base before the login sync is built.
                 if ps.maybe_reset_tutorial_casts(state):
@@ -2921,7 +2940,17 @@ def handle(conn, addr):
                         # A daily-dungeon stage (_ap_type 2) costs one of item _ap_v1 --
                         # the Training Gym Pass and friends. Charge it here, or every
                         # run is free and the counter never moves.
-                        cost = ps.stage_ap_cost(bt.dd.row("stage", stage_id) or {})
+                        # "[Daily] Spend Stamina x500" counts the stamina a run WOULD
+                        # cost (the stage row's `_ap`). We never actually deduct stamina
+                        # -- the energy sync hands out 999 and ordinary runs are free --
+                        # so crediting the notional cost is the only way that mission can
+                        # move without changing the economy.
+                        srow = bt.dd.row("stage", stage_id) or {}
+                        ap = int(srow.get("_ap") or 0)
+                        if ap and int(srow.get("_ap_type") or 0) != 2:
+                            ps.bump_quest_counter(state, ps.QUEST_CASE_SPEND_ITEM, ap,
+                                                  case_v1=ps.STAMINA_ITEM_ID)
+                        cost = ps.stage_ap_cost(srow)
                         if cost:
                             iid, n = cost
                             if ps.spend_item(state, iid, n):
@@ -2994,6 +3023,17 @@ def handle(conn, addr):
                         log(f"    -> sync sequence for {name} ({len(msgs)} msgs)")
                         for body in msgs:
                             send(MSG_RPC, body)
+                        # cin_day is a one-shot: it both plays the check-in animation and
+                        # is the gate that re-opens the panel, so it has to be retired the
+                        # moment the sync carrying it has been sent -- otherwise the login
+                        # bonus pops up again on every panel switch. Cleared HERE rather
+                        # than inside login_bonus_json because build_sync_replies runs for
+                        # EVERY request, which would burn the flag before it was sent.
+                        if ((index, cmd) == (PLAYER_LOGINBONUS_SERVER,
+                                             LOGINBONUS_REQ_SYNC)
+                                and state.get("login_checkin_day")):
+                            state.pop("login_checkin_day", None)
+                            ps.save(state)
                     elif (index, cmd) in FIRE_AND_FORGET:
                         log(f"    (ack {FIRE_AND_FORGET[(index, cmd)]}"
                             f" -- no reply cmd exists)")
