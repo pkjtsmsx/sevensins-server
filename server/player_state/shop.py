@@ -6,10 +6,12 @@ Split out of the former monolithic core.py; depends only on .core.
 
 import json
 import re
+import time
 
 import battle as bt
 
 from .core import (
+    DAILY_RESET_HOUR,
     QUEST_CASE_BUY_GOODS,
     add_char,
     bump_quest_counter,
@@ -140,7 +142,17 @@ FILTER_MONTHLY = 16036      # "Monthly Sales"
 # (texts 113039/113040/113041). The int->label mapping is not in an enum; 1/2/3 in
 # design order is the obvious reading and is what the store footage's counters imply,
 # but it is UNVERIFIED -- check the labels in game before trusting them.
-RESET_NONE, RESET_DAILY, RESET_WEEKLY, RESET_MONTHLY = 0, 1, 2, 3
+# **ResetCycle is a number of HOURS, not an enum.** `StoreItemHandler.SetValue` computes
+# `days = ResetCycle / 24` and picks the strip's wording from it:
+#   24..47  -> text 113039 "Daily Reset"
+#   days 7  -> text 113040 "Weekly Reset"
+#   days 30 -> text 113041 "Monthly Reset"
+#   anything else -> no branch runs, and the card keeps the PREFAB's default label,
+#                    which reads "Left Days:{days}"
+# So the old 1/2/3 rendered as "Left Days:000" on every capped card in the game -- the
+# cycle was being sent, it just never matched a wording branch. The chosen text is then
+# String.Format'd with the card's Limit, which is where the "0/45" comes from.
+RESET_NONE, RESET_DAILY, RESET_WEEKLY, RESET_MONTHLY = 0, 24, 24 * 7, 24 * 30
 
 # Cost currencies, as the storefront quotes them.
 COST_DIAMOND = 1            # CurrencyType.Cash
@@ -148,6 +160,9 @@ COST_MEDAL = 9              # "Medal of Pride" -- a plain bag item, not a curren
 COST_GUILD_PT = 4           # CurrencyType.Guild
 COST_PAID_DIAMOND = 11      # CurrencyType 32 -- the $-marked gem, a separate balance
 COST_HOLY_BLOOD = 3         # "Holy Blood of Saint" -- the Soul Altar's own currency
+# 福利代幣 "Feel Lucky", the P token the Super Sales tab is priced in. A plain bag item
+# (`_action 0`), not a CurrencyType, so it is spent through spend_item like the scrolls.
+COST_FEEL_LUCKY = 46
 # Unsummoning a cast pays out Mana Crystals; the Soul Altar spends them back. The rare
 # grade (Prime) buys the Bunrei selector boxes, the common grade the ★5 Awaker Orb.
 COST_MANA_CRYSTAL = 501
@@ -504,6 +519,36 @@ DEFAULT_SHOP_GOODS = {
     # ordinary gem -- the footage shows the $-marked icon on Ultra Karma Deluxe Box and
     # the 5,000,000 Coin card.
     "1": [
+        # ---- Super Sales ------------------------------------------------------
+        # The Feel Lucky tab, and the ONLY sink for item 46 (福利代幣, "Feel Lucky" --
+        # the P token): "Can be obtained in Feel Lucky quests. Take this token to
+        # exchange..." Its filter id was defined here from the start but no goods ever
+        # carried it, so the tab rendered empty and the token had nowhere to go.
+        # Transcribed from live footage the same way the rest of this table was; the
+        # cards visible were 100 gems / 10, ★5 Trainer / 3, Refined Crystal / 5 and
+        # 250 Grimoire of Sin Fragment / 80, all on a monthly reset. The strip scrolls,
+        # so there may be further cards off the right edge that are not here yet.
+        _goods(1401, COST_DIAMOND, 100, COST_FEEL_LUCKY, 10, filt=FILTER_SALES,
+               sort=1, limit=45, reset=RESET_MONTHLY),
+        _goods(1402, 105, 1, COST_FEEL_LUCKY, 3, filt=FILTER_SALES,
+               sort=2, limit=100, reset=RESET_MONTHLY),
+        _goods(1403, 8, 1, COST_FEEL_LUCKY, 5, filt=FILTER_SALES,
+               sort=3, limit=10, reset=RESET_MONTHLY),
+        # 541, not 700311 -- both are named "Grimoire of Sin Fragment", but 541 is the
+        # plain `_action 0` collectible whose note matches the card ("Collect 1000
+        # fragments to exchange Grimoire of Sin in Soul Altar"); 700311 is an `_action 4`
+        # use-item.
+        _goods(1404, 541, 250, COST_FEEL_LUCKY, 80, filt=FILTER_SALES,
+               sort=4, limit=2, reset=RESET_MONTHLY, once_max=2),
+        # Virtue and Rider fragments on the same terms as the Sin card. Not seen on the
+        # footage -- ours, so the other two factions are not stuck without a source --
+        # but 542/543 are the exact counterparts of 541: same `_action 0`, same
+        # "Collect 1000 fragments to exchange ... in Soul Altar" note.
+        _goods(1405, 542, 250, COST_FEEL_LUCKY, 80, filt=FILTER_SALES,
+               sort=5, limit=2, reset=RESET_MONTHLY, once_max=2),
+        _goods(1406, 543, 250, COST_FEEL_LUCKY, 80, filt=FILTER_SALES,
+               sort=6, limit=2, reset=RESET_MONTHLY, once_max=2),
+
         # ---- Daily Sales ------------------------------------------------------
         _goods(1101, 922, 1, COIN, 0, filt=FILTER_DAILY, sort=1,
                limit=1, reset=RESET_DAILY, once_max=1),
@@ -731,6 +776,9 @@ def buy_shop_goods(state, goods_id, count):
         return False, shop_id, f"over per-purchase max {once_max}", []
 
     bought = state.setdefault("shop_bought", {}).setdefault(str(shop_id), {})
+    # Roll expired windows over BEFORE testing the cap, or a card bought out last month
+    # still refuses today.
+    expire_shop_bought(state, shop_id)
     rec = bought.get(str(goods_id)) or {"Count": 0, "Reset": 0}
     # Limit < 0 is the UNCAPPED encoding (see GOODS_NO_LIMIT); only a positive Limit
     # is a real cap. `if limit` alone would have treated -1 as a cap of -1 and refused
@@ -743,6 +791,10 @@ def buy_shop_goods(state, goods_id, count):
     state.pop("_last_payout", None)
     new_chars, out_id, out_cnt = grant_goods(state, item_id, item_cnt * count)
     rec["Count"] += count
+    # Stamp the window this purchase belongs to, so expire_shop_bought knows when to
+    # clear it and the card's countdown strip has a time to show.
+    if _cycle and not rec.get("Reset"):
+        rec["Reset"] = next_reset_time(_cycle)
     bought[str(goods_id)] = rec
     state.setdefault("_last_purchase", {})[str(goods_id)] = [out_id, out_cnt]
     # A quest may be watching for exactly this purchase ("Go to Shop-Soul Altar and
@@ -892,12 +944,81 @@ def goods_reward(state, goods_id, count):
 # bought, and `HandleShopBuy` (0x1804598) does
 # `if (!DeserializeObject(strargs[0], &shop.freeList)) return;` BEFORE building the
 # "you received" popup, so a payload it cannot read swallowed the confirmation whole.
+def next_reset_time(cycle, now=None):
+    """When the current daily/weekly/monthly window ends, as an epoch second.
+
+    `PlayerShop.GetShopGoodResetTime` hands `GoodsBuyData.Reset` straight back to the UI
+    (and returns 0 for a row with no ResetCycle), so this field is a TIME, not a period
+    counter -- it is what the card's "Daily/Weekly/Monthly Reset" strip counts down to.
+
+    All three windows hinge on the same 4AM local boundary the daily passes and the free
+    gacha pull already use (DAILY_RESET_HOUR), so a player's whole day rolls over at one
+    moment: weekly on Monday 4AM, monthly on the 1st at 4AM.
+    """
+    now = int(now if now is not None else time.time())
+    if not cycle:
+        return 0
+    t = time.localtime(now)
+    # Start of today's window, then walk forward one window.
+    start = time.struct_time((t.tm_year, t.tm_mon, t.tm_mday, DAILY_RESET_HOUR, 0, 0,
+                              t.tm_wday, t.tm_yday, -1))
+    day_start = int(time.mktime(start))
+    if now < day_start:                       # before 4AM we are still in yesterday's
+        day_start -= 86400
+    if cycle == RESET_DAILY:
+        return day_start + 86400
+    if cycle == RESET_WEEKLY:
+        wday = time.localtime(day_start).tm_wday          # 0 = Monday
+        return day_start + (7 - wday) * 86400
+    # Monthly: 4AM on the 1st of next month.
+    d = time.localtime(day_start)
+    year, mon = (d.tm_year + 1, 1) if d.tm_mon == 12 else (d.tm_year, d.tm_mon + 1)
+    return int(time.mktime(time.struct_time(
+        (year, mon, 1, DAILY_RESET_HOUR, 0, 0, 0, 1, -1))))
+
+
+def _goods_cycles(state, shop_id):
+    """{goods id: reset cycle} for one shop, so a bought-record can find its window."""
+    goods = ((state.get("shop_goods") or {}).get(str(shop_id))
+             or DEFAULT_SHOP_GOODS.get(str(shop_id)) or [])
+    return {str(row[0]): row[3] for row in goods}
+
+
+def expire_shop_bought(state, shop_id, now=None):
+    """Clear the purchase counts of any card whose reset time has passed.
+
+    Nothing did this before: `buy_shop_goods` bumped Count and never stamped Reset, so
+    every "Daily/Weekly/Monthly Reset 0/N" cap in the game was permanent -- spend it once
+    and that card was dead for good. -> True if anything was cleared.
+    """
+    now = int(now if now is not None else time.time())
+    bought = (state.get("shop_bought") or {}).get(str(shop_id)) or {}
+    if not bought:
+        return False
+    cycles = _goods_cycles(state, shop_id)
+    changed = False
+    for gid, rec in bought.items():
+        cycle = cycles.get(str(gid), RESET_NONE)
+        if not cycle:
+            continue
+        stamp = int(rec.get("Reset") or 0)
+        if stamp and now < stamp:
+            continue
+        # No stamp at all means the record predates this machinery -- treat it as
+        # expired rather than stranding the player on an old count forever.
+        rec["Count"] = 0
+        rec["Reset"] = next_reset_time(cycle, now)
+        changed = True
+    return changed
+
+
 def _bought_wire(bought):
     return {gid: {"cnt": rec.get("Count", 0), "reset": rec.get("Reset", 0)}
             for gid, rec in (bought or {}).items()}
 
 
 def shop_bought_json(state, shop_id):
+    expire_shop_bought(state, shop_id)
     bought = (state.get("shop_bought") or {}).get(str(shop_id)) or {}
     return json.dumps(_bought_wire(bought), separators=(",", ":"))
 
@@ -919,6 +1040,7 @@ def shop_goods_json(state, shop_id):
     succeeds, the caller dispatches ShopEvent SYNC_SHOP_GOODS(11), and the panel closes
     its overlay instead of hanging.
     """
+    expire_shop_bought(state, shop_id)
     bought = _bought_wire((state.get("shop_bought") or {}).get(str(shop_id)) or {})
     goods = ((state.get("shop_goods") or {}).get(str(shop_id))
              or DEFAULT_SHOP_GOODS.get(str(shop_id)) or [])

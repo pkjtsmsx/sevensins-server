@@ -46,6 +46,65 @@ def fresh():
     return st
 
 
+def check_resets():
+    """Purchase caps must actually roll over -- before this, Count was bumped and never
+    cleared, so every Daily/Weekly/Monthly card was one-and-done forever."""
+    import time as _t
+    st = fresh()
+    st["backpack"]["0"] = {}
+    sh.grant_reward(st, sh.COST_FEEL_LUCKY, 500)
+    # 1403 = Refined Crystal, monthly, cap 10
+    ok, _sid, why, _new = sh.buy_shop_goods(st, 1403, 1)
+    check("a Feel Lucky card can be bought", ok, why)
+    rec = st["shop_bought"]["1"]["1403"]
+    check("the purchase is counted", rec["Count"] == 1, str(rec))
+    check("and stamped with its reset time", rec["Reset"] > int(_t.time()), str(rec))
+
+    # Fill the cap, then confirm it refuses.
+    ok, _sid, why, _new = sh.buy_shop_goods(st, 1403, 9)
+    check("the cap can be filled", ok, why)
+    ok, _sid, why, _new = sh.buy_shop_goods(st, 1403, 1)
+    check("a filled cap refuses", not ok, why)
+
+    # Wind the stamp into the past: the next read must clear it.
+    st["shop_bought"]["1"]["1403"]["Reset"] = int(_t.time()) - 1
+    sh.expire_shop_bought(st, 1)
+    rec = st["shop_bought"]["1"]["1403"]
+    check("an elapsed window clears the count", rec["Count"] == 0, str(rec))
+    check("and re-arms for the next one", rec["Reset"] > int(_t.time()), str(rec))
+    ok, _sid, why, _new = sh.buy_shop_goods(st, 1403, 1)
+    check("so the card is buyable again", ok, why)
+
+    # A record with no stamp at all predates the machinery -- treat it as expired.
+    st["shop_bought"]["1"]["1403"] = {"Count": 10, "Reset": 0}
+    sh.expire_shop_bought(st, 1)
+    check("a legacy unstamped record is rolled over",
+          st["shop_bought"]["1"]["1403"]["Count"] == 0)
+
+    # The wire value is HOURS: StoreItemHandler.SetValue divides by 24 and only words
+    # the strip for 24..47 / 7 days / 30 days. Anything else leaves the prefab default
+    # "Left Days:000" -- which is exactly what the old 1/2/3 produced.
+    check("daily cycle is 24h", sh.RESET_DAILY == 24)
+    check("weekly cycle is 7 days", sh.RESET_WEEKLY // 24 == 7)
+    check("monthly cycle is 30 days", sh.RESET_MONTHLY // 24 == 30)
+    for cyc in (sh.RESET_DAILY, sh.RESET_WEEKLY, sh.RESET_MONTHLY):
+        days = cyc // 24
+        check(f"cycle {cyc} hits a wording branch",
+              24 <= cyc <= 47 or days in (7, 30))
+
+    # Uncapped/no-cycle rows must NOT be touched.
+    now = int(_t.time())
+    check("no cycle means no reset time", sh.next_reset_time(sh.RESET_NONE, now) == 0)
+    for cyc in (sh.RESET_DAILY, sh.RESET_WEEKLY, sh.RESET_MONTHLY):
+        check(f"cycle {cyc} resets in the future", sh.next_reset_time(cyc, now) > now)
+    check("weekly outlasts daily",
+          sh.next_reset_time(sh.RESET_WEEKLY, now)
+          >= sh.next_reset_time(sh.RESET_DAILY, now))
+    check("monthly outlasts weekly",
+          sh.next_reset_time(sh.RESET_MONTHLY, now)
+          >= sh.next_reset_time(sh.RESET_WEEKLY, now))
+
+
 def main():
     goods = sh.DEFAULT_SHOP_GOODS[SHOP]
 
@@ -191,11 +250,13 @@ def main():
     check("mammon rows have 21 fields", all(len(r) == 21 for r in mam))
     mids = [r[0] for r in mam]
     check("mammon goods ids are unique", len(set(mids)) == len(mids))
-    check("mammon has the three reset tabs",
-          {r[9] for r in mam} == {sh.FILTER_DAILY, sh.FILTER_WEEKLY, sh.FILTER_MONTHLY},
+    check("mammon has its four tabs",
+          {r[9] for r in mam} == {sh.FILTER_SALES, sh.FILTER_DAILY, sh.FILTER_WEEKLY,
+                                  sh.FILTER_MONTHLY},
           str(sorted({r[9] for r in mam})))
     # Every tab IS a reset tier, so every card must carry the matching cycle.
-    tab_cycle = {sh.FILTER_DAILY: sh.RESET_DAILY,
+    tab_cycle = {sh.FILTER_SALES: sh.RESET_MONTHLY,
+                 sh.FILTER_DAILY: sh.RESET_DAILY,
                  sh.FILTER_WEEKLY: sh.RESET_WEEKLY,
                  sh.FILTER_MONTHLY: sh.RESET_MONTHLY}
     for r in mam:
@@ -203,6 +264,7 @@ def main():
             check(f"mammon goods {r[0]} cycle matches its tab", False,
                   f"tab {r[9]} cycle {r[3]}")
     check("every mammon card resets with its tab", True)
+    check_resets()
     for r in mam:
         if not bt.dd.row("item", r[5]) or not bt.dd.row("item", r[7]):
             check(f"mammon goods {r[0]} ids exist", False, f"{r[5]} / {r[7]}")
