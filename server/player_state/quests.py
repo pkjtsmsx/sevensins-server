@@ -4,12 +4,16 @@ Split out of the former monolithic core.py; depends only on .core.
 """
 
 
+import datetime
 import json
 import re
+
 import battle as bt
 
 from .core import (
     BP_STORAGE_EQUIPMENT,
+    SP_QUEST_INPROGRESS,
+    _daily_period,
     RUNE_ATTR_LEVEL,
     ITEM_ACTION_CURRENCY,
     ITEM_ACTION_ENERGY,
@@ -188,8 +192,14 @@ def complete_quests(state, quest_ids):
             # re-offering it (and re-paying the reward on every press).
             e = state["sp_quests"].setdefault(
                 key, {"id": int(qid), "a_time": 0, "cnt": 0, "status": 0})
+            already = e.get("status") == SP_QUEST_COMPLETE
             e["cnt"] = max(int(e.get("cnt", 0)), row.get("_case_cnt") or 1)
             e["status"] = SP_QUEST_COMPLETE
+            # "[Weekly] Complete 25 daily quests" / "[Monthly] Complete 15 weekly
+            # quests" tick on the CLAIM, and only the first time this row is claimed --
+            # a re-press must not credit it twice.
+            if not already:
+                bump_mission_claimed(state, qid)
         else:
             state["quests"].setdefault(key, 1)
         item_id, cnt = row.get("_item_id") or 0, row.get("_item_cnt") or 0
@@ -547,3 +557,91 @@ def item_bucket(item_id):
     if action == ITEM_ACTION_ENERGY and param:
         return "energy"
     return "backpack"
+
+
+# ---- daily / weekly / monthly missions -------------------------------------
+#
+# The Missions panel's Daily tab is quest `_type 3`, split by `_group`: 4 daily, 5
+# weekly, 6 monthly (11/5/5 rows). Every one pays item 46 福利代幣 "Feel Lucky" -- the P
+# token whose only sink is the Premium Shop's Super Sales tab (see shop.py) -- and every
+# one is `_case_type 2`, so progress lives per-quest in `sp_quests[id].cnt`.
+#
+# They are all discriminated by `_case_id`, NOT by case type:
+#   1001 daily login          33 spin the roulette      13 summon N times (already wired)
+#   2003 buy goods `_case_v1` (1101/1201/1301 = the free daily/weekly/monthly cards)
+#   2011 spend item `_case_v1` (5 = stamina)            2014 spend diamonds
+#   2004 complete N quests of `_case_v1` group (4 = dailies, 5 = weeklies)
+#   2001 guild boss, 2 arena, 6 obtain paid diamond -- systems we do not run, so those
+#        four rows stay at 0 and are simply unclaimable. Nothing to bump them with.
+QUEST_CASE_DAILY_LOGIN = 1001
+QUEST_CASE_ROULETTE = 33
+QUEST_CASE_SPEND_ITEM = 2011
+QUEST_CASE_SPEND_DIAMOND = 2014
+QUEST_CASE_COMPLETE_QUESTS = 2004
+QUEST_TYPE_MISSION = 3
+MISSION_GROUP_DAILY, MISSION_GROUP_WEEKLY, MISSION_GROUP_MONTHLY = 4, 5, 6
+MISSION_GROUPS = (MISSION_GROUP_DAILY, MISSION_GROUP_WEEKLY, MISSION_GROUP_MONTHLY)
+STAMINA_ITEM_ID = 5
+
+
+def _mission_period(group, now=None):
+    """Which window this group is in, as a comparable string.
+
+    Hinged on the SAME 4AM local boundary as the shop resets and the daily passes
+    (_daily_period), so the whole account rolls over at one moment rather than three.
+    """
+    day = _daily_period(now)                       # 'YYYY-MM-DD', 4AM-to-4AM
+    y, m, d = (int(x) for x in day.split("-"))
+    if group == MISSION_GROUP_DAILY:
+        return day
+    if group == MISSION_GROUP_WEEKLY:
+        iso = datetime.date(y, m, d).isocalendar()
+        return f"{iso[0]}-W{iso[1]:02d}"
+    return f"{y:04d}-{m:02d}"
+
+
+def mission_quest_ids(group):
+    return [qid for qid, row in bt.dd.rows("quest").items()
+            if row.get("_type") == QUEST_TYPE_MISSION and row.get("_group") == group]
+
+
+def reset_periodic_missions(state, now=None):
+    """Re-arm the daily/weekly/monthly missions when their window rolls over.
+
+    Without this they are once-per-account: `sp_quests[id]` keeps its count and its
+    COMPLETE status forever, and bump_quest_counter deliberately refuses to re-arm a
+    completed entry. Clearing the entry (rather than deleting it) keeps the id in the
+    sync's `sp_u` map, so the client sees 0/N instead of the row vanishing.
+
+    -> [quest id, ...] that were reset.
+    """
+    stamps = state.setdefault("mission_periods", {})
+    reset = []
+    for group in MISSION_GROUPS:
+        now_period = _mission_period(group, now)
+        if stamps.get(str(group)) == now_period:
+            continue
+        stamps[str(group)] = now_period
+        for qid in mission_quest_ids(group):
+            e = state.get("sp_quests", {}).get(str(qid))
+            if not e or (not e.get("cnt") and e.get("status") != SP_QUEST_COMPLETE):
+                continue
+            e["cnt"], e["status"], e["a_time"] = 0, SP_QUEST_INPROGRESS, 0
+            reset.append(int(qid))
+    return reset
+
+
+def bump_mission_login(state):
+    """Daily Login (case 1001). Called after reset_periodic_missions, so the freshly
+    re-armed row is the one that gets credited."""
+    return bump_quest_counter(state, QUEST_CASE_DAILY_LOGIN, 1)
+
+
+def bump_mission_claimed(state, quest_id):
+    """Credit "[Weekly] Complete 25 daily quests" / "[Monthly] Complete 15 weekly
+    quests" -- case 2004, whose `_case_v1` is the GROUP of the quest just claimed."""
+    row = bt.dd.rows("quest").get(int(quest_id)) or {}
+    group = row.get("_group")
+    if row.get("_type") != QUEST_TYPE_MISSION or group not in MISSION_GROUPS:
+        return []
+    return bump_quest_counter(state, QUEST_CASE_COMPLETE_QUESTS, 1, case_v1=int(group))

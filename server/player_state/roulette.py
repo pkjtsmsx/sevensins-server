@@ -7,6 +7,8 @@ Split out of the former monolithic core.py; depends only on .core.
 import json
 
 from .core import (
+    _daily_period,
+    bump_quest_counter,
     grant_reward,
     spend_cost,
 )
@@ -86,6 +88,31 @@ ROULETTE_BONUS = [[210, 50]]
 
 # How many free spins a day box 101 grants, and how many spins earn the bonus.
 ROULETTE_DRAW_MAX = 4
+# Mission case for "[Daily] Spin the roulette wheel once" (quest 10032).
+QUEST_CASE_ROULETTE = 33
+
+
+def expire_roulette_day(state, now=None):
+    """Clear the per-day spin counters when the daily window rolls over.
+
+    `day` was incremented on every spin and never reset, so the free daily spins were
+    free ONCE and the wheel then read "no draws left today" forever -- and the
+    "[Daily] Spin the roulette wheel once" mission could never be re-armed either.
+
+    Uses `_daily_period`, the SAME 4AM local boundary as the shop resets, the daily
+    passes, the free gacha pull and the mission groups: one rollover moment per account,
+    not four that drift apart. -> True if anything was cleared.
+    """
+    period = _daily_period(now)
+    if state.get("roulette_day") == period:
+        return False
+    state["roulette_day"] = period
+    changed = False
+    for rec in (state.get("roulette") or {}).values():
+        if rec.get("day"):
+            rec["day"] = 0
+            changed = True
+    return changed
 
 
 def roulette_info(state, box_id):
@@ -123,9 +150,13 @@ def roulette_info(state, box_id):
 def roulette_info_json(state):
     """strargs[0] of cmd 306 -- Dictionary<string, RouletteInfo>.
 
+    Rolls the day over first (expire_roulette_day), so a client that sat open across
+    4AM sees its free spins back without a relog.
+
     Published for BOTH boxes on purpose: 102 needs a non-null info for UpdateRoulette to
     reach its isEnabled=0 line and hide the duplicate lobby button.
     """
+    expire_roulette_day(state)
     return json.dumps(
         {str(b): roulette_info(state, b) for b in ROULETTE_BOXES},
         separators=(",", ":"))
@@ -156,6 +187,7 @@ def roulette_draw(state, box_id):
     the first icon whose ItemID **and** ItemCount both match the result. So a result must
     reproduce a wheel slot exactly, or the wheel spins to nothing.
     """
+    expire_roulette_day(state)
     box = str(int(box_id))
     if box not in (str(b) for b in ROULETTE_BOXES):
         return False, [], f"unknown box {box}"
@@ -173,6 +205,8 @@ def roulette_draw(state, box_id):
 
     r = state.setdefault("roulette", {}).setdefault(box, {})
     r["day"] = int(r.get("day", 0)) + 1
+    # "[Daily] Spin the roulette wheel once" -- quest case 33.
+    bump_quest_counter(state, QUEST_CASE_ROULETTE, 1)
     r["sum"] = int(r.get("sum", 0)) + 1
     # The bonus pays out when the spin counter reaches DrawMax, then the track resets.
     if r["sum"] >= ROULETTE_DRAW_MAX:

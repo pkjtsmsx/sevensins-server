@@ -578,6 +578,9 @@ def spend_diamonds(state, amount):
     take_free = min(free, amount)
     cur[str(CURRENCY_CASH)] = free - take_free
     cur[str(CURRENCY_CASH_PAID)] = paid - (amount - take_free)
+    # "[Monthly] Spend over 5000 diamonds" -- quest case 2014, counted in diamonds
+    # spent rather than purchases made.
+    bump_quest_counter(state, QUEST_CASE_SPEND_DIAMOND, amount)
     return True
 
 
@@ -708,6 +711,8 @@ QUEST_CASE_GACHA = 13
 # bump_quest_counter). Its rows are also the source of the original server's goods ids;
 # see docs/ECONOMY_GAPS.md.
 QUEST_CASE_BUY_GOODS = 2003
+# "[Monthly] Spend over 5000 diamonds"; counts the diamonds, not the transactions.
+QUEST_CASE_SPEND_DIAMOND = 2014
 
 
 def quest_completed(state, qid):
