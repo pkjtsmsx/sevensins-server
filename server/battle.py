@@ -132,6 +132,45 @@ FULL_EPS = SCV_FULL - 1e-6
 # driven (battle_start / on_counter), not fired by an active use -- see battle_effects.
 SKILLTYPE_PASSIVE = 4
 
+# Test probe for the bloodpact aura. SEVENSINS_BLOOD_EFFECT accepts either
+#   "series,rank"   -- force one pair on every unit, or
+#   "spread[,rank]" -- give each unit a DIFFERENT series, so one battle shows many at
+#                      once instead of a restart per candidate.
+# Unset means the shipped behaviour (no aura). See Unit.blood_effect.
+BE_SERIES_MAX = 15                      # fx_state_1..15 in art_fx_prefab_states
+
+# **The class aura.** Series 101 is not a bloodpact family -- it is the per-CLASS aura,
+# and the only two ranks that exist are 001 and 005, matching exactly the two special
+# jobs. `fx_state_101_001` is byte-for-byte the parts of the artist's `fx_state_dark_004`
+# (butterfly / groundDark / groundring / smokeDark_ground) and `fx_state_101_005` those
+# of `fx_state_sacred_004` (groundRing / light_center / smallStar) -- but only the 101_*
+# pair carries an FxBloodPact component, so only they are loadable. That is why the aura
+# shows on Abyssal-Prime-class (job 1) and Solar-Prime-class (job 5) casts and nothing
+# else. DesignCharRow._job is 2/3/4 for the ordinary STR/AGI/TEC classes.
+CLASS_AURA_SERIES = 101
+CLASS_AURA_JOBS = (1, 5)
+
+
+def _parse_be(raw):
+    raw = (raw or "").strip().lower()
+    if not raw:
+        return None
+    parts = raw.split(",")
+    if parts[0] == "spread":
+        # spread[,rank[,start]] -- `start` walks the window, since a field of 8-9 units
+        # cannot show all 15 series at once.
+        rank = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 3
+        start = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
+        return ("spread", max(1, rank), max(1, start))
+    try:
+        a, b = (int(x) for x in parts)
+        return (a, b) if a >= 1 and b >= 1 else None
+    except (ValueError, TypeError):
+        return None
+
+
+_BE_OVERRIDE = _parse_be(os.environ.get("SEVENSINS_BLOOD_EFFECT"))
+
 
 def skill_ranks(char_row, limit_with_suit):
     """Per-SLOT skill rank, mirroring CharData.GetCharSkillLimitLvs.
@@ -850,8 +889,40 @@ class Unit:
             # from its intargs. A non-zero value here greys the skill button out.
             "skdic": [[s, cd] for s, cd in zip(self.skills, self.cooldowns)],
             "scv": int(self.scv), "spd": self.spd, "lv": self.lv, "atk": self.atk,
-            "star": self.star, "plus": 0, "be1": 0, "be2": 0,
+            "star": self.star, "plus": 0,
+            # be1/be2 are LightBattleChar.BloodEffectSerise / BloodEffectRank: the
+            # persistent bloodpact aura at the unit's feet. BattleUnit.BloodEffect
+            # (0x1979D98, called from StartState.OnEnter and HandleWaveBegin) requires
+            # BOTH to be >= 1, then clones the prefab named
+            # `String.Format("fx_state_{0}_{1:D3}", serise, rank)` and parents its
+            # FxBloodPact component to the doll. Publishing 0/0 is why no unit has ever
+            # shown one. `art_fx_prefab_states_*.ab` carries series 1..15 x ranks 1..4,
+            # and there are exactly 15 bloodpact families (item `_action` 131..133).
+            **dict(zip(("be1", "be2"), self.blood_effect())),
         }
+
+    def blood_effect(self):
+        """(series, rank) for the bloodpact aura, or (0, 0) for none.
+
+        SEVENSINS_BLOOD_EFFECT="series,rank" forces a value on every unit -- a probe for
+        confirming the wire contract before the real derivation is settled, since which
+        field feeds `rank` (pact rarity vs its level band) is still unproven.
+        """
+        if not _BE_OVERRIDE:
+            if self.job in CLASS_AURA_JOBS:
+                # rank IS the job here, not a growth stage -- see CLASS_AURA_SERIES.
+                return (CLASS_AURA_SERIES, self.job)
+            return (0, 0)
+        series, rank, start = (_BE_OVERRIDE + (1,))[:3]
+        if series == "spread":
+            # Order keys are sequential decimal strings from "101", so this walks the
+            # field 1,2,3... and wraps -- every unit on screen shows a different series.
+            try:
+                n = int(self.order) - 101
+            except (TypeError, ValueError):
+                n = self.index
+            return ((start - 1 + n) % BE_SERIES_MAX + 1, rank)
+        return (series, rank)
 
     def _attributes(self, current):
         """BattleAttributeData. Keys from the 2.2.4 JsonProperty thunks
