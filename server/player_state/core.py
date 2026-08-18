@@ -34,6 +34,41 @@ ENERGY_ACTION, ENERGY_ARENA, ENERGY_ARENA_SP, ENERGY_ARENA_TEAM = 1, 16, 17, 18
 # CurrencyType: Cash=1, Mira=16, RealCash=32, DMMCash=48, GuildPoints=64
 CUR_CASH, CUR_MIRA, CUR_REAL, CUR_DMM, CUR_GUILD = 1, 16, 32, 48, 64
 
+# ---- starting balances -----------------------------------------------------
+# **These were 999,999 diamonds and 999/999 stamina, and that was the whole of the
+# "gem and stamina rewards do not increase" report (2026-08-18).** The grants always
+# landed -- the account files proved it -- but a +20 gem reward against a seven-figure
+# balance is invisible, and a stamina reward on an already-full bar has nowhere to go.
+# The plumbing was never the problem; the seed was.
+#
+# **The stamina cap is `5 * level + 10`, and that is the CLIENT's own number, not ours.**
+# `PanelPlayerLevelUpResult.SetNewLevelInfo` (0x1592838) computes it inline --
+# `v18 = 5 * v19 + 10` where v19 is the new level -- and prints it on the rank-up popup.
+# `Energy` has no SetEnergyCap at all, so the cap the bar shows always comes from our
+# `energy_cap`; if the two disagree, the popup announces one number and the bar shows
+# another. That is the same defect class as everything else in this report, so the
+# server matches the client rather than inventing a curve.
+#
+#     lv 1 -> 15    lv 2 -> 20    lv 10 -> 60    lv 28 -> 150    lv 200 -> 1010
+#
+# 15 at level 1 is three runs of stage 1-1 (`_ap` 5), which is a sane tutorial budget,
+# and the first rank-up shows "20" -- which is very likely the remembered "+20 stamina".
+STARTER_DIAMONDS = 3000
+STAMINA_CAP_BASE = 10             # the +10 in the client's formula
+STAMINA_CAP_PER_LEVEL = 5
+
+
+def stamina_cap_for_level(lv):
+    """The Action-energy cap at account level `lv`, bounded by the design ceiling.
+
+    Mirrors PanelPlayerLevelUpResult.SetNewLevelInfo exactly. `energy.json` supplies
+    only the absolute ceiling (`_cap_max` 99999) and the 180s autofill interval -- no
+    per-level table ships, which is why the client hardcodes the curve.
+    """
+    ceiling = int((bt.dd.row("energy", ENERGY_ACTION) or {}).get("_cap_max") or 99999)
+    return min(STAMINA_CAP_BASE + STAMINA_CAP_PER_LEVEL * max(1, int(lv)), ceiling)
+
+
 PLAYER_LEVEL_UID = "player_level"      # LevelDefine..cctor, LevelType.Player = 1
 
 # How many saved teams the client expects. PanelCharacterList.OnPreviousClick wraps
@@ -94,9 +129,10 @@ def _default(player_id):
     return {
         "player_id": player_id,
         "name": f"guest{player_id}",
-        "currency": {str(CUR_CASH): 999999, str(CUR_MIRA): 99999,
+        "currency": {str(CUR_CASH): STARTER_DIAMONDS, str(CUR_MIRA): 99999,
                      str(CUR_REAL): 9999, str(CUR_DMM): 0, str(CUR_GUILD): 0},
-        "energy": {str(ENERGY_ACTION): {"energy": 999, "cap": 999},
+        "energy": {str(ENERGY_ACTION): {"energy": stamina_cap_for_level(1),
+                                        "cap": stamina_cap_for_level(1)},
                    str(ENERGY_ARENA): {"energy": 99, "cap": 99},
                    str(ENERGY_ARENA_SP): {"energy": 99, "cap": 99},
                    str(ENERGY_ARENA_TEAM): {"energy": 99, "cap": 99}},
@@ -165,6 +201,49 @@ def _default(player_id):
         # (the client greys the button out until then; we do not re-check it).
         "guild": None,
     }
+
+
+# Bump to re-run the balance migration on every account.
+BALANCE_REVISION = 1
+
+
+def migrate_starting_balances(state):
+    """One-time: bring an account seeded with the old balances down to the real ones.
+
+    -> a description of what changed, or "". Deliberately NOT in `_default`: `load`
+    setdefaults every default key into existing saves, so a flag seeded there would be
+    backfilled onto old accounts and this would never run.
+
+    **This LOWERS a balance, so it copies the account first.** 999,999 diamonds is not
+    progress anyone earned -- it was our seed -- but the file also holds a roster, and
+    a bad migration must never be the thing that eats it.
+    """
+    if int(state.get("balance_rev", 0)) >= BALANCE_REVISION:
+        return ""
+    notes = []
+    key = str(CUR_CASH)
+    have = int(state["currency"].get(key, 0))
+    if have > STARTER_DIAMONDS:
+        notes.append(f"diamonds {have} -> {STARTER_DIAMONDS}")
+    lv = int((state.get("level") or {}).get("lv", 1))
+    cap = stamina_cap_for_level(lv)
+    slot = state["energy"].setdefault(str(ENERGY_ACTION), {"energy": 0, "cap": 0})
+    old_cap, old_energy = int(slot.get("cap", 0)), int(slot.get("energy", 0))
+    if old_cap != cap or old_energy > cap:
+        notes.append(f"stamina {old_energy}/{old_cap} -> {min(old_energy, cap)}/{cap}")
+    if notes:
+        src = path_for(state["player_id"])
+        if os.path.isfile(src):
+            try:
+                shutil.copy2(src, f"{src}.bak-prebalance")
+            except Exception:                                  # noqa: BLE001
+                pass
+        if have > STARTER_DIAMONDS:
+            state["currency"][key] = STARTER_DIAMONDS
+        slot["cap"] = cap
+        slot["energy"] = min(old_energy, cap)
+    state["balance_rev"] = BALANCE_REVISION
+    return "; ".join(notes)
 
 
 def path_for(player_id):
@@ -366,6 +445,21 @@ def grant_player_xp(state, add):
         lv["xp"] -= cap
         lv["lv"] = int(lv["lv"]) + 1
     lv["xp_cap"] = player_level_xp_cap(int(lv["lv"]))
+    # A level-up raises the stamina ceiling. Without this the cap stays at whatever it
+    # was seeded with and the reward for levelling is invisible all over again -- the
+    # same failure as the seed itself.
+    slot = state["energy"].setdefault(str(ENERGY_ACTION), {"energy": 0, "cap": 0})
+    was = int(slot.get("cap", 0))
+    slot["cap"] = stamina_cap_for_level(int(lv["lv"]))
+    if int(lv["lv"]) != old_lv:
+        # **Refilling on rank-up is OUR choice, not recovered.** The client's popup
+        # only prints the new cap (see stamina_cap_for_level); nothing says whether the
+        # bar is topped up. A rank-up that raised a ceiling and gave nothing to put in
+        # it would announce a reward and hand over none, which is the exact shape of
+        # the bug this whole change came out of. Never LOWERS a bar that is over cap.
+        slot["energy"] = max(int(slot.get("energy", 0)), slot["cap"])
+    elif was != slot["cap"]:
+        slot["energy"] = int(slot.get("energy", 0))
     return int(lv["lv"]) != old_lv, old_lv, int(lv["lv"])
 
 

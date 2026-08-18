@@ -1513,6 +1513,14 @@ def handle(conn, addr):
                 # CRI 9990, i.e. a displayed **CRI+999.0%**. Those pieces are already
                 # on disk and equipped, so fixing the roll is not enough; swap the
                 # impossible rows for same-attribute ones from the right group.
+                # 999,999 diamonds and a permanently-full stamina bar were the whole
+                # of the "rewards do not increase" report: the grants landed, they were
+                # just invisible against the seed. Bring old accounts onto the real
+                # starting balances (backs the file up first -- it lowers a value).
+                rebalanced = ps.migrate_starting_balances(state)
+                if rebalanced:
+                    ps.save(state)
+                    log(f"    -> starting balances migrated: {rebalanced}")
                 repaired = ps.repair_equipment_rolls(state)
                 if repaired:
                     ps.save(state)
