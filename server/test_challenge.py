@@ -84,11 +84,12 @@ def check_weekday_wiring():
     check("WeekdayGroup is long enough to index with it",
           len(stages["weekday"]) >= wd, str(stages["weekday"]))
     check("  ...and the group it names is in StagesDic",
-          str(group) in stages["g"], f"{group} not in {sorted(stages['g'])}")
+          str(group) in stages["stages"],
+          f"{group} not in {sorted(stages['stages'])}")
 
     # This is the client's own arithmetic, transcribed from OnChallengeClick.
     for difficulty in range(1, ch.CHALLENGE_DIFFICULTIES + 1):
-        client_side = stages["g"][str(group)][difficulty - 1]
+        client_side = stages["stages"][str(group)][difficulty - 1]
         server_side = ch.challenge_stage_id(wd, difficulty)
         check(f"server and client agree on the stage at difficulty {difficulty}",
               client_side == server_side, f"{client_side} vs {server_side}")
@@ -97,20 +98,25 @@ def check_weekday_wiring():
 def check_stages_json():
     st = fresh()
     s = json.loads(ch.challenge_stages_json(st))
-    check("ChallengeStages uses curr_key/weekday/g/scores",
-          set(s) == {"curr_key", "weekday", "g", "scores"}, str(set(s)))
+    # **`stages`, not `g`.** Spelling this wrong left StagesDic NULL (the client
+    # pre-allocates ChallengeStages and populates it, and that class has no ctor
+    # defaults) and InitHome dereferences it with no null check -- a silent NRE that
+    # opened the Guild Raid panel completely blank. Nothing logs it.
+    check("ChallengeStages uses curr_key/weekday/stages/scores",
+          set(s) == {"curr_key", "weekday", "stages", "scores"}, str(set(s)))
+    check("  ...and NOT the mis-read 'g' key", "g" not in s, str(sorted(s)))
     # `scores` is one entry per TRY (the panel's 1st/2nd/3rd Try rows), not per
     # difficulty -- live footage of the Guild Raid screen settles it.
     check("an unplayed day reports no try scores", s["scores"] == [], str(s["scores"]))
     check("  ...and the list can never exceed the daily tryouts",
           len(s["scores"]) <= ps.CHALLENGE_MAX_TIMES, str(s["scores"]))
-    check("all seven groups are present", len(s["g"]) == 7, str(sorted(s["g"])))
+    check("all seven groups are present", len(s["stages"]) == 7, str(sorted(s["stages"])))
     # `[difficulty - 1]` with no fallback: a short list picks the wrong boss or throws.
     check("every group lists all four difficulties",
-          all(len(v) == ch.CHALLENGE_DIFFICULTIES for v in s["g"].values()),
-          str({k: len(v) for k, v in s["g"].items()}))
+          all(len(v) == ch.CHALLENGE_DIFFICULTIES for v in s["stages"].values()),
+          str({k: len(v) for k, v in s["stages"].items()}))
     check("  ...with no missing stage ids",
-          all(all(i for i in v) for v in s["g"].values()))
+          all(all(i for i in v) for v in s["stages"].values()))
     check("curr_key is a stable week name", s["curr_key"] == ch.challenge_key(),
           s["curr_key"])
 

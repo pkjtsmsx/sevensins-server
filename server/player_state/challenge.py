@@ -138,7 +138,21 @@ def challenge_stage_id(weekday, difficulty):
 def challenge_stages_json(state, now=None):
     """ChallengeStages, strargs[0] of the sync reply (784).
 
-    Wire keys off the [JsonProperty] thunks: curr_key / weekday / g / scores.
+    Wire keys off the [JsonProperty] thunks: **curr_key / weekday / stages / scores**.
+
+    `StagesDic` is `"stages"`, NOT `"g"`. Getting that wrong is what made the Guild
+    Raid panel open blank for a day: `SyncChallengeDataReply` PRE-ALLOCATES an empty
+    ChallengeStages and lets Newtonsoft populate it, and ChallengeStages has no ctor
+    defaults -- so a key we spell wrong leaves that field **null** rather than empty,
+    and `InitHome` dereferences StagesDic with no null check. The event still
+    dispatches and nothing logs, so it presents as a silent NullReferenceException
+    inside a panel that otherwise looks fine.
+
+    The wrong key came from an extraction helper that reads the first string ref in the
+    attribute thunk. For a field carrying BOTH [JsonProperty] and [JsonConverter] that
+    can land on the converter instead of the property name -- which is why every such
+    field must be read from the decompiled thunk itself. `stages` was the only one
+    mis-read here; curr_key/weekday/scores were confirmed correct the same way.
 
     `weekday` (WeekdayGroup) must have at least `StageSyncData.weekday` entries and
     each `g` list at least CHALLENGE_DIFFICULTIES, or OnChallengeClick and InitHome
@@ -160,7 +174,7 @@ def challenge_stages_json(state, now=None):
         # Boss N on day N. The design data agrees: `_sort` runs 1..7 across the seven
         # virtue bosses and challenge_reward's `_group` runs 1..7 to match.
         "weekday": list(range(1, CHALLENGE_WEEKDAYS + 1)),
-        "g": groups,
+        "stages": groups,
         # One score per try taken today, in order -- the panel prints them as
         # 1st/2nd/3rd Try and renders "-" for any slot past the end of this list.
         "scores": list(ch.get("today") or [])[:CHALLENGE_TRIES_SHOWN],
