@@ -150,6 +150,39 @@ BE_SERIES_MAX = 15                      # fx_state_1..15 in art_fx_prefab_states
 CLASS_AURA_SERIES = 101
 CLASS_AURA_JOBS = (1, 5)
 
+# Series 1..15 are the 15 BLOODPACT families, in item-id order: 721001 Frenzy ...
+# 722401 Unlaws, so family = (iid // 100) % 100 - 9. Confirmed by matching the numeric
+# prefabs to the artist-named ones by child hierarchy (fx_state_6_004 ==
+# fx_state_eclipse_004, 13 == solar). Ranks 001..004 grow denser with each step
+# (series 6 goes 3 -> 5 -> 12 -> 17 particles).
+BLOODPACT_ID_BASE = 9                   # (iid//100)%100 of the first family, minus 1
+BLOODPACT_AURA_RANKS = 4
+BLOODPACT_LV_MAX = 15                   # player_state.gear.BLOODPACT_MAX_LV
+
+
+def bloodpact_aura(item_id, level):
+    """(series, rank) for a worn bloodpact, or None if it is not one we can render.
+
+    Rank is banded off the pact's LEVEL, so the aura grows as the pact is enhanced --
+    which is what "they grow with each limit break" describes. It is the one part of
+    this not proven against the live game: pact `_rarity` is also 1..4 and would fit
+    the four ranks exactly. Series 101 shows rank is not always a size, so neither
+    reading is safe to assume; change BLOODPACT_RANK_FROM_LEVEL to flip it.
+    """
+    family = (int(item_id) // 100) % 100 - BLOODPACT_ID_BASE
+    if not 1 <= family <= BE_SERIES_MAX:
+        return None
+    if BLOODPACT_RANK_FROM_LEVEL:
+        band = BLOODPACT_LV_MAX / BLOODPACT_AURA_RANKS
+        rank = min(BLOODPACT_AURA_RANKS, int(max(0, level) // band) + 1)
+    else:
+        rank = _clamp(int((dd.row("item", int(item_id)) or {}).get("_rarity") or 1),
+                      1, BLOODPACT_AURA_RANKS)
+    return (family, rank)
+
+
+BLOODPACT_RANK_FROM_LEVEL = True
+
 
 def _parse_be(raw):
     raw = (raw or "").strip().lower()
@@ -761,8 +794,11 @@ class Unit:
     turn order, HP sync) refers to units by this string."""
 
     def __init__(self, order, char_id, team, index, lv=1, star=None, super_star=0,
-                 book_bonus=None, uid="", skill_limit=0):
+                 book_bonus=None, uid="", skill_limit=0, pact_iid=0, pact_lv=0):
         self.order, self.char_id, self.team, self.index = order, char_id, team, index
+        # Worn bloodpact, resolved by player_state.roster (battle never sees the
+        # backpack). Drives the aura -- see blood_effect.
+        self.pact_iid, self.pact_lv = int(pact_iid or 0), int(pact_lv or 0)
         # The roster uid for player units (mobs have none). Only BattleCharData
         # (cmd 601) needs it; light() does not carry it.
         self.uid = uid
@@ -909,9 +945,17 @@ class Unit:
         field feeds `rank` (pact rarity vs its level band) is still unproven.
         """
         if not _BE_OVERRIDE:
+            # Only ONE aura can render -- BloodEffect clones a single prefab per unit --
+            # so these are ordered, not combined. The CLASS aura wins: only 14 casts in
+            # the game have job 1 or 5, while any cast can wear a pact, so the rarer
+            # mark is the one worth showing.
             if self.job in CLASS_AURA_JOBS:
                 # rank IS the job here, not a growth stage -- see CLASS_AURA_SERIES.
                 return (CLASS_AURA_SERIES, self.job)
+            if self.pact_iid:
+                pact = bloodpact_aura(self.pact_iid, self.pact_lv)
+                if pact:
+                    return pact
             return (0, 0)
         series, rank, start = (_BE_OVERRIDE + (1,))[:3]
         if series == "spread":
@@ -1094,7 +1138,8 @@ class Battle:
                 super_star=self.team_super_star or entry.get("super_star") or 0,
                 book_bonus=self.book_bonus, uid=entry.get("uid", ""),
                 skill_limit=(entry.get("limit_book", 0) or 0)
-                + (entry.get("limit_char", 0) or 0))
+                + (entry.get("limit_char", 0) or 0),
+                pact_iid=entry.get("pact_iid", 0), pact_lv=entry.get("pact_lv", 0))
         # enemies keep numbering on from the party, and keep the same numbers across
         # waves so orders stay stable for the whole fight
         self.enemy_order_base = ORDER_BASE + len(char_ids[:MAX_SLOTS])

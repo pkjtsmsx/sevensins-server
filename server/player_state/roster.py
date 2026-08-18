@@ -198,7 +198,31 @@ def battle_team(state, index=0):
         return list(state.get("team", []))
     party = [dict(state["roster"][u], uid=u) for u in slots
              if u and u in state["roster"]]
+    for e in party:
+        _annotate_bloodpact(state, e)
     return party or list(state.get("team", []))
+
+
+def _annotate_bloodpact(state, entry):
+    """Resolve the cast's worn bloodpact onto the party entry, for the battle aura.
+
+    battle.Battle never sees the backpack, and the equips_list holds only a storage-4
+    UID -- so the item id and level have to be looked up here, where the state is.
+    Keys are consumed by battle.Unit.blood_effect (LightBattleChar be1/be2).
+    """
+    from . import gear
+    from .core import char_equips
+    owned = {e.get("uid"): e for e in
+             (state.get("backpack") or {}).get(str(gear.BP_STORAGE_BLOODPACT), {}).values()}
+    slots = char_equips(entry)
+    for i in gear.bloodpact_slots():
+        rec = owned.get(slots[i]) if i < len(slots) and slots[i] else None
+        if rec:
+            entry["pact_iid"] = int(rec.get("iid") or 0)
+            entry["pact_lv"] = int((rec.get("attr") or {}).get(gear.RUNE_ATTR_LEVEL, 0))
+            return
+    entry.pop("pact_iid", None)
+    entry.pop("pact_lv", None)
 
 
 def set_formation(state, index, uids, support):
