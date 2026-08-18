@@ -64,6 +64,12 @@ CHALLENGE_WEEKDAYS = 7
 # format(text 17001, backpack.GetItemCount(22), MaxChallengeTimes).
 CHALLENGE_PASS_ITEM = 22
 CHALLENGE_MAX_TIMES = 3             # PanelGuildWeekly.ConstantDefine.MaxChallengeTimes
+# **`TodayScores` is one entry per TRY, not per difficulty.** Live footage of the Guild
+# Raid panel shows "My Record: 1st Try / 2nd Try / 3rd Try" over a "Daily Tryouts: 2/3"
+# counter, and `_lbHomePersonalPartialScore` is the List<UILabel> those three rows are.
+# An earlier version sent four zeros keyed to the four difficulties, which put the wrong
+# number under each label (and a fourth nobody reads).
+CHALLENGE_TRIES_SHOWN = CHALLENGE_MAX_TIMES
 
 # DesignChallengeForm.OnParsed buckets challenge_reward rows by `_rewardType`
 # (CMPs at 0x19c5190/98/a0) into three dictionaries keyed by int.Parse(_group), and
@@ -155,7 +161,9 @@ def challenge_stages_json(state, now=None):
         # virtue bosses and challenge_reward's `_group` runs 1..7 to match.
         "weekday": list(range(1, CHALLENGE_WEEKDAYS + 1)),
         "g": groups,
-        "scores": list(ch.get("today") or []),
+        # One score per try taken today, in order -- the panel prints them as
+        # 1st/2nd/3rd Try and renders "-" for any slot past the end of this list.
+        "scores": list(ch.get("today") or [])[:CHALLENGE_TRIES_SHOWN],
     }, separators=(",", ":"))
 
 
@@ -172,11 +180,11 @@ def _challenge(state, now=None):
         # Scores and reward brackets are DAILY (rewardType 3 and 5 are both "daily"
         # tables); only the week key outlives the 4AM rollover.
         ch["day"] = period
-        ch["today"] = [0] * CHALLENGE_DIFFICULTIES
+        ch["today"] = []
         ch["best"] = 0
         ch["paid"] = 0
         ch["runs"] = 0
-    ch.setdefault("today", [0] * CHALLENGE_DIFFICULTIES)
+    ch.setdefault("today", [])
     ch.setdefault("best", 0)
     ch.setdefault("paid", 0)
     ch.setdefault("runs", 0)
@@ -279,12 +287,8 @@ def finish_challenge(state, damage, now=None):
     bonus = damage * (difficulty - 1) // 4
     total = damage + bonus
 
-    today = ch["today"]
-    while len(today) < CHALLENGE_DIFFICULTIES:
-        today.append(0)
-    ix = difficulty - 1
-    if total > today[ix]:
-        today[ix] = total
+    # Append this try's score; the panel lists them in the order they were taken.
+    ch.setdefault("today", []).append(total)
     prev_best = int(ch.get("best", 0))
     if total > prev_best:
         ch["best"] = total

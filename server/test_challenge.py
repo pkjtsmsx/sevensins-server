@@ -99,6 +99,11 @@ def check_stages_json():
     s = json.loads(ch.challenge_stages_json(st))
     check("ChallengeStages uses curr_key/weekday/g/scores",
           set(s) == {"curr_key", "weekday", "g", "scores"}, str(set(s)))
+    # `scores` is one entry per TRY (the panel's 1st/2nd/3rd Try rows), not per
+    # difficulty -- live footage of the Guild Raid screen settles it.
+    check("an unplayed day reports no try scores", s["scores"] == [], str(s["scores"]))
+    check("  ...and the list can never exceed the daily tryouts",
+          len(s["scores"]) <= ps.CHALLENGE_MAX_TIMES, str(s["scores"]))
     check("all seven groups are present", len(s["g"]) == 7, str(sorted(s["g"])))
     # `[difficulty - 1]` with no fallback: a short list picks the wrong boss or throws.
     check("every group lists all four difficulties",
@@ -108,6 +113,19 @@ def check_stages_json():
           all(all(i for i in v) for v in s["g"].values()))
     check("curr_key is a stable week name", s["curr_key"] == ch.challenge_key(),
           s["curr_key"])
+
+
+def check_try_scores_accumulate():
+    """My Record shows 1st / 2nd / 3rd Try, so `scores` grows one entry per run."""
+    st = fresh()
+    got = []
+    for _ in range(ps.CHALLENGE_MAX_TIMES):
+        ch.start_challenge(st, 2)
+        _d, _b, total, _p = ch.finish_challenge(st, 100000)
+        got.append(total)
+        js = json.loads(ch.challenge_stages_json(st))
+        check(f"after {len(got)} run(s) the panel has {len(got)} try score(s)",
+              js["scores"] == got, f"{js['scores']} vs {got}")
 
 
 def check_sync_shape():
@@ -199,7 +217,8 @@ def check_rank_json():
 
 def main():
     for fn in (check_content_exists, check_weekday_wiring, check_stages_json,
-               check_sync_shape, check_fight_and_score, check_daily_roll,
+               check_sync_shape, check_try_scores_accumulate,
+               check_fight_and_score, check_daily_roll,
                check_rank_json):
         print(f"\n{fn.__name__}:")
         fn()
