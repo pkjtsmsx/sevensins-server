@@ -370,28 +370,72 @@ STARSHARD_SETS_MWF = (201, 205, 206, 208)     # Fortitude, Nightshade, Mystery, 
 STARSHARD_SETS_TTSS = (207, 202, 203, 204)    # Defender, Chaos, Hawkeye, Slayer
 STARSHARD_TEMPLE_SLOTS = tuple(range(1, 7))   # all six slots can drop
 STARSHARD_DROPS_PER_CLEAR = 2                 # what the live results panel shows
-# Ladder shape. BOTH axes are rolled, never granted outright -- a hard band made every
-# stage inside it identical, so there was no reason to push from ST-1 to ST-8.
-#
-# STAR slides with depth: each stage rolls over a triangular window centred on
-# 1 + depth*(MAX_STAR-1), so the centre creeps up stage by stage and the EXPECTED star
-# rises at every one of the 41. Deep stages stop wasting the player's time with 1-stars
-# and early ones can still surprise.
-STARSHARD_MAX_STAR = 5
-STARSHARD_STAR_SPREAD = 2.0       # how many stars either side of centre stay possible
+STARSHARD_MAX_STAR = 6                        # ★1..★6 shard items all exist
 STARSHARD_MAX_RANK = 4                        # 0..4 = N / R / SR / UR / LR
-# **RARITY is NOT tied to depth.** Every rank can drop on every stage, on one fixed
-# table -- so a lucky ST-1 run can hand over an LR, and a late stage still sees plain
-# ones. Deeper stages pay off in the STAR, which is the axis the ladder moves.
-# Weights are percentages over N / R / SR / UR / LR and are the one knob to turn here.
-STARSHARD_RANK_CHANCE = ((40, 0), (30, 1), (20, 2), (8, 3), (2, 4))
 STARSHARD_SET_NAMES = {201: "Endearment", 202: "Chaos", 203: "Hawkeye", 204: "Slayer",
                        205: "Nightshade", 206: "Mystery", 207: "Defender",
                        208: "Devotee"}
 
+# ---- the drop ladder, out of the stage rows themselves ----------------------
+# **`_itemrank_str` is really `box_rank`** -- the constant it is read through is
+# `_FIELD_ITEMRANK_STR = "box_rank"` (dump.cs:497328). An earlier version of this file
+# dismissed it as "dead data" because `DesignStageRow` has no accessor for it, and
+# invented a ladder instead: star sliding 1..5 across the 41 floors on a triangular
+# window, with rarity deliberately NOT tied to depth.
+#
+# That reasoning had it backwards. The client never reads the field precisely BECAUSE
+# the drop table was server-side -- which makes `box_rank` the surviving record of what
+# the live server dropped, not junk. Reported from play 2026-08-18: our layout does not
+# match the real one.
+#
+# It is "<max>,<min>", each a two-digit `star*10 + rank` code, and the two digits bound
+# their axes independently. Across the whole pack the field is a generic [max, min]
+# pair (book 0 "21,11", book 1 "10,4", books 21-24 "2,1"); only the Temple varies it
+# per stage, and there it walks:
+#
+#     ST-1..5   31,11     ★1-3  rank R          ST-26..28  42,11    ★1-4  rank R-SR
+#     ST-6..10  32,11     ★1-3  rank R-SR       ST-29..31  43,11    ★1-4  rank R-UR
+#     ST-11..15 33,11     ★1-3  rank R-UR       ST-32..37  44,11    ★1-4  rank R-LR
+#     ST-16..20 34,11     ★1-3  rank R-LR       ST-38..40  52..54   ★1-5  rank SR-LR
+#     ST-21..25 41,11     ★1-4  rank R          ST-41      60,11    ★1-6  any rank
+#
+# So the star CEILING climbs ★3 -> ★6 and the rank ceiling re-walks R -> LR inside each
+# star band, while the floor stays ★1 R for every floor. Two things our invented ladder
+# got wrong and this fixes: ★6 was unreachable (STARSHARD_MAX_STAR was 5), and rarity
+# was flat across all 41 floors when the data ties it to depth.
+#
+# ST-41's max rank digit is **0**, which is out of range for a ceiling. It is the one
+# anomaly (a lv457, 1-AP stage), and is read as "no rank cap" -- the top floor offering
+# every rank is the only reading that is not a downgrade from ST-40.
+STARSHARD_RANK_NO_CAP = 0
+
+
+def _box_rank_bounds(stage_id):
+    """-> ((min_star, max_star), (min_rank, max_rank)) from the stage's `box_rank`."""
+    row = dd.row("stage", int(stage_id)) or {}
+    parts = [int(x) for x in str(row.get("_itemrank_str") or "").split(",") if x.strip()]
+    if len(parts) < 2:
+        return None
+    hi, lo = parts[0], parts[1]
+    lo_star, lo_rank = divmod(lo, 10)
+    hi_star, hi_rank = divmod(hi, 10)
+    if hi_rank == STARSHARD_RANK_NO_CAP:
+        hi_rank = STARSHARD_MAX_RANK
+    lo_star = max(1, min(lo_star, STARSHARD_MAX_STAR))
+    hi_star = max(lo_star, min(hi_star, STARSHARD_MAX_STAR))
+    lo_rank = max(0, min(lo_rank, STARSHARD_MAX_RANK))
+    hi_rank = max(lo_rank, min(hi_rank, STARSHARD_MAX_RANK))
+    return (lo_star, hi_star), (lo_rank, hi_rank)
+
 
 def starshard_sets_for_day(when=None):
-    """The four sets the Temple offers today. Monday=0 .. Sunday=6."""
+    """The four sets the Temple offers today. Monday=0 .. Sunday=6.
+
+    Confirmed against the in-game "Starshard Set" banner: MON/WED/FRI are Fortitude,
+    Nightshade, Mystery and Devotee; TUE/THU/SAT/SUN are Defender, Chaos, Hawkeye and
+    Slayer. ("Fortitude" is the current EN name for the set the pack still calls
+    Endearment, 201 -- the banner's "Set(2): HP+19%" matches `equip_suit` row 1.)
+    """
     import datetime as _dt
     day = (when or _dt.date.today()).weekday()
     return STARSHARD_SETS_MWF if day in (0, 2, 4) else STARSHARD_SETS_TTSS
@@ -400,12 +444,8 @@ def starshard_sets_for_day(when=None):
 def starshard_temple_depth(stage_id):
     """-> 0.0..1.0 through the Temple (ST-1 .. ST-41), or None if not a Temple stage.
 
-    Keyed on the stage's ORDER within the temple (ST-1..ST-41, from `_sort`), not on
-    `_itemrank_str`. That field looks like a ladder (31,32,…,60) and was tried first, but
-    it is dead data -- `DesignStageRow` has no accessor for it, so the client never reads
-    it -- and taken literally it puts ★6 PLAIN on the final stage, i.e. the weakest rank
-    on the hardest content. Stage order is the honest signal and gives a ladder we can
-    state plainly. See docs/BATTLE_SKILL_PLAN.md; this is our design, not a recovery.
+    Kept for callers that want a simple progress fraction; the DROP ladder no longer
+    rides on it (see _box_rank_bounds).
     """
     row = dd.row("stage", int(stage_id)) or {}
     if row.get("_book") != STARSHARD_BOOK:
@@ -415,17 +455,34 @@ def starshard_temple_depth(stage_id):
 
 
 def starshard_star_weights(stage_id):
-    """-> [(weight, star), ...] for a Temple stage: the sliding window described above."""
-    depth = starshard_temple_depth(stage_id)
-    if depth is None:
+    """-> [(weight, star), ...] for a Temple stage.
+
+    The floor is flat ★1 across the whole Temple, so a uniform roll over the band would
+    make ST-40 feel identical to ST-1 for a player who only notices the common case.
+    Weight rises linearly toward the ceiling instead: the band's top star is the most
+    likely outcome and ★1 stays possible but rare, which is what a rising ceiling is
+    for.
+    """
+    row = dd.row("stage", int(stage_id)) or {}
+    if row.get("_book") != STARSHARD_BOOK:
         return []
-    centre = 1.0 + depth * (STARSHARD_MAX_STAR - 1)
-    out = []
-    for star in range(1, STARSHARD_MAX_STAR + 1):
-        weight = 1.0 - abs(star - centre) / STARSHARD_STAR_SPREAD
-        if weight > 0:
-            out.append((weight, star))
-    return out
+    bounds = _box_rank_bounds(stage_id)
+    if not bounds:
+        return []
+    (lo, hi), _ranks = bounds
+    return [(float(star - lo + 1), star) for star in range(lo, hi + 1)]
+
+
+def starshard_rank_weights(stage_id):
+    """-> [(weight, rank), ...]: the same shape for rarity, which the data DOES tie to
+    depth (the old table was one flat set of odds on every floor)."""
+    bounds = _box_rank_bounds(stage_id)
+    if not bounds:
+        return []
+    _stars, (lo, hi) = bounds
+    # Rarity is the scarce axis: weight FALLS toward the ceiling, so the ceiling rising
+    # widens what is possible without making LR routine.
+    return [(float(hi - rank + 1), rank) for rank in range(lo, hi + 1)]
 
 
 def starshard_typical_star(stage_id):
@@ -446,30 +503,26 @@ STARSHARD_TEMPLE_COUNT = 41       # ST-1..ST-41; set below from the pack at impo
 def starshard_temple_pool(stage_id, when=None):
     """Every shard a Temple stage can drop today -> [(item_id, slot), ...], or [].
 
-    WHICH shard drops is not recorded anywhere and the client does not know either: it
-    asks the server for drop previews (StageRpc GetDrops 8 -> 25). Temple drop tables
-    were live-ops like every other stage's, so the ladder here is OUR design:
+    The client does not know the answer either: it asks the server for drop previews
+    (StageRpc GetDrops 8 -> 25). The band comes from the stage's own `box_rank` (see
+    _box_rank_bounds), the set from today's rotation off the in-game banner, and the
+    slot is any of the six.
 
-      * star rises 1..5 across ST-1..ST-41 (~8 stages a band);
-      * the rarity FLOOR rises N -> LR over the same run, and each shard rolls at the
-        floor or up to two ranks above it (STARSHARD_RANK_ROLL);
-      * the set is one of the four on today's rotation, the slot is any of the six.
+    **The WHOLE band is listed, deliberately.** Capping it to the top few stars was
+    tried and is a lie: the floor stays ★1 all the way down the Temple, so a deep floor
+    really can pay a ★1 and a truncated preview under-reports it. On the deepest floors
+    that is 6 stars x 4 sets = 24 icons, which is a lot -- but the alternative is Drop
+    Info disagreeing with the payout, which is the exact drift the preview/payout check
+    in test_battle_effects.py exists to catch (and did catch, here).
 
-    Only the SHAPE is evidence-backed: at least one shard or the client hangs, two per
-    clear per live footage, and the eight sets / day rotation off the in-game banner.
+    Rank is not split out: every rank in the band can drop, so no variant is "the"
+    answer and the base icon stands for the set.
     """
     stars = starshard_star_weights(stage_id)
     if not stars:
         return []
-    # One icon per (STAR, set) the stage can actually roll. The star window is at most
-    # three wide, so this is 8-12 icons -- honest without becoming unreadable. Listing
-    # the raw pool instead would be 4 sets x 6 slots x 3 stars x 5 ranks, which is not a
-    # preview; and naming a single star would under-report a stage that rolls three.
-    #
-    # RANK is deliberately not split out: every rank drops on every stage, so no variant
-    # is "the" answer and the base icon stands for the set.
     pool = []
-    for _weight, star in sorted(stars, key=lambda x: x[1]):
+    for star in sorted({star for _w, star in stars}):
         for element in starshard_sets_for_day(when):
             icons = starshard_set_icon(element, star)
             if icons and (icons[0], 0) not in pool:
@@ -477,37 +530,40 @@ def starshard_temple_pool(stage_id, when=None):
     return pool
 
 
+def _weighted(rng, pairs):
+    """Pick a value from [(weight, value), ...]."""
+    total = sum(w for w, _v in pairs)
+    roll = rng.random() * total
+    for weight, value in pairs:
+        if roll < weight:
+            return value
+        roll -= weight
+    return pairs[-1][1]
+
+
 def starshard_temple_drops(stage_id, rng=None, when=None):
     """[RuneDrop, ...] a Temple clear actually pays: STARSHARD_DROPS_PER_CLEAR shards,
-    each rolling its own set, slot and rank."""
+    each rolling its own set, slot, star and rank.
+
+    Star AND rank both come from the stage's own `box_rank` band now; the rank used to
+    be one flat table shared by all 41 floors, which is what made deep runs feel the
+    same as shallow ones.
+    """
     import random as _r
     rng = rng or _r
     stars = starshard_star_weights(stage_id)
-    if not stars:
+    ranks = starshard_rank_weights(stage_id)
+    if not stars or not ranks:
         return []
     sets = starshard_sets_for_day(when)
-    total = sum(w for w, _r in STARSHARD_RANK_CHANCE)
-    star_total = sum(w for w, _s in stars)
     # Distinct slots, so the two candidates are a real choice rather than near-duplicates
     # -- the live panel shows a slot I next to a slot II.
     slots = list(STARSHARD_TEMPLE_SLOTS)
     rng.shuffle(slots)
     out = []
     for slot in slots[:STARSHARD_DROPS_PER_CLEAR]:
-        roll = rng.randrange(total)
-        rank = 0
-        for weight, r in STARSHARD_RANK_CHANCE:
-            if roll < weight:
-                rank = r
-                break
-            roll -= weight
-        sroll = rng.random() * star_total
-        star = stars[-1][1]
-        for weight, sv in stars:
-            if sroll < weight:
-                star = sv
-                break
-            sroll -= weight
+        star = _weighted(rng, stars)
+        rank = _weighted(rng, ranks)
         item_id = rng.choice(sets) * 1000 + slot * 100 + rank * 10 + star
         if not dd.row("item", item_id):
             continue                 # never hand out an id the client cannot draw

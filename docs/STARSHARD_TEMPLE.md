@@ -71,44 +71,79 @@ one on screen.
 `_book == 2` — exactly the 41 stages under dmap root 40011 and nothing else in the pack.
 Use that, not a stage list.
 
-## The drop ladder — OUR design
+## The drop ladder — from `box_rank`
 
-Not recovered. No form maps a Temple stage to shard drops, `ItemsRank` is empty on all
-41, and `DesignStageRow` has **no accessor for `_itemrank_str`** — the client never reads
-it, and asks the server for drop previews (`GetDrops` 8 → 25). Temple drop tables were
-live-ops like every other stage's.
+**Corrected 2026-08-18** after a report from play that our layout did not match the live
+game's. The previous version of this section is preserved below the rule, because the
+reasoning that led it astray is worth not repeating.
 
-`_itemrank_str` (31, 32, … 60, ascending with difficulty) was tried as a ladder and
-abandoned: unverifiable, and read literally it puts ★6 **plain** on the final stage.
+`_itemrank_str` is really **`box_rank`** — the constant it is read through is
+`_FIELD_ITEMRANK_STR = "box_rank"` (dump.cs:497328). It is `"<max>,<min>"`, each a
+two-digit `star*10 + rank` code, and the two digits bound their axes independently.
+Across the pack it is a generic pair (book 0 `21,11`, book 1 `10,4`, the dailies `2,1`);
+only the Temple varies it per floor:
 
-What we ship instead — both axes rolled, nothing granted outright:
+| floors | box_rank | stars | ranks |
+|---|---|---|---|
+| ST-1–5 | `31,11` | ★1–★3 | R |
+| ST-6–10 | `32,11` | ★1–★3 | R–SR |
+| ST-11–15 | `33,11` | ★1–★3 | R–UR |
+| ST-16–20 | `34,11` | ★1–★3 | R–LR |
+| ST-21–25 | `41,11` | ★1–★4 | R |
+| ST-26–28 | `42,11` | ★1–★4 | R–SR |
+| ST-29–31 | `43,11` | ★1–★4 | R–UR |
+| ST-32–37 | `44,11` | ★1–★4 | R–LR |
+| ST-38–40 | `52,11`–`54,11` | ★1–★5 | SR–LR |
+| ST-41 | `60,11` | ★1–★6 | any |
 
-* **Star** slides with depth: a triangular window centred on `1 + depth*(MAX_STAR-1)`,
-  `STARSHARD_STAR_SPREAD` wide. Expected star rises at **every one of the 41 stages**
-  (1.33 → 4.67, no plateau), which is the property a hard band lacked — it made all 8
-  stages inside a band identical.
-* **Rarity** is a flat table applied everywhere — N 40 / R 30 / SR 20 / UR 8 / LR 2. A
-  lucky ST-1 can pay an LR; ST-41 still sees plains. Depth buys the star, not the rank.
-* **Sets** are the four on today's rotation. The in-game banner states it: Fortitude,
-  Nightshade, Mystery, Devotee on Mon/Wed/Fri; Defender, Chaos, Hawkeye, Slayer on
-  Tue/Thu/Sat/Sun. **"Fortitude" is the current EN name for the set the pack still calls
-  Endearment (201)** — the banner reads Set(2) HP+19% and `equip_suit` row 1 Endearment
-  is Set(2) HP 190.
+The star ceiling climbs ★3 → ★6 while the rank ceiling **re-walks R → LR inside each
+star band**; the floor stays ★1 R everywhere. That reset is what makes the decode
+believable — as two unrelated numbers it is incoherent, as "each star band re-walks the
+rarity ladder" it is exactly right. Read as a lexicographic `(star, rank)` ceiling it
+never regresses across all 41 floors.
+
+* **Star** is weighted toward the ceiling of the floor's band (linear), so the band's
+  top star is the likely outcome and ★1 stays possible but rare.
+* **Rarity** is weighted toward the floor of the band, so a rising ceiling widens what
+  is possible without making LR routine. **It is tied to depth**, which the previous
+  design explicitly rejected.
+* **Sets** are the four on today's rotation — see the banner note below. Unchanged and
+  confirmed correct.
 * **Slots**: the two candidates take distinct slots, so the choice is a real one.
+
+ST-41's max rank digit is `0`, out of range for a ceiling. It is the one anomaly (a
+lv457, 1-AP stage) and is read as **no rank cap**: the top floor offering every rank is
+the only reading that is not a downgrade from ST-40.
 
 Shard ids encode `ELEMENT*1000 + slot*100 + rank*10 + star`, rank 0..4 = N/R/SR/UR/LR
 (and `_param2` grade = rank + 1); `_action` = 110 + slot. All 8 sets carry the full
-6 × 5 × 6 grid.
+6 × 5 × 6 grid, and every combination the bands can roll exists as an item (asserted).
 
-Tuning knobs: `STARSHARD_STAR_SPREAD` (window width), `STARSHARD_RANK_CHANCE` (rarity
-table), `STARSHARD_DROPS_PER_CLEAR`.
+Tuning knob: `STARSHARD_DROPS_PER_CLEAR`. The ladder itself is data now, not a knob.
+
+---
+
+### What was here before, and why it was wrong
+
+> `_itemrank_str` (31, 32, … 60, ascending with difficulty) was tried as a ladder and
+> abandoned: unverifiable, and read literally it puts ★6 **plain** on the final stage.
+
+The client not reading a field is exactly what you expect of a **server-side** drop
+table — it makes `box_rank` the surviving record of what live dropped, not junk. The one
+anomaly (ST-41) was allowed to discredit an otherwise perfectly monotone 41-row ladder.
+The invented replacement — star sliding ★1–★5, rarity a flat N/R/SR/UR/LR table
+identical on every floor — is what the player noticed: ★6 could never drop at all, and
+depth bought nothing but the star.
 
 ## Drop Info
 
-One icon per **(star, set)** the stage can actually roll — 8–12 of the display-only
-`Random ★N <set>` items. Naming a single star under-reports a stage that rolls three;
-the raw pool (4 sets × 6 slots × 3 stars × 5 ranks) is not a preview. Rank is not split
-out because every rank drops on every stage, so the base icon stands for the set.
+One icon per **(star, set)** the stage can actually roll — the display-only
+`Random ★N <set>` items. The **whole** band is listed: up to 6 stars × 4 sets = 24 icons
+on the deepest floors. Truncating it to the top few stars was tried and reverted — the
+floor stays ★1 all the way down, so a deep floor really can pay a ★1 and a truncated
+preview under-reports it. The preview/payout cross-check below caught exactly that.
+Rank is not split out because every rank in the band can drop, so the base icon stands
+for the set.
 
 **The preview and the payout must be verified against each other, not merely written
 together.** They drifted once already — `drops()` learned to pay shards while

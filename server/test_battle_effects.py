@@ -501,9 +501,15 @@ def test_starshard_temple_drops():
         check(f"{d.item_id}'s _action matches its slot",
               int(row.get("_action") or 0) - 110 == d.slot, str(row.get("_action")))
 
-    # STAR is the axis the ladder moves; it must ascend or 41 stages pay the same.
-    # **Every stage must beat the one before it** -- a hard band made all 8 stages
-    # inside it identical, so there was no reason to push deeper until a boundary.
+    # **The ladder now comes from the stage's own `box_rank`, not an invented curve.**
+    # See test_starshard_temple.py, which owns the full spec; kept here is only the
+    # part this file is really about -- that drops() and the Drop Info preview agree.
+    #
+    # What used to be asserted here was the OLD design and is now wrong in two ways:
+    # "every stage pays better than the one before it" (the real ladder steps in bands
+    # of 3-6 floors, so neighbours inside a band tie), and "rarity is deliberately NOT
+    # tied to depth" -- which is exactly the mismatch with the live game that was
+    # reported from play on 2026-08-18.
     def mean_star(sid):
         w = bt.starshard_star_weights(sid)
         return sum(x * st for x, st in w) / sum(x for x, _ in w)
@@ -511,40 +517,13 @@ def test_starshard_temple_drops():
     order = {r.get("_sort"): sid for sid, r in (bt.dd.rows("stage") or {}).items()
              if r.get("_book") == bt.STARSHARD_BOOK}
     means = [mean_star(order[o]) for o in sorted(order)]
-    flat = [i + 1 for i in range(1, len(means)) if means[i] <= means[i - 1] + 1e-9]
-    check("every temple stage pays better than the one before it", not flat, str(flat))
-    check("and the run spans most of the star range",
-          means[-1] - means[0] > 3, f"{means[0]:.2f} -> {means[-1]:.2f}")
-    check("the deepest stage tops out near the cap",
-          means[-1] > bt.STARSHARD_MAX_STAR - 0.5, f"{means[-1]:.2f}")
-
-    # **RARITY is deliberately NOT tied to depth** -- one table everywhere, so a lucky
-    # early run can pay an LR and a late one can still pay a plain. Assert the shape
-    # rather than exact frequencies, which would make this a flaky test.
-    def rank_of(iid):
-        parts = ((bt.dd.row("item", iid) or {}).get("_itemName_en") or "").split()
-        return parts[1] if len(parts) > 1 and parts[1] in ("R", "SR", "UR", "LR") else "N"
-
-    seen = {}
-    for stage in (1600001, 1600041):
-        got = collections.Counter()
-        rng2 = random.Random(4)
-        for _ in range(3000):
-            for d in bt.starshard_temple_drops(stage, rng2):
-                got[rank_of(d.item_id)] += 1
-        seen[stage] = got
-    check("every rarity can drop on the FIRST stage",
-          len(seen[1600001]) == 5, str(sorted(seen[1600001])))
-    check("every rarity can still drop on the LAST stage",
-          len(seen[1600041]) == 5, str(sorted(seen[1600041])))
-    # The two distributions should look alike -- rarity does not shift with depth.
-    tot1 = sum(seen[1600001].values()); tot2 = sum(seen[1600041].values())
-    drift = max(abs(seen[1600001][r] / tot1 - seen[1600041][r] / tot2)
-                for r in ("N", "R", "SR", "UR", "LR"))
-    check("the rarity spread does not shift with depth", drift < 0.05, f"drift {drift:.3f}")
-    check("the weights still sum to 100",
-          sum(w for w, _r in bt.STARSHARD_RANK_CHANCE) == 100,
-          str(bt.STARSHARD_RANK_CHANCE))
+    drops_back = [i + 1 for i in range(1, len(means)) if means[i] < means[i - 1] - 1e-9]
+    check("the star ladder never goes backwards", not drops_back, str(drops_back))
+    check("and it does climb across the run", means[-1] > means[0],
+          f"{means[0]:.2f} -> {means[-1]:.2f}")
+    check("the deepest floor can pay the top star",
+          max(st for _w, st in bt.starshard_star_weights(1600041))
+          == bt.STARSHARD_MAX_STAR, str(bt.starshard_star_weights(1600041)))
 
     # ---- the PREVIEW must agree with the payout ---------------------------
     # These drifted once already: drops() learned to pay shards while the Drop Info
