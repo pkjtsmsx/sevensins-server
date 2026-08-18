@@ -831,5 +831,48 @@ def test_auto_play_sweep():
     check("and it reaches the client",
           json.loads(_ps.stage_json(st))["bestrec"].get("1600002") == 4)
 
+    # ---- a group may never name the same unit twice -------------------------------
+    # The client reads each DamageInfo group into a dictionary keyed by `c`. A repeat
+    # throws "An item with the same key has already been added", which the generic
+    # event handler swallows: no stack, no animation, and the fight stalls with the
+    # attacker never yielding its turn. The server sees nothing wrong -- it applied the
+    # damage and moved on -- so this is only ever caught by looking at the wire.
+    #
+    # Duplicates come from skills with more than one DAMAGE effect: the effect engine
+    # emits a strike per (effect x target x swing). Guild Weekly's Gabriel was the
+    # first such skill the party ever faced.
+    dup = []
+    total_mismatch = []
+    for stage_id, party_ix in ((1000002, 11), (1000032, 11), (1101, 0), (1600002, 0)):
+        b = bt.Battle(stage_id, _ps.battle_team(st, party_ix), 100, None, 0, 0)
+        for _turn in range(24):
+            u = b.acting_unit()
+            if u is None or not b.units:
+                break
+            mv = b.enemy_attack() if u.team == 2 else b.auto_move(2)
+            if not mv:
+                break
+            before = {o: x.hp for o, x in b.units.items()}
+            cmd = json.loads(b.attack_cmd_json(mv[0], mv[1], mv[2]))
+            wire = 0
+            for grp in cmd["combo"][0]["data"]:
+                names = [r["c"] for r in grp]
+                if len(names) != len(set(names)):
+                    dup.append((stage_id, mv[2], names))
+                wire += sum(-r["dmg"] for r in grp if r["dmg"] < 0)
+            lost = sum(before[o] - x.hp for o, x in b.units.items() if o in before)
+            # Overkill is reported in full on the wire but HP clamps at zero, so the
+            # two only have to agree while everyone is still standing.
+            killed = any(x.hp == 0 for o, x in b.units.items() if o in before)
+            if not killed and wire != lost:
+                total_mismatch.append((stage_id, mv[2], wire, lost))
+            if b.wave_cleared() or not b.team_alive(1):
+                break
+            b.end_turn()
+    check("no DamageInfo group ever names a unit twice", not dup, str(dup[:3]))
+    check("  ...and folding them left every total intact",
+          not total_mismatch, str(total_mismatch[:3]))
+
+
 if __name__ == "__main__":
     main()

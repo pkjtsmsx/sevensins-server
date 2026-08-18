@@ -1497,7 +1497,32 @@ class Battle:
         groups = [[] for _ in range(swings)]
 
         def add(seq, u, amount):
-            groups[min(max(seq, 0), swings - 1)].append(dmg_info(u, amount))
+            """Fold `amount` into this swing's row for `u`, creating it if needed.
+
+            **A unit may appear at most ONCE per group.** The client reads each group
+            into a dictionary keyed by `c`, so a second row for the same order throws
+            `An item with the same key has already been added. Key: 101` -- caught
+            by the generic event handler, which means no stack, no skill animation,
+            and a fight that simply stops: the enemy stands there and never yields the
+            turn, so the client never asks for the next one. Nothing on the server
+            says anything is wrong; it had already applied the damage and moved on.
+
+            Duplicates arise whenever a skill has more than one DAMAGE effect: the
+            effect engine emits one strike per (effect x target x swing), so a 2-effect
+            AoE over 2 targets across 2 swings is 8 strikes and every group names both
+            targets twice. Guild Weekly's Gabriel (skill 100001101) is the first one
+            the party ever meets, which is why ordinary stages never showed this.
+
+            Summing is not a workaround for the client's benefit -- one number per
+            target per swing is all the wire shape can express, and it is what the
+            damage popup shows either way. The total is unchanged."""
+            g = groups[min(max(seq, 0), swings - 1)]
+            for row in g:
+                if row["c"] == u.order:
+                    row["dmg"] -= amount            # dmg rides negative
+                    row["die"] = 1 if not u.alive else 0
+                    return
+            g.append(dmg_info(u, amount))
 
         status_events = []
         if attacker and target and fx.is_complete(skill_id):
