@@ -6,6 +6,11 @@ Runs both servers on the phone so the game needs nothing else:
     Android's cleartext rules never apply to it.
   * bundle_server on 0.0.0.0:8088 -- asset bundles over plain HTTP, matching the CDN
     host patched into the game APK (see server/patch_cdn_config.py).
+  * save_editor on 127.0.0.1:8099 -- the account editor, opened in the phone's own
+    browser by the "Edit save" button. LOOPBACK ONLY, unlike the other two: it rewrites
+    saves with no authentication and the phone sits on networks its owner does not
+    control. It is the only way to reach an account on an unrooted device, where
+    <filesDir> is unreadable to every file manager and USB tool.
 
 Both are pure stdlib, so this app carries no pip dependencies at all -- unlike reTBHost,
 which needed a hand-built pydantic-core wheel. That holds only while design_data never
@@ -37,9 +42,10 @@ import threading
 
 TITAN_PORT = 22110
 BUNDLE_PORT = 8088
+EDITOR_PORT = 8099
 
 _pkg_dir = None
-_state = {"titan": None, "bundles": None, "started": False}
+_state = {"titan": None, "bundles": None, "editor": None, "started": False}
 
 
 def _package_dir():
@@ -147,6 +153,7 @@ def start_server(data_dir):
 
     import bundle_server
     import titan_server
+    import save_editor
 
     def run_titan():
         try:
@@ -162,12 +169,22 @@ def start_server(data_dir):
             import traceback
             traceback.print_exc()
 
+    def run_editor():
+        try:
+            save_editor.serve(EDITOR_PORT, "127.0.0.1")
+        except Exception:                       # noqa: BLE001 -- never take the game down
+            import traceback                    # for a failure in the optional editor
+            traceback.print_exc()
+
     _state["titan"] = threading.Thread(target=run_titan, name="titan", daemon=True)
     _state["bundles"] = threading.Thread(target=run_bundles, name="bundles", daemon=True)
+    _state["editor"] = threading.Thread(target=run_editor, name="editor", daemon=True)
     _state["titan"].start()
     _state["bundles"].start()
+    _state["editor"].start()
     _state["started"] = True
-    return f"listening on {TITAN_PORT} (game) and {BUNDLE_PORT} (bundles), data={base}"
+    return (f"listening on {TITAN_PORT} (game), {BUNDLE_PORT} (bundles) and "
+            f"{EDITOR_PORT} (save editor), data={base}")
 
 
 def stop_server():
@@ -177,12 +194,14 @@ def stop_server():
     try:
         import bundle_server
         import titan_server
+        import save_editor
         titan_server.shutdown()
         bundle_server.shutdown()
+        save_editor.shutdown()
     except Exception:                           # noqa: BLE001
         import traceback
         traceback.print_exc()
-    for key in ("titan", "bundles"):
+    for key in ("titan", "bundles", "editor"):
         t = _state[key]
         if t is not None:
             t.join(timeout=5)
@@ -193,6 +212,11 @@ def stop_server():
 
 def is_running():
     return bool(_state["started"])
+
+
+def editor_url():
+    """The address the Edit-save button opens. Loopback: only this phone can reach it."""
+    return f"http://127.0.0.1:{EDITOR_PORT}/"
 
 
 def status(data_dir):

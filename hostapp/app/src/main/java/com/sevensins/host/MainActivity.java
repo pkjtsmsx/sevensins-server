@@ -71,6 +71,11 @@ public class MainActivity extends android.app.Activity {
         launch.setOnClickListener(v -> launchGame());
         root.addView(launch);
 
+        Button editSave = new Button(this);
+        editSave.setText("Edit save");
+        editSave.setOnClickListener(v -> openSaveEditor());
+        root.addView(editSave);
+
         Button update = new Button(this);
         update.setText("Check for updates");
         update.setOnClickListener(v -> runUpdateCheck());
@@ -176,6 +181,41 @@ public class MainActivity extends android.app.Activity {
         startActivity(new Intent(
                 Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
                 Uri.parse("package:" + getPackageName())));
+    }
+
+    /**
+     * Open the on-device save editor in the phone's browser.
+     *
+     * The account lives in getFilesDir(), which on an unrooted phone no file manager,
+     * USB cable or PC tool can reach -- so the editor runs here, next to the servers,
+     * and the browser is just its window. The URL is loopback, so nothing outside this
+     * phone can reach an endpoint that rewrites saves without authentication.
+     *
+     * The editor only exists while the server is running (main.start_server threads it
+     * alongside the other two), so say that plainly rather than opening a browser onto
+     * a connection-refused page, which reads as "the app is broken".
+     */
+    private void openSaveEditor() {
+        if (!ServerService.isRunning()) {
+            Toast.makeText(this, "Start the server first -- the editor runs inside it",
+                           Toast.LENGTH_LONG).show();
+            return;
+        }
+        String url;
+        try {
+            url = ServerService.python(this).getModule("main")
+                               .callAttr("editor_url").toString();
+        } catch (Throwable t) {
+            url = "http://127.0.0.1:8099/";
+        }
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+        } catch (Throwable t) {
+            // A phone with no browser able to handle the intent: hand over the address
+            // rather than failing silently.
+            Toast.makeText(this, "Open " + url + " in your browser",
+                           Toast.LENGTH_LONG).show();
+        }
     }
 
     private static final int REQ_PICK_ARCHIVE = 2;

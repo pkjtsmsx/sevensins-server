@@ -26,6 +26,9 @@ def fileList = new groovy.json.JsonSlurper().parse(file("${rootDir}/server_files
 def runtimeModules = fileList.modules
 def runtimePackages = fileList.packages
 def runtimeDataDirs = fileList.data_dirs
+// Single data FILES (save_editor_ui.html), as opposed to whole data dirs. `?: []` so an
+// older server_files.json without the key still builds.
+def runtimeDataFiles = fileList.data_files ?: []
 
 tasks.register('stageServer', Copy) {
     description = 'Stage the Seven Sins server package into the Chaquopy python source dir.'
@@ -45,6 +48,11 @@ tasks.register('stageServer', Copy) {
                 throw new GradleException("missing data dir ${serverDir}/${d}")
             }
         }
+        runtimeDataFiles.each { f ->
+            if (!file("${serverDir}/${f}").exists()) {
+                throw new GradleException("missing data file ${serverDir}/${f}")
+            }
+        }
         // Drop any stale copy so a removed/renamed module does not linger on device.
         delete stage
     }
@@ -54,6 +62,7 @@ tasks.register('stageServer', Copy) {
     // duplicate destination entry; a single spec matches each file at most once.
     from(serverDir) {
         include runtimeModules
+        include runtimeDataFiles
         runtimePackages.each { include "${it}/**" }
         runtimeDataDirs.each { include "${it}/**" }
         // A runtime package is code only. Desktop runs leave __pycache__ next to it, and

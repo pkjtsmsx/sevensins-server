@@ -1,0 +1,477 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Save Editor</title>
+<!--
+  Single self-contained page: no CDN, no webfont, no external anything. It is served
+  from the phone itself, which may have no working internet at all -- the whole point
+  of this stack is that it runs offline. Everything below is inline for that reason.
+-->
+<style>
+  :root{
+    --bg:#15161c; --panel:#1e2029; --panel2:#262935; --line:#343848;
+    --ink:#e8eaf2; --dim:#9aa0b4; --accent:#7aa2f7; --accent-ink:#0d1017;
+    --good:#7ddc9a; --warn:#ffcc66; --bad:#ff6b7a;
+    --tap:46px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+       padding-bottom:96px}
+  h1{font-size:17px;margin:0}
+  header{position:sticky;top:0;z-index:5;background:var(--panel);
+         border-bottom:1px solid var(--line);padding:10px 12px;
+         padding-top:calc(10px + env(safe-area-inset-top))}
+  .row{display:flex;gap:8px;align-items:center}
+  .grow{flex:1;min-width:0}
+  .dim{color:var(--dim)}
+  .sub{font-size:12px;color:var(--dim);margin-top:2px}
+  select,input,button,textarea{font:inherit;color:var(--ink);background:var(--panel2);
+        border:1px solid var(--line);border-radius:9px;padding:9px 10px}
+  input[type=number]{width:120px;text-align:right;font-variant-numeric:tabular-nums}
+  button{background:var(--panel2);cursor:pointer;min-height:var(--tap)}
+  button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);
+                 font-weight:650}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  button.link{background:none;border:none;color:var(--accent);padding:6px;min-height:auto}
+  nav{display:flex;gap:6px;overflow-x:auto;padding:8px 12px;background:var(--panel);
+      border-bottom:1px solid var(--line);scrollbar-width:none}
+  nav::-webkit-scrollbar{display:none}
+  nav button{white-space:nowrap;border-radius:999px;padding:8px 14px;min-height:38px}
+  nav button[aria-selected=true]{background:var(--accent);color:var(--accent-ink);
+      border-color:var(--accent);font-weight:650}
+  main{padding:12px;max-width:820px;margin:0 auto}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+        padding:12px;margin-bottom:12px}
+  .item{display:flex;gap:10px;align-items:center;padding:9px 0;
+        border-bottom:1px solid var(--line)}
+  .item:last-child{border-bottom:none}
+  .name{font-weight:550;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .banner{border-radius:12px;padding:12px;margin-bottom:12px;font-size:14px}
+  .banner.bad{background:#3a1f24;border:1px solid var(--bad);color:#ffd9dd}
+  .banner.warn{background:#3a331f;border:1px solid var(--warn);color:#ffeec2}
+  .banner.good{background:#1f3a2a;border:1px solid var(--good);color:#d6ffe6}
+  footer{position:fixed;left:0;right:0;bottom:0;background:var(--panel);
+         border-top:1px solid var(--line);padding:10px 12px;
+         padding-bottom:calc(10px + env(safe-area-inset-bottom));z-index:5}
+  .results{max-height:280px;overflow:auto;margin-top:8px}
+  .results div{padding:11px 8px;border-bottom:1px solid var(--line);cursor:pointer}
+  .results div:hover{background:var(--panel2)}
+  textarea{width:100%;min-height:320px;font-family:ui-monospace,Menlo,Consolas,monospace;
+           font-size:12px;white-space:pre}
+  .hide{display:none}
+  .pill{font-size:11px;color:var(--dim);border:1px solid var(--line);
+        border-radius:999px;padding:2px 8px}
+</style>
+
+<header>
+  <div class="row">
+    <div class="grow">
+      <h1 id="who">Save Editor</h1>
+      <div class="sub" id="whosub">loading…</div>
+    </div>
+    <select id="acct" aria-label="Account"></select>
+  </div>
+</header>
+
+<nav id="tabs" role="tablist"></nav>
+
+<main>
+  <div id="live" class="banner bad hide"></div>
+  <div id="msg" class="hide"></div>
+  <div id="panel"></div>
+</main>
+
+<footer>
+  <div class="row">
+    <div class="grow sub" id="pending">No changes yet</div>
+    <button id="revert" disabled>Discard</button>
+    <button id="save" class="primary" disabled>Save changes</button>
+  </div>
+</footer>
+
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const el = (t, props = {}, kids = []) => {
+  const n = Object.assign(document.createElement(t), props);
+  for (const k of [].concat(kids)) n.append(k);
+  return n;
+};
+const api = async (path, opts) => {
+  const r = await fetch(path, opts);
+  const d = await r.json().catch(() => ({ error: "server sent something unreadable" }));
+  if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
+  return d;
+};
+
+let view = null;          // the account as loaded
+let edits = fresh();      // only what the user actually changed
+let tab = "currency";
+
+function fresh() { return { currencies: {}, energies: {}, level: {}, items: [], roster: [], raw: null }; }
+
+function pendingCount() {
+  return Object.keys(edits.currencies).length + Object.keys(edits.energies).length
+       + Object.keys(edits.level).length + edits.items.length + edits.roster.length
+       + (edits.raw ? Object.keys(edits.raw).length : 0);
+}
+
+function refreshFooter() {
+  const n = pendingCount();
+  // The count is the whole point of the footer: an editor that silently holds unsaved
+  // work is how a player loses an afternoon of tweaking.
+  $("#pending").textContent = n ? `${n} unsaved change${n > 1 ? "s" : ""}` : "No changes yet";
+  $("#save").disabled = !n;
+  $("#revert").disabled = !n;
+}
+
+function note(kind, html) {
+  const m = $("#msg");
+  m.className = "banner " + kind;
+  m.innerHTML = html;
+  m.scrollIntoView({ block: "nearest" });
+}
+function clearNote() { $("#msg").className = "hide"; $("#msg").textContent = ""; }
+
+// ---- number field shared by every tab -------------------------------------
+function numField(value, onChange, opts = {}) {
+  const i = el("input", { type: "number", value, inputMode: "numeric" });
+  if (opts.min !== undefined) i.min = opts.min;
+  if (opts.max !== undefined) i.max = opts.max;
+  if (opts.width) i.style.width = opts.width;
+  i.addEventListener("change", () => {
+    let v = parseInt(i.value, 10);
+    if (isNaN(v)) v = 0;
+    // Clamp in the UI as well as the server: the player should SEE 6 appear when they
+    // type 99, not save and wonder why the number changed behind their back.
+    if (opts.min !== undefined) v = Math.max(opts.min, v);
+    if (opts.max !== undefined) v = Math.min(opts.max, v);
+    i.value = v;
+    onChange(v);
+    refreshFooter();
+  });
+  return i;
+}
+
+// ---- tabs ------------------------------------------------------------------
+const TABS = [
+  ["currency", "Money"],
+  ["items", "Items"],
+  ["roster", "Casts"],
+  ["player", "Player"],
+  ["advanced", "Advanced"],
+];
+
+function drawTabs() {
+  const nav = $("#tabs");
+  nav.textContent = "";
+  for (const [id, label] of TABS) {
+    const b = el("button", { textContent: label, role: "tab" });
+    b.setAttribute("aria-selected", String(id === tab));
+    b.onclick = () => { tab = id; drawTabs(); draw(); };
+    nav.append(b);
+  }
+}
+
+function draw() {
+  const p = $("#panel");
+  p.textContent = "";
+  if (!view) return;
+  ({ currency: drawCurrency, items: drawItems, roster: drawRoster,
+     player: drawPlayer, advanced: drawAdvanced }[tab])(p);
+}
+
+function drawCurrency(p) {
+  const card = el("div", { className: "card" });
+  card.append(el("div", { className: "sub",
+    textContent: "Diamonds spent in-game come out of the free pile first." }));
+  for (const c of view.currencies) {
+    const row = el("div", { className: "item" });
+    const amount = c.id in edits.currencies ? edits.currencies[c.id] : c.amount;
+    row.append(el("div", { className: "grow name", textContent: c.name }));
+    row.append(numField(amount, v => { edits.currencies[c.id] = v; }, { min: 0, max: 2000000000 }));
+    card.append(row);
+  }
+  p.append(card);
+
+  const e = el("div", { className: "card" });
+  e.append(el("div", { className: "sub", textContent: "Stamina and tickets" }));
+  for (const n of view.energies) {
+    const row = el("div", { className: "item" });
+    const cur = edits.energies[n.id] || {};
+    row.append(el("div", { className: "grow name", textContent: n.name }));
+    row.append(numField(cur.amount ?? n.amount, v => {
+      edits.energies[n.id] = Object.assign({}, edits.energies[n.id], { amount: v });
+    }, { min: 0, max: 999999, width: "100px" }));
+    e.append(row);
+  }
+  p.append(e);
+}
+
+function drawItems(p) {
+  // --- add box
+  const add = el("div", { className: "card" });
+  add.append(el("div", { className: "sub", textContent: "Add an item by name" }));
+  const q = el("input", { placeholder: "e.g. Awaker Scroll", className: "grow" });
+  q.style.width = "100%";
+  q.style.marginTop = "8px";
+  const results = el("div", { className: "results" });
+  let timer = null;
+  q.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(async () => {
+      results.textContent = "";
+      if (q.value.trim().length < 2) return;
+      const { items } = await api("/api/items?q=" + encodeURIComponent(q.value));
+      if (!items.length) { results.append(el("div", { className: "dim", textContent: "no match" })); return; }
+      for (const it of items) {
+        const d = el("div", {}, [el("span", { textContent: it.name }),
+                                 el("span", { className: "pill", textContent: " #" + it.iid })]);
+        d.onclick = () => {
+          const have = view.items.find(x => x.iid === it.iid);
+          const amount = (have ? have.amount : 0) + 1;
+          stageItem(it.iid, amount, have ? have.storage : "1", it.name);
+          q.value = ""; results.textContent = ""; draw();
+        };
+        results.append(d);
+      }
+    }, 180);
+  });
+  add.append(q, results);
+  p.append(add);
+
+  // --- existing items
+  const card = el("div", { className: "card" });
+  const filter = el("input", { placeholder: "Filter your items…" });
+  filter.style.width = "100%";
+  card.append(filter);
+  const list = el("div");
+  const render = () => {
+    list.textContent = "";
+    const f = filter.value.trim().toLowerCase();
+    let shown = 0;
+    for (const it of view.items) {
+      if (f && !it.name.toLowerCase().includes(f)) continue;
+      if (++shown > 300) break;         // 250+ items on a real save; keep scrolling sane
+      const staged = edits.items.find(x => x.iid === it.iid);
+      const row = el("div", { className: "item" });
+      row.append(el("div", { className: "grow name", textContent: it.name }));
+      row.append(numField(staged ? staged.amount : it.amount,
+        v => stageItem(it.iid, v, it.storage, it.name), { min: 0, max: 999999, width: "104px" }));
+      list.append(row);
+    }
+    if (!shown) list.append(el("div", { className: "dim", textContent: "nothing matches" }));
+  };
+  filter.addEventListener("input", render);
+  render();
+  card.append(list);
+  card.append(el("div", { className: "sub", textContent: "Set an amount to 0 to remove the item." }));
+  p.append(card);
+}
+
+function stageItem(iid, amount, storage, name) {
+  const i = edits.items.findIndex(x => x.iid === iid);
+  const row = { iid, amount, storage, name };
+  if (i >= 0) edits.items[i] = row; else edits.items.push(row);
+  const have = view.items.find(x => x.iid === iid);
+  if (have) have.amount = amount;
+  else view.items.push({ iid, name, amount, storage, uid: "" }),
+       view.items.sort((a, b) => a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1);
+  refreshFooter();
+}
+
+// What makes THIS copy recognisable. Two casts can share a name (different ids) and
+// the same cast can be owned many times (same id) -- so lead with the things a player
+// sees in game, and only fall back to "copy 2 of 5" when nothing else separates them.
+function describe(c) {
+  const bits = [];
+  if (c.party) bits.push("Party " + c.party);
+  if (c.helper) bits.push("Helper");
+  if (c.gear) bits.push(c.gear + " gear");
+  if (c.copies > 1 && !bits.length) bits.push(`copy ${c.copy} of ${c.copies}`);
+  bits.push("#" + c.id);
+  return bits.join(" · ");
+}
+
+function drawRoster(p) {
+  const card = el("div", { className: "card" });
+  const filter = el("input", { placeholder: "Find a cast…" });
+  filter.style.width = "100%";
+  card.append(filter);
+  // Column labels ONCE, not repeated per row -- and the per-row sublabel is spent on
+  // the cast id instead, because a player who owns four Asmodeus has no other way to
+  // tell the rows apart (name, level and star are all identical).
+  const head = el("div", { className: "item" });
+  head.append(el("div", { className: "grow sub", textContent: "Cast" }));
+  for (const [t, w] of [["Lv", "76px"], ["Star", "62px"], ["Super", "62px"]]) {
+    const h = el("div", { className: "sub", textContent: t });
+    h.style.width = w; h.style.textAlign = "right";
+    head.append(h);
+  }
+  card.append(head);
+  const list = el("div");
+  const L = view.limits;
+  const render = () => {
+    list.textContent = "";
+    const f = filter.value.trim().toLowerCase();
+    let shown = 0;
+    for (const c of view.roster) {
+      // Match either form, so "belphegor" finds them all and "chainsaw" finds one.
+      if (f && !((c.display || "") + " " + c.name).toLowerCase().includes(f)) continue;
+      if (++shown > 200) break;
+      const staged = edits.roster.find(x => x.uid === c.uid) || {};
+      const row = el("div", { className: "item" });
+      row.append(el("div", { className: "grow" }, [
+        el("div", { className: "name", textContent: c.display || c.name }),
+        el("div", { className: "sub", textContent: describe(c) }),
+      ]));
+      const stage = (k, v) => {
+        const i = edits.roster.findIndex(x => x.uid === c.uid);
+        const r = Object.assign({ uid: c.uid }, i >= 0 ? edits.roster[i] : {}, { [k]: v });
+        if (i >= 0) edits.roster[i] = r; else edits.roster.push(r);
+        c[k] = v;
+      };
+      row.append(numField(staged.lv ?? c.lv, v => stage("lv", v),
+                          { min: 1, max: L.level_max, width: "76px" }));
+      row.append(numField(staged.star ?? c.star, v => stage("star", v),
+                          { min: 1, max: L.star_max, width: "62px" }));
+      row.append(numField(staged.super_star ?? c.super_star, v => stage("super_star", v),
+                          { min: 0, max: L.super_star_max, width: "62px" }));
+      list.append(row);
+    }
+    if (!shown) list.append(el("div", { className: "dim", textContent: "nothing matches" }));
+  };
+  filter.addEventListener("input", render);
+  render();
+  card.append(list);
+  p.append(card);
+}
+
+function drawPlayer(p) {
+  const card = el("div", { className: "card" });
+  const L = view.limits;
+  const mk = (label, value, key, max) => {
+    const row = el("div", { className: "item" });
+    row.append(el("div", { className: "grow name", textContent: label }));
+    row.append(numField(edits.level[key] ?? value, v => { edits.level[key] = v; },
+                        { min: 0, max }));
+    card.append(row);
+  };
+  mk("Account level", view.level.lv, "lv", L.level_max);
+  mk("Account XP", view.level.xp, "xp", 2000000000);
+  card.append(el("div", { className: "sub",
+    textContent: `Level cap for this account is ${L.level_max}.` }));
+  p.append(card);
+}
+
+function drawAdvanced(p) {
+  const card = el("div", { className: "card" });
+  card.append(el("div", { className: "banner warn",
+    innerHTML: "<b>Careful.</b> This edits the save file directly. Everything the other tabs "
+             + "protect you from — value limits, safe item slots — is off here. A backup is "
+             + "still taken before every save." }));
+  const ta = el("textarea", { spellcheck: false, value: "loading…" });
+  const status = el("div", { className: "sub" });
+  card.append(ta, status);
+  const btn = el("button", { textContent: "Stage this JSON" });
+  btn.onclick = () => {
+    let parsed;
+    try { parsed = JSON.parse(ta.value); }
+    catch (e) { status.textContent = "Not valid JSON: " + e.message; status.style.color = "var(--bad)"; return; }
+    if (typeof parsed !== "object" || Array.isArray(parsed) || !parsed) {
+      status.textContent = "The top level has to be an object."; status.style.color = "var(--bad)"; return;
+    }
+    edits.raw = parsed;
+    status.textContent = `Staged ${Object.keys(parsed).length} top-level keys. Press Save changes.`;
+    status.style.color = "var(--good)";
+    refreshFooter();
+  };
+  card.append(btn);
+  api(`/api/account/${view.player_id}/raw`)
+    .then(d => { ta.value = JSON.stringify(d.raw, null, 1); })
+    .catch(e => { ta.value = "could not load: " + e.message; });
+  p.append(card);
+}
+
+// ---- load / save -----------------------------------------------------------
+async function loadAccounts() {
+  const d = await api("/api/accounts");
+  const sel = $("#acct");
+  sel.textContent = "";
+  for (const a of d.accounts) {
+    const label = a.readable ? `${a.name} (${a.player_id})` : `${a.player_id} — unreadable`;
+    sel.append(el("option", { value: a.player_id, textContent: label, disabled: !a.readable }));
+  }
+  showLive(d.live);
+  if (!d.accounts.length) {
+    $("#whosub").textContent = "no save files found";
+    return;
+  }
+  await loadAccount(sel.value);
+}
+
+function showLive(live) {
+  const b = $("#live");
+  if (live && live.length) {
+    b.className = "banner bad";
+    // Stated as cause and effect: "someone is connected" means nothing to a player,
+    // "your changes will be undone" tells them why they must close the game.
+    b.innerHTML = "<b>The game is open.</b> Close it completely before saving — while it is "
+                + "running it keeps its own copy of your save and will write that back over "
+                + "anything you change here.";
+  } else {
+    b.className = "hide";
+  }
+}
+
+async function loadAccount(pid) {
+  view = await api("/api/account/" + pid);
+  edits = fresh();
+  $("#who").textContent = view.name;
+  $("#whosub").textContent = `ID ${view.player_id} · level ${view.level.lv} · `
+                           + `${view.items.length} items · ${view.roster.length} casts`;
+  clearNote();
+  refreshFooter();
+  drawTabs();
+  draw();
+}
+
+$("#acct").addEventListener("change", e => loadAccount(e.target.value));
+$("#revert").addEventListener("click", () => { loadAccount(view.player_id); });
+
+$("#save").addEventListener("click", async () => {
+  const btn = $("#save");
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+  try {
+    const payload = {
+      currencies: edits.currencies, energies: edits.energies, level: edits.level,
+      items: edits.items, roster: edits.roster,
+    };
+    if (edits.raw) payload.raw = edits.raw;
+    const r = await api("/api/account/" + view.player_id,
+                        { method: "POST", body: JSON.stringify(payload) });
+    // Reload FIRST, then report: loadAccount() clears the message area, so noting the
+    // success before it silently ate the only confirmation the player ever gets --
+    // including the "start the game again" line, which is the step they must not miss.
+    await loadAccount(view.player_id);
+    note("good", `<b>Saved.</b> ${r.changed.length} change(s) written. `
+               + `A backup of the previous save was kept.<br>`
+               + `Now start the game again to see them.`);
+  } catch (e) {
+    // The live-session refusal arrives here; it is the one error a player will
+    // actually hit, and it already reads as an instruction.
+    note("bad", "<b>Not saved.</b> " + e.message);
+    const d = await api("/api/accounts").catch(() => null);
+    if (d) showLive(d.live);
+  } finally {
+    btn.textContent = "Save changes";
+    refreshFooter();
+  }
+});
+
+loadAccounts().catch(e => {
+  $("#whosub").textContent = "could not reach the editor: " + e.message;
+});
+</script>

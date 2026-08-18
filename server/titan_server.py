@@ -1387,6 +1387,13 @@ def handle(conn, addr):
     c2s, s2c = RC4(KEY_C2S), RC4(KEY_S2C)
     state, cur_battle = None, None
     conn.settimeout(120)
+    # Announce the connection before login: an editor asking "is anyone playing?" must
+    # see a client that has connected but not yet sent its LOGIN, or it would happily
+    # write the account out from under a session that is one frame from loading it.
+    session = {"player_id": None, "addr": f"{addr[0]}:{addr[1]}", "since": time.time()}
+    with _sessions_lock:
+        _sessions[id(session)] = session
+        _publish_sessions_locked()
 
     def send(mtype, body):
         # A backpack push whose cmd replays or carries the info rows goes out behind a
@@ -1424,6 +1431,9 @@ def handle(conn, addr):
                 log(f"    LOGIN username={user!r} json_data={jd!r}")
                 # username is the titan token "titan_token_<player_id>"
                 pid = user.rsplit("_", 1)[-1] or "1000001"
+                session["player_id"] = pid
+                with _sessions_lock:
+                    _publish_sessions_locked()
                 state = ps.load(pid)
                 # backpack_msg reads this to prefix its cmd-83 info refresh.
                 _bp_ctx.state = state
@@ -3050,12 +3060,53 @@ def handle(conn, addr):
         import traceback
         log(f"[!] {addr} {type(e).__name__}: {e}\n" + traceback.format_exc())
     finally:
+        with _sessions_lock:
+            _sessions.pop(id(session), None)
+            _publish_sessions_locked()
         conn.close()
 
 
 # The listening socket, so an embedding host (the Android app) can stop us. Closing
 # it is what breaks accept() out of its loop -- there is no other exit.
 _listener = None
+
+# Live client connections, so the save editor can refuse to write an account that is
+# currently being played. **This is not cosmetic.** `handle` loads the account ONCE at
+# login and keeps it in a local for the life of the connection, saving it back on every
+# change -- so an edit written to disk underneath a logged-in player is silently undone
+# by their next in-game action. Keyed by connection identity, since a player can only
+# meaningfully have one, but a reconnect can briefly overlap the old one.
+_sessions = {}
+_sessions_lock = threading.Lock()
+
+
+def live_sessions():
+    """[{player_id, addr, since}] for every currently-connected client."""
+    with _sessions_lock:
+        return [dict(v) for v in _sessions.values()]
+
+
+# Where the registry is ALSO published, for readers in another process. In the Android
+# host app the editor and this server share one interpreter and the dict above is
+# enough; on a desktop they are two `python3` invocations, and an in-memory check there
+# would silently pass and let an edit land under a live session -- the exact failure the
+# guard exists to prevent. The pid is recorded so a reader can tell a real session from
+# one left behind by a crash.
+def _sessions_file():
+    return os.path.join(ps.core.STATE_DIR, ".live_sessions.json")
+
+
+def _publish_sessions_locked():
+    try:
+        os.makedirs(ps.core.STATE_DIR, exist_ok=True)
+        path = _sessions_file()
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"pid": os.getpid(),
+                       "sessions": [dict(v) for v in _sessions.values()]}, f)
+        os.replace(tmp, path)
+    except Exception:
+        pass                    # advisory only; never take the server down over it
 
 
 def main(port=None):

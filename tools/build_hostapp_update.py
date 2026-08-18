@@ -57,7 +57,10 @@ def build(out_dir):
     with open(FILE_LIST, encoding="utf-8") as f:
         spec = json.load(f)
     rels = []
-    for m in spec["modules"]:
+    # `data_files` are single non-code files the runtime opens by name
+    # (save_editor_ui.html). Same treatment as a module: shipped verbatim, and its
+    # absence is a hard error rather than a page that renders blank on the phone.
+    for m in spec["modules"] + spec.get("data_files", []):
         if not os.path.isfile(os.path.join(SERVER, m)):
             sys.exit(f"missing {os.path.join(SERVER, m)} -- update server_files.json?")
         rels.append(m)
