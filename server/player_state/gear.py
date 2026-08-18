@@ -8,6 +8,13 @@ import json, time
 import battle as bt
 
 from .core import (
+    ATTR_ATK,
+    ATTR_DEF,
+    ATTR_HP,
+    ATTR_PATK,
+    ATTR_PDEF,
+    ATTR_PHP,
+    ATTR_SPD,
     BP_STORAGE_EQUIPMENT,
     BP_STORAGE_SOULFRAG,
     CURRENCY_COIN,
@@ -20,6 +27,7 @@ from .core import (
     SOULFRAG_MAX_LEVEL,
     SOULFRAG_SLOT_INDEX,
     SUPER_LIMIT_DEFINE,
+    _bonus_group_rows,
     char_equips,
     grant_item,
     grant_soulmirror,
@@ -1106,3 +1114,204 @@ def bloodpact_game_rule():
         "bloodpact_slot_lv": [0] * BLOODPACT_SLOTS,
         "bloodpact_max_lv": BLOODPACT_MAX_LV,
     }
+
+
+# ---- equipped stat totals (starshards + soulmirrors + set bonuses) ----------
+#
+# **The battle engine never read any of this.** `battle.Unit` built its stats from
+# `_grow(...)` plus the Soul Link book bonus and nothing else, so a fully geared cast
+# fought at base stats -- the lobby sheet showed the ▲ deltas because the CLIENT
+# computes them (`CharData.RefreshEquipTotalValues`), and the server simply disagreed.
+# Reported from a device 2026-08-18.
+#
+# Transcribed from `PlayerBackpack.GetEquipGrowValue` (0x18e753c), which is what
+# `RefreshEquipAttribute` runs to expand an instance's stored row ids into the
+# `ppt_/ppv_`, `ipt/ipv`, `bpt_/bpv_` pairs the panels read. Row field offsets on
+# DesignEquipmentBonusRow: +28 `_AttrJob`, +32 `_Type`, +36 `_AttrType`,
+# +40 `_AttrInitV`, +44 `_AttrUpV`. The three formulas are NOT the same:
+#
+#   primary  `pid_i` -> value = _AttrInitV + _AttrUpV * lv     (levels up)
+#   ihid     `ihid`  -> value = _AttrInitV                     (does NOT level)
+#   sub      `bid_j` -> value = (be_j + 1) * _AttrInitV        (enhance multiplies)
+#
+# A row only counts when `_Type == BONUS_TYPE_ATTRIBUTE` and `_AttrType > 0`, and
+# `_AttrJob` (0 = any) gates it against the wearer's `_job`.
+
+# CharAttribute ids come from .core, which already has them right. Do NOT redeclare
+# them here: an earlier draft of this block wrote SPD as 4, and `CharAttribute.SPD` is
+# **5** -- so every speed roll was silently dropped while a non-existent attribute 4
+# was looked up. Percent attributes are stored MULTIPLIED BY TEN (340 = 34.0%).
+PERCENT_SCALE = 1000.0          # value / 1000 -> a multiplier (340 -> 0.34)
+
+# Which storages hold gear that contributes stats. Bloodpacts (4) are deliberately
+# absent: they carry ReplaceSkill rows, not attributes.
+STAT_BEARING_STORAGES = (BP_STORAGE_EQUIPMENT, BP_STORAGE_SOULFRAG)
+
+
+def _bonus_row(rid):
+    row = bt.dd.row("equipment_bonus", rid) or {}
+    if row.get("_Type") != 1 or not (row.get("_AttrType") or 0):
+        return None
+    return row
+
+
+def _piece_attrs(entry, job=0):
+    """{attr type: value} contributed by ONE equipped instance."""
+    attr = entry.get("attr") or {}
+    lv = int(attr.get(RUNE_ATTR_LEVEL, 0) or 0)
+    out = {}
+
+    def add(row, value):
+        # `_AttrJob` 0 means "any class"; anything else must match the wearer's _job,
+        # exactly as RefreshEquipTotalValues compares the ppj_/ipj key against
+        # charRow._job before folding the value in.
+        aj = int(row.get("_AttrJob") or 0)
+        if aj and job and aj != job:
+            return
+        at = int(row["_AttrType"])
+        out[at] = out.get(at, 0) + int(value)
+
+    for key, rid in attr.items():
+        if key.startswith("pid_"):
+            row = _bonus_row(rid)
+            if row:
+                add(row, int(row.get("_AttrInitV") or 0)
+                    + int(row.get("_AttrUpV") or 0) * lv)
+        elif key == "ihid":
+            row = _bonus_row(rid)
+            if row:
+                add(row, int(row.get("_AttrInitV") or 0))
+        elif key.startswith(RUNE_ATTR_SUB):
+            row = _bonus_row(rid)
+            if row:
+                enh = int(attr.get("be_" + key[len(RUNE_ATTR_SUB):], 0) or 0)
+                add(row, (enh + 1) * int(row.get("_AttrInitV") or 0))
+    return out
+
+
+def _suit_bonus(suit_counts, totals):
+    """Fold the set bonuses in, following RefreshEquipTotalValues' own loop.
+
+    A set's row names a piece count (`_n_number1`) and a bonus; the client builds
+    `6 / number` copies of it (six starshard slots), then walks them while the worn
+    count still reaches `number`, **decrementing the count by 2 each time**. That is
+    why a 2-piece set worn six times pays three times over and a 4-piece set pays once.
+    `_n_type` 1 is a stat bonus; type 3 is the limit-suit counter, not a stat.
+    """
+    for suit_id, count in suit_counts.items():
+        row = bt.dd.row("equip_suit", suit_id) or {}
+        entries = []
+        for n in (1, 2):
+            number = int(row.get(f"_n_number{n}") or 0)
+            if number < 1:
+                continue
+            for _ in range(6 // number):
+                entries.append((number,
+                                int(row.get(f"_n_attribute{n}") or 0),
+                                int(row.get(f"_n_value{n}") or 0),
+                                int(row.get(f"_n_type{n}") or 0)))
+        left = count
+        for number, attr_type, value, kind in entries:
+            if left < number:
+                continue
+            if kind == 1 and attr_type:
+                totals[attr_type] = totals.get(attr_type, 0) + value
+            left -= 2
+    return totals
+
+
+def equipped_attr_totals(state, entry):
+    """{attr type: summed value} for everything one cast has equipped.
+
+    Sums each worn starshard/soulmirror through the client's own per-kind formulas,
+    then adds the set bonuses. Values stay in the design tables' units -- percentages
+    are still x10 -- so the caller decides how to apply them.
+    """
+    slots = char_equips(entry)
+    job = int((bt.dd.row("char", entry.get("id")) or {}).get("_job") or 0)
+    owned = {}
+    for storage in STAT_BEARING_STORAGES:
+        for rec in (state.get("backpack") or {}).get(str(storage), {}).values():
+            if rec.get("uid"):
+                owned[rec["uid"]] = rec
+    totals, suit_counts = {}, {}
+    for slot_uid in slots:
+        rec = owned.get(slot_uid) if slot_uid else None
+        if not rec:
+            continue
+        for at, v in _piece_attrs(rec, job).items():
+            totals[at] = totals.get(at, 0) + v
+        equip = bt.dd.row("equipment",
+                          (bt.dd.row("item", rec.get("iid")) or {}).get("_param1"))
+        suit = (equip or {}).get("_suitID")
+        if suit:
+            suit_counts[suit] = suit_counts.get(suit, 0) + 1
+    return _suit_bonus(suit_counts, totals)
+
+
+def equipped_stat_bonus(state, entry, base):
+    """The flat hp/atk/def/spd a cast's gear adds, given its BASE stats.
+
+    Percent attributes multiply the base (the cast's own grown stats), which is how
+    the lobby's ▲ deltas read: a 34% ATK set on 2693 base ATK shows ▲915, not ▲34.
+    Returned already rounded to ints so battle can add them directly.
+
+    **CRI/CDI/EHIT/EANTI are deliberately dropped here.** The battle engine has no
+    crit or effect-hit model at all (`Battle.damage` is atk x ratio x defence), so
+    there is nowhere honest to put them; they are carried in `equipped_attr_totals`
+    for whatever adds one.
+    """
+    totals = equipped_attr_totals(state, entry)
+    flat = {
+        "hp": int(totals.get(ATTR_HP, 0)),
+        "atk": int(totals.get(ATTR_ATK, 0)),
+        "def": int(totals.get(ATTR_DEF, 0)),
+        "spd": int(totals.get(ATTR_SPD, 0)),
+    }
+    for key, at in (("hp", ATTR_PHP), ("atk", ATTR_PATK), ("def", ATTR_PDEF)):
+        pct = totals.get(at, 0)
+        if pct:
+            flat[key] += int(base.get(key, 0) * pct / PERCENT_SCALE)
+    return flat
+
+
+def repair_equipment_rolls(state, rng=None):
+    """Replace bonus rows that could never have been rolled. -> pieces changed.
+
+    Accounts created before the roll pool was scoped hold starshards carrying rows
+    from anywhere in the 2043-row table -- most visibly row 907, CRI `_AttrInitV`
+    9990, which the panel renders as **CRI+999.0%**. Fixing `make_rune` does nothing
+    for those: they are already on disk and equipped.
+
+    Each bad row is swapped for one of the SAME attribute from the piece's own group,
+    so the shard keeps its identity ("it had crit on it") and only the absurd number
+    goes. If the group has nothing of that attribute, any row from the group is used.
+    """
+    import random as _r
+    rng = rng or _r
+    changed = 0
+    for storage in STAT_BEARING_STORAGES:
+        for rec in (state.get("backpack") or {}).get(str(storage), {}).values():
+            attr = rec.get("attr") or {}
+            allowed = _bonus_group_rows(rec.get("iid"))
+            if not allowed:
+                continue
+            allowed_set = set(allowed)
+            by_attr = {}
+            for rid in allowed:
+                row = bt.dd.row("equipment_bonus", rid) or {}
+                by_attr.setdefault(row.get("_AttrType"), []).append(rid)
+            touched = False
+            for key, rid in list(attr.items()):
+                if not (key.startswith("pid_") or key.startswith(RUNE_ATTR_SUB)
+                        or key == "ihid"):
+                    continue
+                if rid in allowed_set:
+                    continue
+                want = (bt.dd.row("equipment_bonus", rid) or {}).get("_AttrType")
+                pool = by_attr.get(want) or allowed
+                attr[key] = rng.choice(pool)
+                touched = True
+            if touched:
+                changed += 1
+    return changed

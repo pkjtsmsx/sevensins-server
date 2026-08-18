@@ -972,11 +972,30 @@ RUNE_SUB_TYPES = (ATTR_HP, ATTR_ATK, ATTR_DEF, ATTR_SPD,
                   ATTR_CRI, ATTR_CDI, ATTR_EHIT, ATTR_EANTI)
 
 
-def _bonus_rows_by_attr():
-    """{attr type: [equipment_bonus row id, ...]} for stat-bearing rows."""
+def _bonus_rows_by_attr(item_id=None):
+    """{attr type: [equipment_bonus row id, ...]} for stat-bearing rows.
+
+    **Pass `item_id`.** Without it this pools the WHOLE 2043-row table, and that table
+    is not a starshard roll pool -- it also holds boss/GM rows. Row 907 is
+    `_AttrType 6` (CRI) with `_AttrInitV 9990`, and percentages are stored x10, so a
+    starshard that rolled it displayed **CRI+999.0%** next to sub-stats of 1.5%. (Seen
+    in game 2026-08-18; the character sheet then read CRT 200.0%, the client's own cap.)
+
+    The real pool is the piece's own `equipment._bonusID` group, reached through the
+    item's `_param1` -- exactly what `_bonus_group_rows` has always done for
+    Soulmirrors. Those groups are built for this: group 2001 (★1 Chaos) is 33 rows =
+    11 attributes x 3 quality tiers, every value small and sane.
+
+    The global form is kept only for callers that genuinely want "every row of this
+    attribute"; nothing rolling an item should use it.
+    """
+    rows = bt.dd.rows("equipment_bonus") or {}
+    allowed = None if item_id is None else set(_bonus_group_rows(item_id))
     out = {}
-    for rid, row in (bt.dd.rows("equipment_bonus") or {}).items():
+    for rid, row in rows.items():
         if row.get("_Type") != BONUS_TYPE_ATTRIBUTE:
+            continue
+        if allowed is not None and int(rid) not in allowed:
             continue
         out.setdefault(row.get("_AttrType"), []).append(int(rid))
     return out
@@ -1008,7 +1027,14 @@ def make_rune(state, item_id, slot, level=0, enhance=0, rng=None):
             f"item {item_id} is not a starshard (_action must be 111..116); "
             "a non-starshard item never reaches the Starshards list")
     slot = real_slot
-    by_attr = _bonus_rows_by_attr()
+    # Scoped to THIS piece's bonus group -- see _bonus_rows_by_attr for the 999% crit
+    # that the unscoped pool produced.
+    by_attr = _bonus_rows_by_attr(item_id)
+    if not by_attr:
+        raise ValueError(
+            f"starshard {item_id} has no equipment_bonus rows in its own group "
+            f"(equipment {(bt.dd.row('item', int(item_id)) or {}).get('_param1')}); "
+            "refusing to roll from the global table")
 
     def pick(attr_type):
         ids = by_attr.get(attr_type)

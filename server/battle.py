@@ -794,7 +794,8 @@ class Unit:
     turn order, HP sync) refers to units by this string."""
 
     def __init__(self, order, char_id, team, index, lv=1, star=None, super_star=0,
-                 book_bonus=None, uid="", skill_limit=0, pact_iid=0, pact_lv=0):
+                 book_bonus=None, uid="", skill_limit=0, pact_iid=0, pact_lv=0,
+                 gear_bonus=None):
         self.order, self.char_id, self.team, self.index = order, char_id, team, index
         # Worn bloodpact, resolved by player_state.roster (battle never sees the
         # backpack). Drives the aura -- see blood_effect.
@@ -825,11 +826,19 @@ class Unit:
         # have no code xrefs, only Puerts wrapper data), so the bonus was
         # server-authoritative and only ever showed up in the stats the server sent.
         bonus = book_bonus or {}
-        self.max_hp = stats["hp"] + bonus.get("hp", 0)
+        # Worn starshards + soulmirrors + set bonuses, already resolved to flat
+        # numbers (percentages applied against these same base stats) by
+        # player_state.roster._annotate_gear -- battle never sees the backpack.
+        # **This used to be missing entirely**, so a fully geared cast fought at base
+        # stats while the lobby sheet showed the ▲ deltas the CLIENT had computed.
+        # Mobs pass nothing and are unaffected.
+        gear = gear_bonus or {}
+        self.gear_bonus = dict(gear)
+        self.max_hp = stats["hp"] + bonus.get("hp", 0) + gear.get("hp", 0)
         self.hp = self.max_hp
-        self.atk = stats["atk"] + bonus.get("atk", 0)
-        self.defense = stats["def"] + bonus.get("def", 0)
-        self.spd = stats["spd"]
+        self.atk = stats["atk"] + bonus.get("atk", 0) + gear.get("atk", 0)
+        self.defense = stats["def"] + bonus.get("def", 0) + gear.get("def", 0)
+        self.spd = stats["spd"] + gear.get("spd", 0)
         # The blue bar under each character's HP: the 0..100 MOVE GAUGE. It fills at
         # the unit's own SPD (Battle._roll_turn_order) and empties when the unit takes
         # its turn, so it reads full exactly when the unit is acting. Float internally,
@@ -1139,7 +1148,8 @@ class Battle:
                 book_bonus=self.book_bonus, uid=entry.get("uid", ""),
                 skill_limit=(entry.get("limit_book", 0) or 0)
                 + (entry.get("limit_char", 0) or 0),
-                pact_iid=entry.get("pact_iid", 0), pact_lv=entry.get("pact_lv", 0))
+                pact_iid=entry.get("pact_iid", 0), pact_lv=entry.get("pact_lv", 0),
+                gear_bonus=entry.get("gear_bonus"))
         # enemies keep numbering on from the party, and keep the same numbers across
         # waves so orders stay stable for the whole fight
         self.enemy_order_base = ORDER_BASE + len(char_ids[:MAX_SLOTS])

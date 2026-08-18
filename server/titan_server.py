@@ -1508,6 +1508,15 @@ def handle(conn, addr):
                 if remasked:
                     ps.save(state)
                     log(f"    -> rating masks migrated on {remasked} stage(s)")
+                # Starshards rolled before the pool was scoped to the piece's own
+                # bonus group carry rows from anywhere in the table -- row 907 is
+                # CRI 9990, i.e. a displayed **CRI+999.0%**. Those pieces are already
+                # on disk and equipped, so fixing the roll is not enough; swap the
+                # impossible rows for same-attribute ones from the right group.
+                repaired = ps.repair_equipment_rolls(state)
+                if repaired:
+                    ps.save(state)
+                    log(f"    -> repaired out-of-group bonus rows on {repaired} piece(s)")
                 healed = ps.reconcile_stage_quests(state)
                 if healed:
                     ps.save(state)

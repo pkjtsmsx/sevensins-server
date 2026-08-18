@@ -201,7 +201,25 @@ def battle_team(state, index=0):
              if u and u in state["roster"]]
     for e in party:
         _annotate_bloodpact(state, e)
+        _annotate_gear(state, e)
     return party or list(state.get("team", []))
+
+
+def _annotate_gear(state, entry):
+    """Resolve the cast's equipped starshards/soulmirrors into a flat stat bonus.
+
+    Same reason as _annotate_bloodpact: battle.Battle never sees the backpack, so the
+    lookup has to happen here. Without it a fully geared cast fought at base stats --
+    the lobby showed the ▲ deltas only because the CLIENT computes them itself.
+
+    The percentages need the cast's OWN base stats to resolve against, which is why
+    this computes them here rather than handing battle a percentage.
+    """
+    from . import gear
+    row = bt.dd.row("char", entry.get("id")) or {}
+    star = entry.get("star") or bt._default_star(row)
+    base = bt._grow(row, star, entry.get("lv", 1), entry.get("super_star") or 0)
+    entry["gear_bonus"] = gear.equipped_stat_bonus(state, entry, base)
 
 
 def _annotate_bloodpact(state, entry):
