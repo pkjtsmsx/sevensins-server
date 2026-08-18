@@ -1342,10 +1342,41 @@ def char_flv_need_xp(rarity, lv):
     return 5 * math.floor((155 + 5 * int(rarity or 0) * ((lv + 1) ** 1.64)) / 5)
 
 
+# A Karma rank's reward lives on the `char_flv` row for that (char, rank), and
+# `_unlock_type` says what kind it is: **5 pays `_bonus_item_id` x `_bonus_item_cnt`**
+# (2416 rows -- every "Obtain Diamond x50" on the Rank Bonus list), 2 unlocks a Kizuna
+# Quest, 3/6 are stat bonuses the client derives itself. Only type 5 is ours to hand
+# over. Reported 2026-08-18: ranking a cast up paid nothing at all.
+KARMA_UNLOCK_ITEM = 5
+
+
+def karma_rank_rewards(char_id, from_flv, to_flv):
+    """[(item_id, count), ...] owed for climbing from `from_flv` to `to_flv`."""
+    out = []
+    for row in (dd.rows("char_flv") or {}).values():
+        if int(row.get("_char_id") or 0) != int(char_id):
+            continue
+        flv = int(row.get("_flv") or 0)
+        if not (from_flv < flv <= to_flv):
+            continue
+        if int(row.get("_unlock_type") or 0) != KARMA_UNLOCK_ITEM:
+            continue
+        iid, cnt = int(row.get("_bonus_item_id") or 0), int(row.get("_bonus_item_cnt") or 0)
+        if iid and cnt:
+            out.append((iid, cnt))
+    return out
+
+
 def grant_karma(state, char_id, fexp):
-    """Add favour xp to a character, rolling over into ranks. Returns its karma."""
+    """Add favour xp to a character, rolling over into ranks. Returns its karma.
+
+    Ranking up PAYS the Rank Bonus rows crossed -- see karma_rank_rewards. The paid
+    lines are stashed on the returned dict as `_paid` so the caller can push the syncs;
+    a grant the client is never told about may as well not have happened.
+    """
     k = karma_of(state, char_id)
     rarity = (dd.row("char", char_id) or {}).get("_rarity")
+    was = int(k.get("flv", 0))
     k["fxp"] = k.get("fxp", 0) + fexp
     while k["flv"] < MAX_FLV:
         need = char_flv_need_xp(rarity, k["flv"])
@@ -1355,6 +1386,12 @@ def grant_karma(state, char_id, fexp):
         k["flv"] += 1
     if k["flv"] >= MAX_FLV:
         k["flv"], k["fxp"] = MAX_FLV, 0
+    paid = []
+    if int(k["flv"]) > was:
+        for iid, cnt in karma_rank_rewards(char_id, was, int(k["flv"])):
+            grant_reward(state, iid, cnt)
+            paid.append((iid, cnt))
+    k["_paid"] = paid
     return k
 
 

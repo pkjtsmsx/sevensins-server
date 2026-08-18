@@ -343,25 +343,31 @@ def gift_karma_xp(char_id, item_id, amount=1):
 def give_gifts(state, char_id, pairs):
     """Feed gifts to one cast. `pairs` is [(item id, amount), ...] off the wire.
 
-    Returns (ok, total karma xp, consumed). Refuses outright if the player does not
-    hold the items, rather than partially applying."""
+    Returns (ok, total karma xp, consumed, rank rewards paid). Refuses outright if the
+    player does not hold the items, rather than partially applying.
+
+    One feed can cross SEVERAL Karma ranks at once, and every rank crossed pays -- see
+    core.karma_rank_rewards, which collects the whole open range rather than just the
+    rank landed on."""
     wanted = [(int(i), int(n)) for i, n in pairs if n > 0]
     if not wanted:
-        return False, 0, []
+        return False, 0, [], []
     if len(wanted) > MAX_RECIEVE_GIFT_TYPE_NUM:
-        return False, 0, []
+        return False, 0, [], []
     if sum(n for _i, n in wanted) > MAX_RECIEVE_GIFT_NUM:
-        return False, 0, []
+        return False, 0, [], []
     for item_id, n in wanted:
         if not has_item(state, item_id, n):
-            return False, 0, []
+            return False, 0, [], []
     total = sum(gift_karma_xp(char_id, i, n) for i, n in wanted)
     if total <= 0:
-        return False, 0, []
+        return False, 0, [], []
     for item_id, n in wanted:
         spend_item(state, item_id, n)
-    grant_karma(state, char_id, total)
-    return True, total, wanted
+    # A gift can cross a Karma rank, and those ranks PAY (see core.karma_rank_rewards).
+    # The paid lines ride back so the caller can push the syncs they landed in.
+    karma = grant_karma(state, char_id, total)
+    return True, total, wanted, list(karma.get("_paid") or [])
 
 
 # ---- Rank Up (PanelCharacterUpgrade, CharRpcServerCmd.char_rank_up 279) -----

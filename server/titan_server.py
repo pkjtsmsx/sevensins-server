@@ -643,6 +643,33 @@ def stage_execute_reply():
     return uint64_msg(PLAYER_STAGE, STAGE_RPLY_EXECUTE, [], [])
 
 
+def karma_reward_msgs(state, karma):
+    """Syncs for whatever a Karma rank-up just paid -> [encoded rpc, ...].
+
+    `grant_karma` stashes the paid lines on the karma dict as `_paid`; a rank bonus is
+    usually Diamonds (currency) but the tables also pay plain items, so route by the
+    same buckets everything else uses.
+    """
+    paid = (karma or {}).get("_paid") or []
+    if not paid:
+        return []
+    buckets = {ps.item_bucket(iid) for iid, cnt in paid if iid and cnt}
+    out = []
+    if "currency" in buckets:
+        out.append(sint_msg(0xBC8FDA7C, 512, [], [ps.currency_json(state)]))
+    if "backpack" in buckets:
+        out.append(backpack_msg(84, [1],
+                                [ps.backpack_json(state, ps.BP_STORAGE_NORMAL)]))
+    if "energy" in buckets:
+        out.append(uint_msg(0xAE487D79, 512, [], [ps.energy_json(state)]))
+    if "equipment" in buckets:
+        out.append(backpack_msg(BACKPACK_CHANGE, [0],
+                                [ps.backpacks_all_json(state,
+                                                       {ps.BP_STORAGE_EQUIPMENT}),
+                                 ps.backpack_info_json(state)]))
+    return out
+
+
 def battle_msg(cmd, intargs=(), strargs=()):
     """PlayerBattleClientCmdRT.build is shape B: uint32[0][0]=cmd, sint32[0]=args,
     string[0]=strargs."""
@@ -1657,6 +1684,11 @@ def handle(conn, addr):
                         if fexp:
                             send(MSG_RPC, uint_msg(0x771EA36E, 528, [1, 1],
                                                    [ps.char_json(state)]))
+                        # Crossing a Karma rank pays that rank's Rank Bonus row, and a
+                        # single grant can cross several at once. Push whatever buckets
+                        # they landed in or the payout exists only server-side.
+                        for _b in karma_reward_msgs(state, karma):
+                            send(MSG_RPC, _b)
                     elif (index == PLAYER_GACHA_SERVER
                           and cmd == GACHA_REQ_DRAW_ROULETTE):
                         box_id = intargs[0] if intargs else 101
@@ -1942,12 +1974,14 @@ def handle(conn, addr):
                         # already-current numbers.
                         char_id = intargs[0] if intargs else 0
                         pairs = list(zip(intargs[1::2], intargs[2::2]))
-                        ok, karma_xp, used = ps.give_gifts(state, char_id, pairs)
+                        ok, karma_xp, used, rank_paid = ps.give_gifts(
+                            state, char_id, pairs)
                         if ok:
                             ps.save(state)
                             k = ps.karma_of(state, char_id)
                             log(f"    -> gifts to char {char_id}: {used} = +{karma_xp} "
-                                f"karma -> rank {k['flv']} ({k['fxp']} xp)")
+                                f"karma -> rank {k['flv']} ({k['fxp']} xp)"
+                                + (f", rank bonuses {rank_paid}" if rank_paid else ""))
                             send(MSG_RPC, uint_msg(
                                 PLAYER_CHAR, CHAR_RPLY_UPDATE_FRIENDLY, [],
                                 [json.dumps({str(char_id): [k["flv"], k["fxp"]]},
@@ -1955,6 +1989,12 @@ def handle(conn, addr):
                             send(MSG_RPC, backpack_msg(
                                 84, [1],
                                 [ps.backpack_json(state, ps.BP_STORAGE_NORMAL)]))
+                            # Gifts can cross several Karma ranks in one feed, and each
+                            # crossed rank pays its Rank Bonus row.
+                            if rank_paid:
+                                for _b in karma_reward_msgs(
+                                        state, {"_paid": rank_paid}):
+                                    send(MSG_RPC, _b)
                             # cmd 84 updates the bag data but dispatches BackpackEvent
                             # 4, which no open panel listens to. Only cmd 145
                             # (HandleBackpackChagne) dispatches BackpackEvent 1, which
