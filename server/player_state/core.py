@@ -78,12 +78,31 @@ def stamina_recovered_on_rank_up(lv):
 
 PLAYER_LEVEL_UID = "player_level"      # LevelDefine..cctor, LevelType.Player = 1
 
-# How many saved teams the client expects. PanelCharacterList.OnPreviousClick wraps
-# `_teamIndex - 1 < 0` round to the literal 5, so the teams are indexed 0..5 and
-# PlayerCharData.formations must hold SIX entries -- GetTeamCharListByIndex indexes
-# the list directly and ThrowArgumentOutOfRangeException is what the formation
-# screen was dying on.
+# How many saved teams the player can BROWSE. PanelCharacterList.OnPreviousClick wraps
+# `_teamIndex - 1 < 0` round to the literal 5, so the visible teams are indexed 0..5 --
+# and PanelBattlePreparation.InitTeamIndex sets `_maxTeamListIndex = 5` for the ordinary
+# stage path to match.
 FORMATION_COUNT = 6
+# ...but `formations` is a FLAT list and several modes address DEDICATED slots past the
+# browsable six, computed rather than chosen. PanelBattlePreparation.InitTeamIndex:
+#
+#   case 8  (Guild Weekly):  _nowTeamListIndex = _maxTeamListIndex = weekday + 9
+#                            -> 10..16, one saved team per weekday boss
+#   case 7  (event, _v2 1):  _nowTeamListIndex = _maxTeamListIndex = 17  (0x11)
+#
+# InitTeamInfo then does `Formations[_nowTeamListIndex]` behind an unsigned bounds
+# check, so a short list is an ArgumentOutOfRangeException thrown mid-init -- which
+# leaves the Preparation panel half-built (normal layout, no boss art) and its Go
+# button inert, because the throw happens before the rest of OnBattlePreparationIn
+# wires anything up. Nothing on the wire; the client never gets as far as a request.
+#
+# There is no client-side count constant: `PlayerCharData.formations` is whatever the
+# server sends, so the length is ours to get right. 18 covers every index the client
+# can compute today.
+FORMATION_TOTAL = 18
+# The Guild Weekly team for weekday W (1..7) lives at this index -- server and client
+# have to agree, since the fight request carries no formation index.
+FORMATION_CHALLENGE_BASE = 9
 # Slots per team. PanelCharacterList.InitFormationSelfTeam allocates a fixed
 # `new int[5]` for the per-slot support-skill ids and walks _teamListCharIcon in
 # lockstep with the CharList, so every CharList must be exactly this long.
@@ -543,12 +562,32 @@ def _seed_roster(state):
         changed = True
     if not state.get("formations"):
         team = list(state["roster"])[:FORMATION_SLOTS]
+        team += [EMPTY_SLOT] * (FORMATION_SLOTS - len(team))
         state["formations"] = [
-            {"array": team + [EMPTY_SLOT] * (FORMATION_SLOTS - len(team)), "sup": 0}
-            if i == 0 else
-            {"array": [EMPTY_SLOT] * FORMATION_SLOTS, "sup": 0}
-            for i in range(FORMATION_COUNT)
+            # Team 1 and every Guild Weekly slot start as the seeded party. The weekday
+            # slots have no formation UI of their own -- the only way to edit one is the
+            # Edit button on the Preparation panel the boss opens -- so shipping them
+            # empty means the first Guild Weekly fight of each day goes in with nobody.
+            {"array": list(team), "sup": 0}
+            if i == 0 or FORMATION_CHALLENGE_BASE < i <= FORMATION_CHALLENGE_BASE + 7
+            else {"array": [EMPTY_SLOT] * FORMATION_SLOTS, "sup": 0}
+            for i in range(FORMATION_TOTAL)
         ]
+        changed = True
+    elif len(state["formations"]) < FORMATION_TOTAL:
+        # Accounts seeded before the dedicated slots were known stop at six, and the
+        # modes that address 10..17 throw on entry. Pad rather than rebuild so the
+        # player's existing six teams survive. Seed each Guild Weekly slot from team 1
+        # so the boss is fightable without visiting a formation screen that has no UI
+        # for these indices anyway.
+        first = (state["formations"][0] or {}).get("array") or []
+        first = list(first)[:FORMATION_SLOTS]
+        first += [EMPTY_SLOT] * (FORMATION_SLOTS - len(first))
+        while len(state["formations"]) < FORMATION_TOTAL:
+            i = len(state["formations"])
+            seed = first if FORMATION_CHALLENGE_BASE < i <= FORMATION_CHALLENGE_BASE + 7 \
+                else [EMPTY_SLOT] * FORMATION_SLOTS
+            state["formations"].append({"array": list(seed), "sup": 0})
         changed = True
     return changed
 

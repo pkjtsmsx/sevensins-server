@@ -221,9 +221,51 @@ def check_rank_json():
           str(set(r[0])))
 
 
+
+def check_formation_slots():
+    """The Guild Weekly fields a DEDICATED saved team per weekday, not team 1.
+
+    PanelBattlePreparation.InitTeamIndex, case 8 (book 8):
+        _nowTeamListIndex = _maxTeamListIndex = weekday + 9
+    and InitTeamInfo then indexes `PlayerChar.Formations[_nowTeamListIndex]` behind an
+    unsigned bounds check. `formations` is a flat server-provided list with no client
+    -side count constant, so a list of six threw ArgumentOutOfRangeException halfway
+    through init -- which left the Preparation panel drawn in its NORMAL layout (star
+    conditions, helper slot, no boss art) with a dead Go button, because the throw
+    lands before the rest of OnBattlePreparationIn wires the buttons up. Nothing
+    reaches the wire, so the server log shows only heartbeats.
+    """
+    st = fresh()
+    n = len(st["formations"])
+    check("formations covers every index the client can compute",
+          n >= ps.core.FORMATION_TOTAL, str(n))
+    # case 7 (event with _v2 == 1) hardcodes 17, which is the highest of the lot.
+    check("  ...including the event slot at 17", n > 17, str(n))
+    for wd in range(1, ch.CHALLENGE_WEEKDAYS + 1):
+        ix = wd + ps.core.FORMATION_CHALLENGE_BASE
+        check(f"weekday {wd} has a team at slot {ix}",
+              ix < n and isinstance(st["formations"][ix], dict), str(n))
+        slots = st["formations"][ix]["array"]
+        check(f"  ...with exactly {ps.core.FORMATION_SLOTS} slots",
+              len(slots) == ps.core.FORMATION_SLOTS, str(len(slots)))
+        check("  ...that actually fields somebody",
+              any(u for u in slots), str(slots))
+
+    # A six-entry account is what every save written before this was known looks like.
+    old = fresh()
+    old["formations"] = old["formations"][:6]
+    ps.core._seed_roster(old)
+    check("a legacy six-team save is padded, not rebuilt",
+          len(old["formations"]) == ps.core.FORMATION_TOTAL,
+          str(len(old["formations"])))
+    check("  ...and keeps the player's existing team 1",
+          old["formations"][0] == fresh()["formations"][0])
+
+
 def main():
     for fn in (check_content_exists, check_weekday_wiring, check_stages_json,
                check_sync_shape, check_try_scores_accumulate,
+               check_formation_slots,
                check_fight_and_score, check_daily_roll,
                check_rank_json):
         print(f"\n{fn.__name__}:")
