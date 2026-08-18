@@ -428,6 +428,14 @@ def _box_rank_bounds(stage_id):
     return (lo_star, hi_star), (lo_rank, hi_rank)
 
 
+# The Temple rotation flips on the SAME 4AM boundary as everything else in the server
+# (daily missions, shop resets, dungeon passes -- player_state.core._daily_period).
+# It used to use plain `date.today()`, i.e. midnight, so between 00:00 and 04:00 the
+# Temple had already moved to the next day's sets while the rest of the game had not.
+# player_state.core.DAILY_RESET_HOUR is bound to this so the two cannot drift.
+DAILY_RESET_HOUR = 4
+
+
 def starshard_sets_for_day(when=None):
     """The four sets the Temple offers today. Monday=0 .. Sunday=6.
 
@@ -435,10 +443,19 @@ def starshard_sets_for_day(when=None):
     Nightshade, Mystery and Devotee; TUE/THU/SAT/SUN are Defender, Chaos, Hawkeye and
     Slayer. ("Fortitude" is the current EN name for the set the pack still calls
     Endearment, 201 -- the banner's "Set(2): HP+19%" matches `equip_suit` row 1.)
+
+    Verified working against a live log 2026-08-18: one clean switch across the whole
+    file, MWF sets all Monday evening and TTSS from Tuesday on. A report of "only
+    Chaos/Hawkeye/Slayer/Defender" is that half doing its job -- check the day, and
+    check the hour, before touching this.
+
+    `when` may be a date (used as the game-day directly) or left None to derive the
+    current game day, 4AM-to-4AM.
     """
     import datetime as _dt
-    day = (when or _dt.date.today()).weekday()
-    return STARSHARD_SETS_MWF if day in (0, 2, 4) else STARSHARD_SETS_TTSS
+    if when is None:
+        when = (_dt.datetime.now() - _dt.timedelta(hours=DAILY_RESET_HOUR)).date()
+    return STARSHARD_SETS_MWF if when.weekday() in (0, 2, 4) else STARSHARD_SETS_TTSS
 
 
 def starshard_temple_depth(stage_id):

@@ -68,6 +68,42 @@ def check_day_rotation():
           == {"Chaos", "Hawkeye", "Slayer", "Defender"})
 
 
+def check_rotation_shares_the_4am_boundary():
+    """It used to flip at MIDNIGHT while every other daily in the server rolls at 4AM,
+    so for four hours a night the Temple was a day ahead of the rest of the game."""
+    import datetime as _dt
+    real = _dt.datetime
+
+    class Frozen(real):
+        _n = None
+
+        @classmethod
+        def now(cls):
+            return cls._n
+
+    _dt.datetime = Frozen
+    try:
+        def grp(dtm):
+            Frozen._n = dtm
+            return "MWF" if 201 in bt.starshard_sets_for_day() else "TTSS"
+
+        # Monday night through Tuesday morning.
+        check("22:00 Monday is still Monday's sets", grp(real(2026, 8, 17, 22)) == "MWF")
+        check("01:00 Tuesday is STILL Monday's sets (4AM boundary)",
+              grp(real(2026, 8, 18, 1)) == "MWF", grp(real(2026, 8, 18, 1)))
+        check("03:59 Tuesday is still Monday's sets",
+              grp(real(2026, 8, 18, 3, 59)) == "MWF")
+        check("04:00 Tuesday flips to Tuesday's sets",
+              grp(real(2026, 8, 18, 4)) == "TTSS", grp(real(2026, 8, 18, 4)))
+    finally:
+        _dt.datetime = real
+
+    from player_state.core import DAILY_RESET_HOUR
+    check("and the boundary is the one every other daily uses",
+          DAILY_RESET_HOUR == bt.DAILY_RESET_HOUR == 4,
+          f"{DAILY_RESET_HOUR} vs {bt.DAILY_RESET_HOUR}")
+
+
 def check_box_rank_decode():
     rows = {r.get("_title_en"): r for r in bt.dd.rows("stage").values()
             if r.get("_book") == bt.STARSHARD_BOOK}
@@ -204,7 +240,8 @@ def check_preview():
 
 
 def main():
-    for fn in (check_day_rotation, check_box_rank_decode, check_ladder_is_monotone,
+    for fn in (check_day_rotation, check_rotation_shares_the_4am_boundary,
+               check_box_rank_decode, check_ladder_is_monotone,
                check_drops_respect_the_band, check_depth_actually_matters,
                check_every_rolled_id_exists, check_preview):
         print(f"\n{fn.__name__}:")

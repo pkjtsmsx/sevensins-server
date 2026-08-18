@@ -108,7 +108,11 @@ never regresses across all 41 floors.
   is possible without making LR routine. **It is tied to depth**, which the previous
   design explicitly rejected.
 * **Sets** are the four on today's rotation — see the banner note below. Unchanged and
-  confirmed correct.
+  **verified against a live log 2026-08-18**: one clean group switch across the whole
+  file, MWF sets all Monday evening and TTSS from Tuesday on. A report of "only
+  Chaos/Hawkeye/Slayer/Defender" is that half doing its job. The rotation shares the
+  **4AM** boundary with every other daily reset — it used to flip at midnight, so for
+  four hours a night the Temple ran a day ahead of the rest of the game.
 * **Slots**: the two candidates take distinct slots, so the choice is a real one.
 
 ST-41's max rank digit is `0`, out of range for a ceiling. It is the one anomaly (a

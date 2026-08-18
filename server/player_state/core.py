@@ -189,7 +189,9 @@ def path_for(player_id):
 # `ConstantDefine.MaxChallengeTimes` -- the same floor, arrived at independently.
 DAILY_PASS_ITEM_IDS = (16, 17, 18, 19, 22)
 DAILY_PASS_FLOOR = 3
-DAILY_RESET_HOUR = 4
+# Owned by battle.py so the Starshard Temple's set rotation and every daily reset
+# here share one boundary; they used to disagree (the Temple flipped at midnight).
+DAILY_RESET_HOUR = bt.DAILY_RESET_HOUR
 
 
 def _daily_period(now=None):
