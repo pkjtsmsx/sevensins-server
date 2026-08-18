@@ -593,6 +593,23 @@ def item_bucket(item_id):
 # so [Weekly] 10042 (7 times) and [Monthly] 10052 (20 times) now move. Pass `case_v1`:
 # 2001 is SHARED with "Consume Coins x50000" (`_case_v1` 2) and the Inherit Gem rows
 # (12/21/13), and bumping the case without the discriminator advances all of them.
+# ---- Achievements (the panel's middle tab: `_type 2`, `_group 20`) ----------
+# 476 rows. **Most of them need nothing from us**: `PlayerQuest.GetQuestValue`
+# (0x1963020) opens with `if ((unsigned)(case_id - 1001) < 0x3E8) return
+# GetQuestCntFromDataType1(...)`, so every case in **1001..2000** is computed by the
+# CLIENT from data it already holds -- 1001 account rank, 1002 story clears, 1003
+# perfect clears, 1005. That is why "Advance to Rank 16" reads 15/16 while our
+# `1001_0` counter sits at 12: the client is not reading our counter at all.
+#
+# What IS ours is the rest, which come back through the ordinary `quest_db` counter
+# keyed by CaseKey. Of those:
+#   21 rune upgrade levels  -> already wired (QUEST_CASE_RUNE_LEVELS_TOTAL)
+#   6  obtain starshard `_case_v1`   } wired below
+#   9  total login days             }
+#   11 Karma rank-ups performed     }
+#   2 / 32  arena entries / arena wins -> no arena subsystem, genuinely unreachable
+# 6, 9 and 11 are declared in .core, which is where the code that bumps them lives.
+
 QUEST_CASE_DAILY_LOGIN = 1001
 QUEST_CASE_ROULETTE = 33
 QUEST_CASE_GUILD_BOSS = 2001

@@ -9,6 +9,8 @@ import battle as bt
 
 from .core import (
     ATTR_ATK,
+    QUEST_CASE_OBTAIN_RUNE,
+    bump_quest_counter,
     ATTR_DEF,
     ATTR_HP,
     ATTR_PATK,
@@ -715,6 +717,12 @@ def store_rune(state, entry):
         entry["uid"] = rune_uid(state, n)
         n += 1
     bag[str(entry["sid"])] = entry
+    # "Starshards Hunter": Clear main story 2-1 and get ★1 Endearment Starshard ①.
+    # `_case_v1` is the exact shard item id, so the bump has to name it. This is the
+    # single choke point every shard passes through -- drops, boxes, gacha, rewards --
+    # so crediting here catches all of them.
+    bump_quest_counter(state, QUEST_CASE_OBTAIN_RUNE, 1,
+                       case_v1=int(entry.get("iid") or 0))
     return entry
 
 

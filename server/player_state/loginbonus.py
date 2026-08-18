@@ -7,6 +7,7 @@ Split out of the former monolithic core.py; depends only on .core.
 import json, time
 import battle as bt
 
+from .core import QUEST_CASE_LOGIN_DAYS, bump_quest_counter
 from .mail import add_mail
 
 
@@ -93,6 +94,11 @@ def advance_login_bonus(state, now=None):
     state["login_checkin_day"] = day
     state["login_total_days"] = int(state.get("login_total_days", 0)) + 1
     state["login_last_day"] = today
+    # "Day N Log in!" -- an Achievements family (case 9), counted in LIFETIME days, not
+    # consecutive ones. Set rather than increment so an account that logged in before
+    # this was wired lands on its real total instead of starting from zero.
+    bump_quest_counter(state, QUEST_CASE_LOGIN_DAYS,
+                       to=int(state["login_total_days"]))
     return paid
 
 

@@ -819,6 +819,14 @@ QUEST_CASE_GACHA = 13
 QUEST_CASE_BUY_GOODS = 2003
 # "[Monthly] Spend over 5000 diamonds"; counts the diamonds, not the transactions.
 QUEST_CASE_SPEND_DIAMOND = 2014
+# "Project Power-Up: Increase Casts' Karma Rank N times in total" -- an Achievements
+# family (see the block in quests.py). Lives here because grant_karma is what bumps it.
+QUEST_CASE_KARMA_RANKUP = 11
+# "Clear main story 2-1 and get ★1 Endearment Starshard ①" -- `_case_v1` is the exact
+# shard ITEM id, so the bump has to name it.
+QUEST_CASE_OBTAIN_RUNE = 6
+# "Day N Log in!" -- LIFETIME days, not consecutive; set as a high-water mark.
+QUEST_CASE_LOGIN_DAYS = 9
 
 
 def quest_completed(state, qid):
@@ -890,7 +898,7 @@ def bump_quest_counter(state, case_id, amount=1, case_v1=None, to=None):
             if not quest_completed(state, row.get("_pre_quest") or 0):
                 continue
             qkey = str(qid)
-            e = state["sp_quests"].get(qkey)
+            e = state.setdefault("sp_quests", {}).get(qkey)
             if e is None:
                 e = {"id": int(qid), "a_time": 0, "cnt": 0,
                      "status": SP_QUEST_INPROGRESS}
@@ -904,9 +912,13 @@ def bump_quest_counter(state, case_id, amount=1, case_v1=None, to=None):
         key = case_key(row)
         if key in touched:
             continue
-        cur = state["quest_db"].get(key, 0)
-        state["quest_db"][key] = (max(cur, int(to)) if to is not None
-                                  else cur + amount)
+        # setdefault, not indexing: this runs from the LOGIN path now (case 9,
+        # "Day N Log in!"), and a state that has not been through `_default` -- a
+        # partially-built one, or a caller's fixture -- must not take the login down
+        # with a KeyError. `load` backfills both keys for real accounts anyway.
+        db = state.setdefault("quest_db", {})
+        cur = db.get(key, 0)
+        db[key] = max(cur, int(to)) if to is not None else cur + amount
         touched.append(key)
     return touched
 
@@ -1387,10 +1399,14 @@ def grant_karma(state, char_id, fexp):
     if k["flv"] >= MAX_FLV:
         k["flv"], k["fxp"] = MAX_FLV, 0
     paid = []
-    if int(k["flv"]) > was:
+    gained = int(k["flv"]) - was
+    if gained > 0:
         for iid, cnt in karma_rank_rewards(char_id, was, int(k["flv"])):
             grant_reward(state, iid, cnt)
             paid.append((iid, cnt))
+        # "Project Power-Up": Increase Casts' Karma Rank N times in total. Counts
+        # every rank crossed, so one big gift credits all of them.
+        bump_quest_counter(state, QUEST_CASE_KARMA_RANKUP, gained)
     k["_paid"] = paid
     return k
 
