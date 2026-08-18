@@ -320,6 +320,29 @@ def finish_challenge(state, damage, now=None):
                     grant_reward(state, int(iid), int(cnt))
                     payouts.append((int(iid), int(cnt)))
         ch["paid"] = reached + 1
+
+    # Two fields on the GUILD member record are what the raid panel's leaderboard and
+    # My Record actually read, and neither lives in `challenge`:
+    #
+    #   MongoMember.Contribution (`ctb`)  -> the "Raid pt." column. Both leaderboard
+    #       tabs sort on it (LeaderboardPersonalComparer is IComparer<MemberData>) and
+    #       UIWeeklyLeaderboardIcon iconType 0 prints
+    #       `PlayerGuild.MembersDic[member.uid].MongoData.Contribution`.
+    #   MongoMember.ChallengeTopScoreDic (`challengeTopScore`) -> the per-boss best,
+    #       keyed by CHALLENGE GROUP (not weekday index, not stage id); iconTypes 2
+    #       and 3 read `[_challengeGroup]` and print 0 when the key is absent.
+    #
+    # We were sending both, but nothing ever wrote them, so Raid pt. sat at 0 forever
+    # and every history row read 0 no matter how well the fight went.
+    guild = state.get("guild")
+    if isinstance(guild, dict):
+        guild["contribution"] = int(guild.get("contribution", 0)) + total
+        # Group N is weekday N (WeekdayGroup is the identity map -- see
+        # challenge_stages_json), and the dict is keyed by the group.
+        top = guild.setdefault("challenge_top", {})
+        key = str(weekday)
+        if total > int(top.get(key, 0)):
+            top[key] = total
     return damage, bonus, total, payouts
 
 

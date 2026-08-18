@@ -262,10 +262,56 @@ def check_formation_slots():
           old["formations"][0] == fresh()["formations"][0])
 
 
+
+def check_guild_member_record():
+    """A finished run has to move the GUILD member record, not just `challenge`.
+
+    The raid panel's leaderboard and My Record read MongoMember, not our challenge
+    block: `ctb` (Contribution) is the "Raid pt." column both leaderboard tabs sort on,
+    and `challengeTopScore` is the per-boss best, keyed by CHALLENGE GROUP. We were
+    already sending both fields -- nothing ever wrote them, so Raid pt. sat at 0 and
+    every history row read 0 however well the fight went.
+    """
+    st = fresh()
+    from player_state import guild as gd
+    st["currency"][str(gd.CUR_MIRA)] = gd.GUILD_CREATE_MIRA
+    ok, err = gd.create_guild(st, "Test", "", 0, 0)
+    check("the fixture actually founds a guild", ok, f"err {err}")
+    before = json.loads(gd.guild_members_json(st))["memberMongo"][str(st["player_id"])]
+    check("a fresh guild starts at zero Raid pt.", before["ctb"] == 0, str(before["ctb"]))
+    check("  ...and with no per-boss records", before["challengeTopScore"] == {},
+          str(before["challengeTopScore"]))
+
+    ch.start_challenge(st, 2)
+    _d, _b, total, _p = ch.finish_challenge(st, 250000)
+    row = json.loads(gd.guild_members_json(st))["memberMongo"][str(st["player_id"])]
+    check("a run adds its total to Raid pt.", row["ctb"] == total,
+          f"{row['ctb']} vs {total}")
+    wd = str(ch.challenge_weekday())
+    check("  ...and records the best under today's GROUP",
+          row["challengeTopScore"].get(wd) == total, str(row["challengeTopScore"]))
+
+    # Contribution accumulates across runs; the per-boss record keeps only the best.
+    ch.start_challenge(st, 1)
+    _d, _b, worse, _p = ch.finish_challenge(st, 1000)
+    row = json.loads(gd.guild_members_json(st))["memberMongo"][str(st["player_id"])]
+    check("Raid pt. accumulates across runs", row["ctb"] == total + worse,
+          f"{row['ctb']} vs {total + worse}")
+    check("  ...but the per-boss record keeps the BEST, not the latest",
+          row["challengeTopScore"].get(wd) == total, str(row["challengeTopScore"]))
+
+    # An account with no guild must not explode -- the raid is reachable only from the
+    # guild panel, but finish_challenge is also driven by tests and battle replays.
+    solo = fresh()
+    ch.start_challenge(solo, 1)
+    ch.finish_challenge(solo, 500)
+    check("a guildless account survives a finished run", True)
+
+
 def main():
     for fn in (check_content_exists, check_weekday_wiring, check_stages_json,
                check_sync_shape, check_try_scores_accumulate,
-               check_formation_slots,
+               check_formation_slots, check_guild_member_record,
                check_fight_and_score, check_daily_roll,
                check_rank_json):
         print(f"\n{fn.__name__}:")
