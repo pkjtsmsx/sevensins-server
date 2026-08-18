@@ -264,7 +264,14 @@ CATEGORY_BOOKS = {
     22: 22,    # Rank Up / Evolution Abyss
     23: 23,    # Transcend Corridor (+ "[Double] Transcender Hunt")
     24: 24,    # Treasure Raiders   (+ "[Double] Treasure Hunt")
-    # 8 (Guild Boss) has no stages -- the guild subsystem does not exist yet.
+    # 8 Guild Boss -- the 28 Guild Weekly stages, 1000001..1000037. An earlier note
+    # here said book 8 "has no stages"; it always had them, they were simply
+    # unreachable because no server answered PlayerChallenge. It is credited now for
+    # correctness, but nothing observable changes yet: all three case-5 rows naming
+    # category 8 ("Defeat the Guild Boss N times", 102788/103583/103584) are `_type 7`
+    # and so filtered by UNSUPPORTED_QUEST_TYPES. The counter that DOES move for the
+    # Guild Weekly is `_case_id` 2001 -- see QUEST_CASE_GUILD_BOSS.
+    8: 8,
 }
 # **A "Kizuna Quest" is NOT the Kizuna Tower.** The in-game panel titled "Kizuna
 # Quests" lists one entry per cast ("Cupid's Envoy: Ravinia", "The Undaunted: Marilu",
@@ -571,10 +578,17 @@ def item_bucket(item_id):
 #   2003 buy goods `_case_v1` (1101/1201/1301 = the free daily/weekly/monthly cards)
 #   2011 spend item `_case_v1` (5 = stamina)            2014 spend diamonds
 #   2004 complete N quests of `_case_v1` group (4 = dailies, 5 = weeklies)
-#   2001 guild boss, 2 arena, 6 obtain paid diamond -- systems we do not run, so those
-#        four rows stay at 0 and are simply unclaimable. Nothing to bump them with.
+#   2001 challenge the Guild Boss (`_case_v1` = the entry ITEM, 22 Weekly Guild Pass)
+#   2 arena, 6 obtain paid diamond -- systems we still do not run, so those rows stay
+#        at 0 and are simply unclaimable. Nothing to bump them with.
+#
+# **2001 used to be in that dead list and is not any more** -- the Guild Weekly runs,
+# so [Weekly] 10042 (7 times) and [Monthly] 10052 (20 times) now move. Pass `case_v1`:
+# 2001 is SHARED with "Consume Coins x50000" (`_case_v1` 2) and the Inherit Gem rows
+# (12/21/13), and bumping the case without the discriminator advances all of them.
 QUEST_CASE_DAILY_LOGIN = 1001
 QUEST_CASE_ROULETTE = 33
+QUEST_CASE_GUILD_BOSS = 2001
 QUEST_CASE_SPEND_ITEM = 2011
 QUEST_CASE_SPEND_DIAMOND = 2014
 QUEST_CASE_COMPLETE_QUESTS = 2004

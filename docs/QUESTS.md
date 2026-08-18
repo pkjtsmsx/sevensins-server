@@ -62,7 +62,7 @@ Always pass `case_v1=` for a discriminating case. Known cases:
 | 1 | **Kizuna Quests** | 22001–22076 (one per cast, 564 stages) |
 | 2 | Starshard Temple | 40011 |
 | 7 | ANY stage | — |
-| 8 | Guild Boss | none — guild subsystem does not exist |
+| 8 | Guild Boss | 1000001–1000037 (7 bosses × 4 difficulties) |
 | 21 | Trainers Gym | 30004, 31004 |
 | 22 | Rank Up / Evolution Abyss | 30002, 31002 |
 | 23 | Transcend Corridor | 30014 |

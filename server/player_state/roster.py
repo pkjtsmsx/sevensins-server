@@ -5,6 +5,7 @@ Split out of the former monolithic core.py; depends only on .core.
 
 
 import json
+import time
 import battle as bt
 import design_data as dd
 
@@ -512,10 +513,20 @@ def stage_json(state, now=None):
 
     `bestrec` is the per-stage best clear length. Leaving it empty is why the auto-play
     panel reads "Stage Clear Record -1 Turn(s)" and cannot estimate a sweep's duration.
-    `auto` carries the running sweep, if any."""
+    `auto` carries the running sweep, if any.
+
+    **`weekday` is 1..7 and is NOT decoration.** It is the only thing that tells the
+    client which Guild Weekly boss is today: `PanelGuildWeekly.OnChallengeClick` does
+    `challengeStages.weekday[SyncData.weekday - 1]` to pick the boss group, then
+    indexes that group by the chosen difficulty to get the stage id. The hardcoded 0
+    this used to send indexes the list at **-1**, and the bounds check is an UNSIGNED
+    compare, so it throws ArgumentOutOfRange -- the Challenge button would have died
+    on the first tap however correct the Challenge sync was. Monday is 1, matching
+    ISO weekday, which is also how the boss ids run (see player_state.challenge)."""
+    t = time.localtime(now if now is not None else time.time())
     return json.dumps({
         "entrance": {}, "stages": state["stages"],
         "bestrec": state.get("bestrec") or {},
         "auto": autorun_json(state, now),
-        "weekday": 0,
+        "weekday": t.tm_wday + 1,
     }, separators=(",", ":"))

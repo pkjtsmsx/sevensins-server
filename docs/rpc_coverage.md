@@ -7,6 +7,14 @@ panel-hang set (276 `lock_char`, 277 `char_max`, 292 `char_decompose`, 312 `set_
 General 339 `DeviceInfo` (acked — it has no reply cmd in the client enum).
 **A full login now produces ZERO unanswered commands and zero client warnings.**
 
+Updated 2026-08-18. **118 of 186** now handled. **Guild is COMPLETE (16/16)** and
+**Challenge is COMPLETE (3/3)** — the Guild Weekly boss and a one-member guild, see
+the note under Tier 3 below. The generator gained two fixes in the same pass: it can
+now see `cmd in (A, B, …)` branches (which is why Backpack went 13→14 and Mail 3→4
+with no code change — those branches were always answered, just invisible), and
+`--missing` no longer dies on import because `titan_server` reads `sys.argv[1]` as its
+port.
+
 > Prioritise by what actually fires, not by tier alone. `grep -oE "no handler for
 > index=0x[0-9a-f]+ cmd=[0-9]+" server/titan_server.log | sort | uniq -c | sort -rn`
 > ranks the real gaps; cross-reference `re/rpc_subsystems.txt` for the index names.
@@ -168,12 +176,13 @@ worked.
 | 322 | `Reborn` |
 | 337 | `Cure` |
 
-### Challenge  (0/3)
-| cmd | name |
-|---:|---|
-| 272 | `sync` |
-| 528 | `fight` |
-| 544 | `rank_guild` |
+### Challenge  — COMPLETE (3/3)
+Done 2026-08-18. The Guild Weekly boss. Its data was NOT live-ops after all: book 8 of
+the stage form holds all 28 stages (7 virtue bosses × 4 difficulties, 1000001–1000037)
+and `challenge_reward` holds the damage brackets, so the only thing missing was a
+server. `272 sync` → 784 (exactly 5 ints + 1 strarg), `528 fight` → the ordinary
+EXECUTE_SUCCESS + battle handoff, `544 rank_guild` → 801. See
+`server/player_state/challenge.py`.
 
 ### Raid  (0/5)
 | cmd | name |
@@ -219,24 +228,19 @@ worked.
 | 793 | `get_arena_team_bonus` |
 | 800 | `enemy_team_info` |
 
-### Guild  (1/16)
-| cmd | name |
-|---:|---|
-| 273 | `create` |
-| 274 | `apply` |
-| 275 | `apply_cancel` |
-| 276 | `check` |
-| 277 | `kick` |
-| 278 | `quit` |
-| 279 | `disband` |
-| 280 | `set_rank` |
-| 304 | `recommend` |
-| 305 | `search` |
-| 306 | `member_list` |
-| 308 | `edit` |
-| 309 | `setting` |
-| 310 | `sign` |
-| 311 | `guild_card_info` |
+### Guild  — COMPLETE (16/16)
+Done 2026-08-18, and the reason this tier heading is now wrong for Guild: a guild of
+ONE is not a degraded guild. `PlayerGuild` keeps no local state, so a synthesized
+single-member guild renders correctly and is what opens the Guild Weekly, the Guild Pt
+faucet, and missions 10042/10052.
+
+Five of the sixteen need a second player to exist (`274 apply`, `275 apply_cancel`,
+`276 check`, `277 kick`, `280 set_rank`) and are answered as **cmd 65535 + a
+GuildRpcErrno**. That is not a cop-out: 65535 is the only branch of
+`OnClientCmdReceived` that calls `PanelLoadingWaiting.Close`, so an error reply is the
+only thing that lifts the overlay `apply` puts up before sending.
+
+See `server/player_state/guild.py`.
 
 ### ChatRoom  (1/17)
 | cmd | name |

@@ -20,6 +20,8 @@ from .karma import *  # noqa: F401,F403
 from .battle_resume import *  # noqa: F401,F403
 from .shop import *  # noqa: F401,F403
 from .gacha import *  # noqa: F401,F403
+from .guild import *  # noqa: F401,F403
+from .challenge import *  # noqa: F401,F403
 
 # `import *` drops leading-underscore names; re-export the private helpers that
 # sibling scripts reach through the package (e.g. reset_tutorial.py uses _char_uid).

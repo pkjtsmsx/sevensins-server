@@ -72,7 +72,14 @@ def handled_pairs():
     """-> {(subsystem or None, cmd)} we answer."""
     sys.path.insert(0, SERVER)
     os.chdir(SERVER)
-    import titan_server as ts                                   # noqa: E402
+    # titan_server reads sys.argv[1] as its listen PORT at import time, so importing it
+    # from a script that takes its own flags died with
+    # `invalid literal for int(): '--missing'` -- i.e. --missing had never once run.
+    argv, sys.argv = sys.argv, sys.argv[:1]
+    try:
+        import titan_server as ts                               # noqa: E402
+    finally:
+        sys.argv = argv
     src = open(os.path.join(SERVER, "titan_server.py"), encoding="utf-8").read()
     subs = list(client_commands())
     labels = _index_labels(ts, subs)
@@ -92,6 +99,21 @@ def handled_pairs():
         idx, cmd = resolve(idx_tok), resolve(cmd_tok)
         if idx is not None and cmd is not None:
             pairs.add((labels.get(idx), cmd))
+    # `index == A ... cmd in (B, C, ...)` -- one branch answering several commands.
+    # Without this the scan under-reports exactly like it did for Battle: the Guild
+    # quit/disband, recommend/search and needs-another-player branches are all written
+    # this way, and all seven read as unhandled.
+    for idx_tok, gap, group in re.findall(
+            r"index == (\w+)(.{0,160}?)cmd in \(([^)]*)\)", src, re.S):
+        if "elif" in gap or "index ==" in gap:
+            continue
+        idx = resolve(idx_tok)
+        if idx is None:
+            continue
+        for tok in re.findall(r"\w+", group):
+            cmd = resolve(tok)
+            if cmd is not None:
+                pairs.add((labels.get(idx), cmd))
     # Table-driven: (0xINDEX, cmd): ...
     for idx_hex, cmd in re.findall(
             r"\((0x[0-9A-Fa-f]+),\s*(\d+)\)\s*:", src):

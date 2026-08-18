@@ -18,7 +18,6 @@ one. Three cards currently violate it (see "Self-inflicted" below).
 
 | id | name | spent at | needs |
 |---|---|---|---|
-| 4 | Guild Pt. | Belphe's, 8 cards | guild system |
 | 9 | Medal of Pride | Belphe's PVP tab, 9 cards | arena / PvP |
 | 11 | Paid Diamond | Mammon's, 2 cards | real-money IAP |
 
@@ -155,4 +154,6 @@ Karma is fully functional. Nothing to do here.
    than scattering.
 3. Soulmirror Scrolls (Revisited) — without them two of the three Soulmirror banners
    cannot be rolled at all.
-4. Guild / Arena / IAP when those subsystems land.
+4. Arena / IAP when those subsystems land. **Guild Pt. is no longer on this list**:
+   the guild sign-in ladder and the Guild Weekly damage brackets both pay it (see
+   `player_state/guild.py` and `player_state/challenge.py`).

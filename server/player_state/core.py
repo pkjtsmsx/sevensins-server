@@ -159,6 +159,11 @@ def _default(player_id):
         # char id -> {flv, fxp}: karma rank and progress, paid out by story decisions
         # and rendered into CharIDData. See grant_karma.
         "karma": {},
+        # The player's guild, or None when they are in none. A guild of one -- see
+        # player_state.guild for why that is the honest shape here rather than a
+        # compromise. Creating one costs 200,000 Mira and needs stage 4-10 cleared
+        # (the client greys the button out until then; we do not re-check it).
+        "guild": None,
     }
 
 
@@ -177,7 +182,12 @@ def path_for(player_id):
 # In-game tooltip: "Automatically replenishes up to 3 passes every 4:00 AM." So this is a
 # top-up to the floor, NOT an increment -- stockpiling above 3 by other means must not be
 # clawed back, and the design row's cap of 999 is the real ceiling.
-DAILY_PASS_ITEM_IDS = (16, 17, 18, 19)
+#
+# **22 "Weekly Guild Pass" is not one of those four dungeons** but belongs on the same
+# refill: it is the Guild Weekly entry ticket, PanelGuildWeekly reads its count
+# directly for the "n / 3 challenges" label, and the 3 it prints beside it is
+# `ConstantDefine.MaxChallengeTimes` -- the same floor, arrived at independently.
+DAILY_PASS_ITEM_IDS = (16, 17, 18, 19, 22)
 DAILY_PASS_FLOOR = 3
 DAILY_RESET_HOUR = 4
 
