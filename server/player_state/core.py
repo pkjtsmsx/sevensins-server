@@ -41,32 +41,39 @@ CUR_CASH, CUR_MIRA, CUR_REAL, CUR_DMM, CUR_GUILD = 1, 16, 32, 48, 64
 # balance is invisible, and a stamina reward on an already-full bar has nowhere to go.
 # The plumbing was never the problem; the seed was.
 #
-# **The stamina cap is `5 * level + 10`, and that is the CLIENT's own number, not ours.**
-# `PanelPlayerLevelUpResult.SetNewLevelInfo` (0x1592838) computes it inline --
-# `v18 = 5 * v19 + 10` where v19 is the new level -- and prints it on the rank-up popup.
-# `Energy` has no SetEnergyCap at all, so the cap the bar shows always comes from our
-# `energy_cap`; if the two disagree, the popup announces one number and the bar shows
-# another. That is the same defect class as everything else in this report, so the
-# server matches the client rather than inventing a curve.
+# **Both stamina numbers are the CLIENT's, read off the rank-up screen.**
+# `PanelPlayerLevelUpResult.SetNewLevelInfo` (0x1592838) drives two separate widgets,
+# and a screenshot of the Rank 2 screen names them:
 #
-#     lv 1 -> 15    lv 2 -> 20    lv 10 -> 60    lv 28 -> 150    lv 200 -> 1010
+#     _lbAP    text  = 5 * newLevel + 10      -> "Stamina Recovered"  (20 at rank 2)
+#     _lbAPCap GO    = SetActive(2*lv < 153)  -> the "+2 MAX Stamina" badge
 #
-# 15 at level 1 is three runs of stage 1-1 (`_ap` 5), which is a sane tutorial budget,
-# and the first rank-up shows "20" -- which is very likely the remembered "+20 stamina".
+# So the cap grows +2 a rank and the recovery is a separate, larger number. The badge's
+# condition is the cap's ceiling in disguise: `2*lv < 153` is exactly
+# `148 + 2*lv < 301`, i.e. it shows while the cap can still grow, and the cap tops out
+# at **300** (level 76). That solves for the base: cap(1) = 150, which is the value
+# reported from the live game.
+#
+#     lv 1 -> 150   lv 2 -> 152   lv 15 -> 178   lv 76 -> 300   lv 77+ -> 300
+#
+# An earlier pass here read `5*lv+10` as the CAP -- it is the recovery, and taking it
+# for the cap gave 15 stamina at rank 1.
 STARTER_DIAMONDS = 3000
-STAMINA_CAP_BASE = 10             # the +10 in the client's formula
-STAMINA_CAP_PER_LEVEL = 5
+STAMINA_CAP_BASE = 148            # cap(lv) = BASE + PER_LEVEL * lv, so cap(1) = 150
+STAMINA_CAP_PER_LEVEL = 2
+STAMINA_CAP_MAX = 300             # implied by the badge hiding at 2*lv >= 153
 
 
 def stamina_cap_for_level(lv):
-    """The Action-energy cap at account level `lv`, bounded by the design ceiling.
-
-    Mirrors PanelPlayerLevelUpResult.SetNewLevelInfo exactly. `energy.json` supplies
-    only the absolute ceiling (`_cap_max` 99999) and the 180s autofill interval -- no
-    per-level table ships, which is why the client hardcodes the curve.
-    """
+    """MAX Stamina at account level `lv` -- the client's "+2 MAX Stamina" ladder."""
+    cap = STAMINA_CAP_BASE + STAMINA_CAP_PER_LEVEL * max(1, int(lv))
     ceiling = int((bt.dd.row("energy", ENERGY_ACTION) or {}).get("_cap_max") or 99999)
-    return min(STAMINA_CAP_BASE + STAMINA_CAP_PER_LEVEL * max(1, int(lv)), ceiling)
+    return min(cap, STAMINA_CAP_MAX, ceiling)
+
+
+def stamina_recovered_on_rank_up(lv):
+    """The "Stamina Recovered" figure the rank-up screen prints for reaching `lv`."""
+    return 5 * max(1, int(lv)) + 10
 
 
 PLAYER_LEVEL_UID = "player_level"      # LevelDefine..cctor, LevelType.Player = 1
@@ -445,21 +452,14 @@ def grant_player_xp(state, add):
         lv["xp"] -= cap
         lv["lv"] = int(lv["lv"]) + 1
     lv["xp_cap"] = player_level_xp_cap(int(lv["lv"]))
-    # A level-up raises the stamina ceiling. Without this the cap stays at whatever it
-    # was seeded with and the reward for levelling is invisible all over again -- the
-    # same failure as the seed itself.
+    # Each rank raises MAX Stamina and PAYS the "Stamina Recovered" figure the rank-up
+    # screen prints -- both are the client's own numbers, one per widget. Paid per rank
+    # gained, so levelling twice at once pays twice, which is what the screen shows
+    # when it plays back to back.
     slot = state["energy"].setdefault(str(ENERGY_ACTION), {"energy": 0, "cap": 0})
-    was = int(slot.get("cap", 0))
+    for reached in range(old_lv + 1, int(lv["lv"]) + 1):
+        slot["energy"] = int(slot.get("energy", 0)) + stamina_recovered_on_rank_up(reached)
     slot["cap"] = stamina_cap_for_level(int(lv["lv"]))
-    if int(lv["lv"]) != old_lv:
-        # **Refilling on rank-up is OUR choice, not recovered.** The client's popup
-        # only prints the new cap (see stamina_cap_for_level); nothing says whether the
-        # bar is topped up. A rank-up that raised a ceiling and gave nothing to put in
-        # it would announce a reward and hand over none, which is the exact shape of
-        # the bug this whole change came out of. Never LOWERS a bar that is over cap.
-        slot["energy"] = max(int(slot.get("energy", 0)), slot["cap"])
-    elif was != slot["cap"]:
-        slot["energy"] = int(slot.get("energy", 0))
     return int(lv["lv"]) != old_lv, old_lv, int(lv["lv"])
 
 

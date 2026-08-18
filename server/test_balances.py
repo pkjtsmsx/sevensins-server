@@ -39,20 +39,48 @@ def check(name, cond, detail=""):
 
 
 def client_cap(lv):
-    """The client's own formula, transcribed from the level-up popup."""
+    """MAX Stamina, from the client's "+2 MAX Stamina" ladder."""
+    return min(148 + 2 * lv, 300)
+
+
+def client_recovered(lv):
+    """The "Stamina Recovered" figure -- `_lbAP` = 5 * newLevel + 10."""
     return 5 * lv + 10
 
 
+def check_the_two_numbers_are_not_the_same_one():
+    """The rank-up screen has TWO stamina widgets and they are different figures.
+
+    A Rank 2 screenshot names them: "20 Stamina Recovered" and "+2 MAX Stamina". An
+    earlier pass read `5*lv+10` (the recovery) as the cap and got 15 stamina at rank 1.
+    """
+    check("rank 2 recovers 20, matching the screenshot",
+          ps.stamina_recovered_on_rank_up(2) == 20,
+          str(ps.stamina_recovered_on_rank_up(2)))
+    check("MAX Stamina goes up by exactly +2 a rank",
+          all(client_cap(lv + 1) - client_cap(lv) == 2 for lv in range(1, 76)))
+    check("  ...and the two are NOT the same number",
+          ps.stamina_recovered_on_rank_up(2) != ps.stamina_cap_for_level(2),
+          f"{ps.stamina_recovered_on_rank_up(2)} vs {ps.stamina_cap_for_level(2)}")
+
+
 def check_cap_matches_the_client():
-    for lv in (1, 2, 3, 10, 15, 28, 76, 100, 200):
-        check(f"cap at lv {lv} is the client's {client_cap(lv)}",
+    for lv in (1, 2, 3, 10, 15, 28, 76, 77, 100, 200):
+        check(f"MAX Stamina at lv {lv} is {client_cap(lv)}",
               ps.stamina_cap_for_level(lv) == client_cap(lv),
               str(ps.stamina_cap_for_level(lv)))
+    check("rank 1 is 150, as reported from the live game",
+          ps.stamina_cap_for_level(1) == 150, str(ps.stamina_cap_for_level(1)))
+    # The badge hides at 2*lv >= 153, which IS the cap reaching its 300 ceiling.
+    check("the cap stops growing exactly where the client hides the +2 badge",
+          ps.stamina_cap_for_level(76) == 300 and ps.stamina_cap_for_level(77) == 300
+          and (2 * 76 < 153) and not (2 * 77 < 153),
+          f"{ps.stamina_cap_for_level(76)}/{ps.stamina_cap_for_level(77)}")
     # Level 1 has to be playable: stage 1-1 costs 5 AP.
     import battle as bt
     ap = int((bt.dd.row("stage", 1101) or {}).get("_ap") or 0)
-    check("a level-1 account can afford at least three runs of 1-1",
-          ps.stamina_cap_for_level(1) >= ap * 3, f"{ps.stamina_cap_for_level(1)} vs {ap}x3")
+    check("a level-1 account can afford a real session of 1-1",
+          ps.stamina_cap_for_level(1) >= ap * 10, f"{ps.stamina_cap_for_level(1)} vs {ap}x10")
 
 
 def check_new_account():
@@ -87,21 +115,34 @@ def check_rewards_now_move_the_numbers():
           stam_before < st["energy"]["1"]["cap"], str(stam_before))
 
 
-def check_rank_up_raises_and_fills():
+def check_rank_up_pays_what_the_screen_says():
     st = ps.load(1000004)
     st["level"]["lv"] = 1
-    st["energy"]["1"] = {"energy": 2, "cap": ps.stamina_cap_for_level(1)}
-    levelled, old, new = ps.grant_player_xp(st, 10 ** 5)
-    check("ranking up happens", levelled and new > old, f"{old}->{new}")
-    check("  ...raises the cap to the client's number",
-          st["energy"]["1"]["cap"] == client_cap(new), str(st["energy"]["1"]))
-    check("  ...and fills the bar, so the popup is not an empty promise",
-          st["energy"]["1"]["energy"] == st["energy"]["1"]["cap"], str(st["energy"]["1"]))
-    # A bar already over cap (from stamina items) must not be clawed back.
+    st["energy"]["1"] = {"energy": 5, "cap": ps.stamina_cap_for_level(1)}
+    levelled, old, new = ps.grant_player_xp(st, 100)
+    check("ranking up happens", levelled and new == 2, f"{old}->{new}")
+    check("  ...raises MAX Stamina to +2", st["energy"]["1"]["cap"] == client_cap(2),
+          str(st["energy"]["1"]))
+    check("  ...and hands over the Stamina Recovered figure, not a refill",
+          st["energy"]["1"]["energy"] == 5 + client_recovered(2),
+          str(st["energy"]["1"]))
+
+    # Two ranks in one go must pay both, which is what the screen does back to back.
+    st2 = ps.load(1000008)
+    st2["level"]["lv"] = 1
+    st2["energy"]["1"] = {"energy": 0, "cap": ps.stamina_cap_for_level(1)}
+    _l, o, n = ps.grant_player_xp(st2, 10 ** 4)
+    want = sum(client_recovered(x) for x in range(o + 1, n + 1))
+    check(f"gaining {n - o} ranks at once pays every one of them",
+          st2["energy"]["1"]["energy"] == want,
+          f"{st2['energy']['1']['energy']} vs {want}")
+
+    # A bar over cap (stamina items stack past MAX) must never be clawed back.
     st["energy"]["1"]["energy"] = 9999
+    before = st["energy"]["1"]["energy"]
     ps.grant_player_xp(st, 10 ** 5)
-    check("an over-cap bar survives a rank-up",
-          st["energy"]["1"]["energy"] == 9999, str(st["energy"]["1"]))
+    check("an over-cap bar is never lowered by a rank-up",
+          st["energy"]["1"]["energy"] >= before, str(st["energy"]["1"]))
 
 
 def check_migration_is_one_shot_and_safe():
@@ -138,8 +179,9 @@ def check_migration_is_one_shot_and_safe():
 
 
 def main():
-    for fn in (check_cap_matches_the_client, check_new_account,
-               check_rewards_now_move_the_numbers, check_rank_up_raises_and_fills,
+    for fn in (check_the_two_numbers_are_not_the_same_one,
+               check_cap_matches_the_client, check_new_account,
+               check_rewards_now_move_the_numbers, check_rank_up_pays_what_the_screen_says,
                check_migration_is_one_shot_and_safe):
         print(f"\n{fn.__name__}:")
         fn()
