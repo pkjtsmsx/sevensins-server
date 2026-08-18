@@ -216,6 +216,9 @@ def parse_segment(text, trigger, catalog):
     ch = CHANCE_RE.search(text)
     if ch:
         base["chance"] = int(ch.group(1))
+    # Character spans already claimed as a damage COEFFICIENT, so the stat shorthand
+    # below does not re-read them as a buff.
+    _coef_spans = []
 
     # damage, two word orders:
     #  "deals X% ATK as damage [N times]"
@@ -246,6 +249,21 @@ def parse_segment(text, trigger, catalog):
                         "times": WORDNUM.get((t or "").lower(),
                                              int(t) if t and t.isdigit() else 1),
                         "target": target_of(text) or "enemy_target"})
+    # Combined ATK+DEF damage, written as a parenthetical coefficient:
+    # "Deals damage 3 times (20% ATK+50% DEF)". Both halves scale the SAME hit, which
+    # is what the engine's damage op already does with pct_atk + pct_def.
+    # This has to come with the exclusion below: the stat shorthand reads the "ATK+50"
+    # inside those brackets as a +50% ATK buff, so the clause parsed `complete` while
+    # landing no damage at all -- Belphegor's Barrel Break and 24 siblings dealt zero.
+    for m in re.finditer(r"deals?\s+damage(?:\s+(\d+|two|three|four|five)\s+times?)?\s*"
+                         r"\(\s*(\d+)%\s*ATK\s*\+\s*(\d+)%\s*DEF\s*\)", text, re.I):
+        t = m.group(1)
+        effects.append({**base, "op": "damage",
+                        "pct_atk": int(m.group(2)), "pct_def": int(m.group(3)),
+                        "times": WORDNUM.get((t or "").lower(),
+                                             int(t) if t and t.isdigit() else 1),
+                        "target": target_of(text) or "enemy_target"})
+        _coef_spans.append(m.span())
     # HP-based absolute damage: "deals X% HP-based absolute damage" (% of target Max HP).
     for m in re.finditer(r"deals?\s+(\d+)%?\s+HP-based\s+absolute\s+damage", text, re.I):
         effects.append({**base, "op": "damage", "pct_target_maxhp": int(m.group(1)),
@@ -296,6 +314,8 @@ def parse_segment(text, trigger, catalog):
     # stat shorthand: "ATK+30%", "MAX HP+3000", "Basic SPD+15", "DEF-20%" (buff = self).
     for m in re.finditer(r"\b(MAX HP|Basic SPD|ATK|DEF|SPD|HP|CRIT)\s*([+\-])\s*(\d+)(%?)",
                          text, re.I):
+        if any(a <= m.start() < b for a, b in _coef_spans):
+            continue                    # "(20% ATK+50% DEF)" is a coefficient, not a buff
         raw = m.group(1).upper()
         stat = "HP" if "HP" in raw else ("SPD" if "SPD" in raw else raw)
         effects.append({**base, "op": "stat_mod", "stat": stat,
