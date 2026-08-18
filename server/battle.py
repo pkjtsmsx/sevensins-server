@@ -113,9 +113,21 @@ _level_cache = {}
 # suffixed IV, so the party starts at rank 4.
 SKILL_RANK = 4
 
-# SCV charge gauge (the blue bar): UICharStatus.SyncBar draws scv/100, so 100 is full.
-# The ultimate (skill slot 3) is gated on a full gauge.
-SCV_FULL, SCV_PER_TURN, ULTIMATE_SLOT = 100, 25, 2
+# The blue bar under each portrait is the MOVE GAUGE, not an ultimate charge.
+# `UICharStatus.SyncBar` (0x2000A74) draws it as `LightBattleChar.Scv / 100`, and three
+# other things name it for what it is: skill prose says "boosts the caster's Move Gauge
+# by 30%", BattleDatas carries a `CharListByScv` queue next to `ActionOrderList`, and
+# DamageInfo mode 4 is `DamageMode.SCV` (AttackBehavior.ShowScvBar). So the fight is an
+# ATB: every unit's gauge fills at its own SPD and whoever fills first takes the turn.
+# Treating it as a per-turn +25 charge is what made the bar read ~0 on your own turn.
+SCV_FULL, ULTIMATE_SLOT = 100, 2
+# The ultimate's own gate is DesignSkillRow._charge (design column "charge", 0..6 and
+# only ever set on _type 3 SP skills): the number of the unit's OWN turns it must bank
+# before the button lights up. 0 means "ready from the first turn".
+DEFAULT_ULTIMATE_CHARGE = 0
+# Gauges are floats, so "full" is a hair below SCV_FULL -- an exact compare can leave
+# the ATB step with nobody ready.
+FULL_EPS = SCV_FULL - 1e-6
 # DesignSkillRow._type (SkillType enum): 4 = PASSIVE. A passive's effects are event-
 # driven (battle_start / on_counter), not fired by an active use -- see battle_effects.
 SKILLTYPE_PASSIVE = 4
@@ -743,11 +755,15 @@ class Unit:
         self.atk = stats["atk"] + bonus.get("atk", 0)
         self.defense = stats["def"] + bonus.get("def", 0)
         self.spd = stats["spd"]
-        # The blue bar under each character's HP: UICharStatus draws it as scv/100,
-        # so it is a 0..100 charge gauge that gates the ultimate. Publishing a flat 0
-        # left it permanently empty. Fill rate is a RECONSTRUCTION -- the real one
-        # lived on the server -- chosen so it charges over a few turns.
-        self.scv = 0
+        # The blue bar under each character's HP: the 0..100 MOVE GAUGE. It fills at
+        # the unit's own SPD (Battle._roll_turn_order) and empties when the unit takes
+        # its turn, so it reads full exactly when the unit is acting. Float internally,
+        # int on the wire.
+        self.scv = 0.0
+        # Own turns taken, which is what gates the special move at battle open. NEVER
+        # spent -- see ultimate_charge() for why _charge is an opening delay and not a
+        # recurring cost. This is what scv used to stand in for.
+        self.charge = 0
         # Per-slot rank from the cast's total limit (skill_limit = limit_book +
         # limit_char, plus super_star), NOT a flat rank -- see skill_ranks.
         base_skills = [s for s in (row.get("_skills") or []) if s]
@@ -773,11 +789,42 @@ class Unit:
             self.cooldowns[slot] = self.cd_turns(slot)
 
     def tick_cooldowns(self):
+        """End-of-own-turn housekeeping: reload skills and count the turn taken.
+        The move gauge is NOT touched here -- it is spent by Battle.end_turn and
+        refilled by the ATB in _roll_turn_order."""
         self.cooldowns = [max(0, c - 1) for c in self.cooldowns]
-        self.scv = min(SCV_FULL, self.scv + SCV_PER_TURN)
+        self.charge += 1
+
+    def ultimate_charge(self):
+        """Own turns the special move must wait before its FIRST cast, from
+        `DesignSkillRow._charge` (design column "charge").
+
+        **An opening delay, not a recurring cost, and not a meter the player spends.**
+        The column is real and deliberately authored -- it exists only on `_type` 3 SP
+        rows, and across 831 skill groups it FALLS with skill level in 263 and rises in
+        exactly 0, so it is a level-up reward, unlike `_target`/`_count`/`_action` which
+        are byte-identical across a group's six levels. But it cannot recur per use:
+        `_charge <= _cdTurn` in 2368 of 2380 rows, so a per-use charge would be masked
+        by the longer reload essentially always and the per-level tuning would be
+        invisible. The only moment it can bite is battle open. There is no UI for it
+        either -- the one "Charge" string (text 113034) is in the top-up cluster -- so
+        `charge` here just counts own turns and is never spent.
+        """
+        if ULTIMATE_SLOT >= len(self.skills):
+            return DEFAULT_ULTIMATE_CHARGE
+        row = dd.row("skill", self.skills[ULTIMATE_SLOT]) or {}
+        return int(row.get("_charge") or DEFAULT_ULTIMATE_CHARGE)
 
     def ultimate_ready(self):
-        return self.scv >= SCV_FULL
+        return self.charge >= self.ultimate_charge()
+
+    def fill_time(self):
+        """How long this unit still needs to fill its move gauge, in SPD-units. Used
+        only to compare units against each other, so the absolute scale is arbitrary."""
+        return max(0.0, SCV_FULL - self.scv) / max(1, self.spd)
+
+    def fill_gauge(self, seconds):
+        self.scv = min(float(SCV_FULL), self.scv + seconds * max(1, self.spd))
 
     def passives(self):
         """The unit's PASSIVE skill ids that the effect engine fully understands.
@@ -802,7 +849,7 @@ class Unit:
             # is the remaining cooldown, which HandleJudge overwrites for slots 1..3
             # from its intargs. A non-zero value here greys the skill button out.
             "skdic": [[s, cd] for s, cd in zip(self.skills, self.cooldowns)],
-            "scv": self.scv, "spd": self.spd, "lv": self.lv, "atk": self.atk,
+            "scv": int(self.scv), "spd": self.spd, "lv": self.lv, "atk": self.atk,
             "star": self.star, "plus": 0, "be1": 0, "be2": 0,
         }
 
@@ -814,7 +861,7 @@ class Unit:
         return {
             "hp": self.hp if current else self.max_hp,
             "atk": self.atk, "def": self.defense, "spd": self.spd,
-            "scv": self.scv if current else SCV_FULL,
+            "scv": int(self.scv) if current else SCV_FULL,
             "cri": 0, "tgn": 0, "cdi": 0, "cdr": 0, "prc": 0,
             "ehit": 0, "eanti": 0, "ddi": 0, "ddr": 0,
         }
@@ -841,7 +888,7 @@ class Unit:
 
     def sync(self):
         """BattleUnitManager.SyncData reads exactly [MaxHP, HP, Scv, SPD]."""
-        return [self.max_hp, self.hp, self.scv, self.spd]
+        return [self.max_hp, self.hp, int(self.scv), self.spd]
 
     def to_state(self):
         """Only the fields that ever change after __init__ (see Battle.to_state's
@@ -849,6 +896,7 @@ class Unit:
         reconstruction, so freezing them here would be redundant, not safer."""
         return {
             "hp": self.hp, "max_hp": self.max_hp, "scv": self.scv,
+            "charge": self.charge,
             "cooldowns": self.cooldowns,
             "dmg_done": self.dmg_done, "dmg_taken": self.dmg_taken,
             "healed": self.healed,
@@ -858,7 +906,8 @@ class Unit:
     def restore_state(self, saved):
         self.hp = saved["hp"]
         self.max_hp = saved["max_hp"]
-        self.scv = saved["scv"]
+        self.scv = float(saved["scv"])
+        self.charge = saved.get("charge", 0)
         self.cooldowns = list(saved["cooldowns"])
         self.dmg_done = saved.get("dmg_done", 0)
         self.dmg_taken = saved.get("dmg_taken", 0)
@@ -1024,14 +1073,60 @@ class Battle:
         return sorted(mob_ids), sorted(skill_ids)
 
     def _roll_turn_order(self):
-        """Fastest first. The client only displays this order (and GetFirst takes
-        entry 0 as the acting unit), so the server stays authoritative."""
-        # Pure speed order, which is the real rule. At their proper star tier the
-        # party outruns this stage's mobs anyway (Leviathan 1170 vs 992/974), so the
-        # tutorial naturally opens with her turn.
+        """Run the move gauges forward until someone is full, then project the queue.
+
+        Two halves, and the split is the point:
+          * the REAL gauges advance only as far as the first unit needs to fill, so
+            whoever is about to act is sitting at a full bar -- which is what the
+            player sees under the portrait. Idempotent: once anyone is at SCV_FULL the
+            step is zero, so calling this again (a death prune, a resume) is free.
+          * the rest of the queue is simulated on a COPY, so merely showing the order
+            never spends anyone's gauge.
+        The projection is deduped down to one entry per unit: `line` has always been a
+        permutation of the live orders and UpdateTimeLine keys its row per unit, so a
+        fast unit that would lap the field stays a single entry.
+        """
         alive = [u for u in self.units.values() if u.alive]
-        alive.sort(key=lambda u: (-u.spd, u.team, u.index))
-        self.turn_order = [u.order for u in alive]
+        if not alive:
+            self.turn_order = []
+            return
+        # Ties (everyone opens at 0, so the whole field ties on the first roll) break
+        # the way they always did: faster first, then the player team, then slot.
+        def rank_key(u):
+            return (-u.spd, u.team, u.index)
+        step = min(u.fill_time() for u in alive)
+        if step > 0:
+            for u in alive:
+                u.fill_gauge(step)
+            # Same rounding guard as the projection below: the leader must actually
+            # read full, or the client draws a 99% bar on the unit taking its turn.
+            lead = min(alive, key=lambda u: (u.fill_time(), *rank_key(u)))
+            lead.scv = float(SCV_FULL)
+        rank = {u.order: rank_key(u) for u in alive}
+        sim = {u.order: float(u.scv) for u in alive}
+        queue = []
+        # Bounded: each pass either appends a new order or laps someone already in the
+        # queue, and a lap costs a full gauge, so len(alive) passes per entry is ample.
+        for _ in range(len(alive) * len(alive) + len(alive)):
+            if len(queue) == len(alive):
+                break
+            ready = [u for u in alive if sim[u.order] >= FULL_EPS]
+            if not ready:
+                gap = min((SCV_FULL - sim[u.order]) / max(1, u.spd) for u in alive)
+                for u in alive:
+                    sim[u.order] = min(float(SCV_FULL),
+                                       sim[u.order] + gap * max(1, u.spd))
+                # Whoever needed the least time IS full now; float rounding must not
+                # be allowed to leave the step with nobody ready and the loop stuck.
+                ready = [u for u in alive if sim[u.order] >= FULL_EPS]
+                if not ready:
+                    ready = [min(alive, key=lambda u: (SCV_FULL - sim[u.order])
+                                 / max(1, u.spd))]
+            nxt = min(ready, key=lambda u: rank[u.order])
+            sim[nxt.order] = 0.0
+            if nxt.order not in queue:
+                queue.append(nxt.order)
+        self.turn_order = queue
 
     def _defend_reduce(self):
         """A damage-reduction function the effect engine calls per target: the client's
@@ -1166,13 +1261,12 @@ class Battle:
         }, separators=(",", ":"))
 
     def spend_skill(self, attacker_order, slot):
-        """Put the used skill on cooldown, and drain the gauge for an ultimate."""
+        """Put the used skill on cooldown. Nothing else is spent -- the special move's
+        `_charge` is an opening delay, not a per-use cost (see Unit.ultimate_charge)."""
         unit = self.units.get(attacker_order)
         if not unit:
             return
         unit.use_skill(slot)
-        if slot == ULTIMATE_SLOT:
-            unit.scv = 0
 
     def attack_cmd_json(self, attacker_order, defender_order, skill_id):
         """BattleCmd for cmd 1201, carrying the actual attack in `combo`.
@@ -1435,8 +1529,16 @@ class Battle:
         cds = list(unit.cooldowns) if unit else []
         cd = [cds[i] if i < len(cds) else 0 for i in (1, 2, 3)]
         sealed = bool(unit and fx.has_flag(unit, "ability_seal"))
-        # button 3 is the ultimate: locked while on cooldown OR the gauge is short
-        ult_locked = sealed or bool(cd[1]) or not (unit and unit.ultimate_ready())
+        # Button 3 is the ultimate, and it is gated by CHARGE as well as by cooldown.
+        # The button has exactly one number -- UISkillBtn.LeftCD, drawn from
+        # SkillList[i][1] and only when it is > 0 (PanelBattle._setBtnState 0x176B6BC)
+        # -- so publish "turns until this lights up": the larger of the reload and the
+        # charge still to bank. Without this a charge-gated ultimate is a dark button
+        # with no number and no explanation, because the blue bar is the move gauge now
+        # and no longer doubles as the charge readout.
+        charge_left = max(0, unit.ultimate_charge() - unit.charge) if unit else 0
+        cd[1] = max(cd[1], charge_left)
+        ult_locked = sealed or bool(cd[1])
         return [0, 1 if (sealed or cd[0]) else 0, 1 if ult_locked else 0,
                 cd[0], cd[1], cd[2]]
 
@@ -1447,15 +1549,13 @@ class Battle:
         acted = self.acting_unit()
         if acted:
             acted.tick_cooldowns()
+            # Taking the turn is what SPENDS the move gauge -- the bar empties here
+            # and refills over the following turns at the unit's own SPD.
+            acted.scv = 0.0
             # Count down this unit's statuses on its own turn; drop the expired.
             if acted.statuses:
                 acted.statuses = [s for s in acted.statuses if not s.tick()]
-        if self.turn_order:
-            self.turn_order.append(self.turn_order.pop(0))
-        self.turn_order = [o for o in self.turn_order
-                           if self.units.get(o) and self.units[o].alive]
-        if not self.turn_order:
-            self._roll_turn_order()
+        self._roll_turn_order()
         self.round += 1
         self.turn_open = False
         self._start_of_turn()
@@ -1470,17 +1570,16 @@ class Battle:
             return
         fx.tick_dot_hot(unit)
         if not unit.alive:
-            self.turn_order = [o for o in self.turn_order
-                               if self.units.get(o) and self.units[o].alive]
-            if not self.turn_order:
-                self._roll_turn_order()
+            self._roll_turn_order()
             self._start_of_turn(_depth + 1)
             return
         if fx.is_immobilized(unit.statuses):
             unit.tick_cooldowns()
             if unit.statuses:
                 unit.statuses = [s for s in unit.statuses if not s.tick()]
-            self.turn_order.append(self.turn_order.pop(0))
+            # A skipped turn still costs the gauge, or the queue never moves on.
+            unit.scv = 0.0
+            self._roll_turn_order()
             self.round += 1
             self._start_of_turn(_depth + 1)
 
