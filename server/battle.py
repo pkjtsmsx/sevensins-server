@@ -1858,7 +1858,25 @@ class Battle:
     def rating_flags(self):
         """1/0 per rating condition, index-aligned with rating_rows(), which is what
         BattleReward.ratingList carries. Conditions we cannot judge (the kizuna-lead
-        and other-mode types 4..22) report 0 rather than a false positive."""
+        and other-mode types 4..22) report 0 rather than a false positive.
+
+        **Always RATING_SLOTS long, even when the stage defines no conditions.**
+        `PanelBattleResult.CheckAppsFlyer` opens with
+
+            list = PlayerBattle.GetRewardRatingList()
+            if (list.Count <= 3) ThrowArgumentOutOfRangeException()
+            if (list[3] == 1) ...
+
+        -- an unconditional read of index 3 before any of its stage-id branches, and it
+        runs from `OnClickResultEnd`. A short list therefore throws on the Tap to End
+        button itself: the result panel renders fine, the score is banked, and then the
+        button does nothing, every tap, forever. Guild Weekly is where this surfaced
+        (book 8 leaves all four `_rating_datas` empty, so we sent []), but it would
+        strike any stage defining fewer than four conditions.
+
+        Padding is honest here: a slot with no condition was not met, and both
+        consumers are indifferent -- rating_rewards zips against rating_rows and
+        truncates, rating_mask contributes no bit for a zero."""
         cleared = self.wave_cleared()
         flags = []
         for row in self.rating_rows():
@@ -1890,6 +1908,8 @@ class Battle:
             else:
                 ok = False
             flags.append(1 if ok else 0)
+        # CheckAppsFlyer reads index 3 unconditionally -- see the docstring.
+        flags += [0] * (RATING_SLOTS - len(flags))
         return flags
 
     def rating_mask(self, flags=None):

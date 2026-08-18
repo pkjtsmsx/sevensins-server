@@ -874,5 +874,32 @@ def test_auto_play_sweep():
           not total_mismatch, str(total_mismatch[:3]))
 
 
+    # ---- ratingList is always four long ------------------------------------------
+    # PanelBattleResult.CheckAppsFlyer opens with
+    #     list = PlayerBattle.GetRewardRatingList()
+    #     if (list.Count <= 3) throw; if (list[3] == 1) ...
+    # -- an unconditional read of index 3, reached from OnClickResultEnd. A short list
+    # throws on the Tap to End BUTTON: the panel renders, the score banks, and then the
+    # button is dead on every tap. Book 8 leaves all four _rating_datas empty, which is
+    # where this surfaced, but any stage with fewer than four conditions would do it.
+    short = []
+    for stage_id in sorted(bt.dd.rows("stage")):
+        try:
+            b = bt.Battle(int(stage_id), _ps.battle_team(st, 0), 100, None, 0, 0)
+        except Exception:
+            continue
+        if len(b.rating_flags()) < 4:
+            short.append((stage_id, len(b.rating_flags())))
+    check("every fieldable stage sends at least four rating flags",
+          not short, f"{len(short)} short, e.g. {short[:5]}")
+
+    # Padding must not invent stars or rewards for a stage that defines no conditions.
+    b = bt.Battle(1000002, _ps.battle_team(st, 0), 100, None, 0, 0)   # Guild Weekly
+    check("  ...and a condition-less stage still earns no mask",
+          b.rating_mask() == 0, str(b.rating_mask()))
+    check("  ...and pays no rating rewards", b.rating_rewards() == [],
+          str(b.rating_rewards()))
+
+
 if __name__ == "__main__":
     main()
