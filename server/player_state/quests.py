@@ -11,6 +11,8 @@ import re
 import battle as bt
 
 from .core import (
+    RUNE_ACTION_RANGE,
+    SOULFRAG_SLOT_INDEX,
     BP_STORAGE_EQUIPMENT,
     SP_QUEST_INPROGRESS,
     _daily_period,
@@ -559,6 +561,11 @@ def item_bucket(item_id):
     have happened."""
     row = bt.dd.row("item", item_id) or {}
     action, param = row.get("_action"), row.get("_param1") or 0
+    # Must track grant_reward exactly -- it is the whole point of this function. A
+    # starshard/soulmirror is rolled into its own storage, so reporting "backpack"
+    # pushed the wrong sync and left the Starshards panel showing the old inventory.
+    if action in RUNE_ACTION_RANGE or action in SOULFRAG_SLOT_INDEX:
+        return "equipment"
     if action == ITEM_ACTION_CURRENCY and param:
         return "currency"
     if action == ITEM_ACTION_ENERGY and param:

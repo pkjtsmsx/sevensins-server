@@ -1872,6 +1872,15 @@ def handle(conn, addr):
                         if "energy" in buckets:
                             send(MSG_RPC, uint_msg(0xAE487D79, 512, [],
                                                    [ps.energy_json(state)]))
+                        if "equipment" in buckets:
+                            # A goal that pays a starshard rolls a real instance into
+                            # storage 2; BACKPACK_CHANGE carries the list AND the info
+                            # rows the "Inventory n/999" counter reads.
+                            send(MSG_RPC, backpack_msg(
+                                BACKPACK_CHANGE, [0],
+                                [ps.backpacks_all_json(state,
+                                                       {ps.BP_STORAGE_EQUIPMENT}),
+                                 ps.backpack_info_json(state)]))
                     elif index == PLAYER_CHAR_SERVER and cmd == CHAR_REQ_FORMATION:
                         # intargs = [teamIndex + 1, support, 1]; strargs = the slot
                         # uids. Persist it and echo the stored FormationData back --

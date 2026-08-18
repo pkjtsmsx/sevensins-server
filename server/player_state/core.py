@@ -843,6 +843,22 @@ def grant_reward(state, item_id, amount):
     bucket it landed in so the caller knows which sync to push."""
     row = bt.dd.row("item", item_id) or {}
     action, param = row.get("_action"), row.get("_param1") or 0
+    # **A starshard or soulmirror is an INSTANCE, not a stack.** Bagging one puts a
+    # stackable row in Normal storage, where `GetItemSpace` cannot file it and the
+    # player never sees it -- the piece has to be rolled into its own storage with a
+    # uid and attributes. Found 2026-08-18: the goal step that pays a "★3 LR
+    # Starshard" selector resolved a real shard id and then bagged it, so the popup
+    # named a shard the player never received.
+    if action in RUNE_ACTION_RANGE:
+        from .gear import grant_rune              # local: gear imports core, not us
+        for _ in range(max(1, int(amount))):
+            grant_rune(state, item_id, rune_slot(item_id) or 1)
+        return "equipment"
+    if action in SOULFRAG_SLOT_INDEX:
+        from .gear import grant_soulmirror        # local: gear imports core, not us
+        for _ in range(max(1, int(amount))):
+            grant_soulmirror(state, item_id)
+        return "equipment"
     if action == ITEM_ACTION_CURRENCY and param:
         key = str(param)
         state["currency"][key] = int(state["currency"].get(key, 0)) + amount

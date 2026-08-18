@@ -238,14 +238,9 @@ RUNE_BUNDLES = {
     1200023: ("Hawkeye", 4),
     1200024: ("Defender", 4),
     1200020: (None, 3),          # ★3 (UR-LR) Random Starshard Luckybag (Slot 6)
-    # Soul Altar "Summon Star Shards": each card is bought with the ticket for exactly
-    # that shard (301..304 -> 311..314). The card names a RANK (SR/UR/LR) as well as a
-    # star, but rank is not a field on the shard rows, so the roll is by star across
-    # every element -- right in kind, looser in grade.
-    311: (None, 1),
-    312: (None, 2),
-    313: (None, 3),
-    314: (None, 4),
+    # 311..314 (the Soul Altar "Summon Star Shards" cards) used to be listed here as
+    # (None, star) -- except the second field is a GRADE, so they rolled the wrong thing
+    # in both axes. They are decoded from their names now; see starshard_any_suit_box.
 }
 
 # **Drop Info shows "SET" icons, which are display-only and cannot be used.** They are
@@ -340,30 +335,140 @@ def awaker_pool(star, alignments=None):
     return _awaker_pool_cache[key]
 
 
-# The "Random ★N <suit>" boxes, items 1001..1030 -- what the Netherworld Note pays for
-# its Temple steps, and `_action 2` like every other box, so they land nowhere and the
-# reward popup strips them. Claiming step 38 filed an unholdable item 1014 in the bag
-# and showed the player nothing.
+# The per-suit starshard boxes -- what the Netherworld Note pays for its Temple steps,
+# and `_action 2` like every other box, so they land nowhere and the reward popup strips
+# them. Claiming step 28 filed an unholdable item 323 in the bag and showed the player
+# nothing.
 #
-# **Do not hand-list these; `_param1` encodes them.** It reads `52 | star | suit`:
-# 5211 = ★1 Endearment, 5234 = ★3 Slayer, 5265 = ★6 Nightshade. (The EN names are
-# useless here -- all five suits in a tier are captioned "Random ★N Endearment", a
-# copy-paste in the localisation. `_param1` also happens to collide with real
-# `equipment` row ids, which is a coincidence: 5251+ do not exist there at all, so it
-# is not an equipment reference.)
+# **`_param1` encodes them, in TWO families, and the old decode got both wrong**
+# (found 2026-08-18 from a report that the stage-28 goal paid no starshard):
 #
-# A shard's suit is its own item `_param1` -> DesignEquipment `_suitID`, and the star
-# is `_rarity`; the slot is the action, 111..116 -> 1..6.
-RANDOM_RUNE_BOX = re.compile(r"^52(\d)(\d)$")
+#   items 1001..1240, "Random ★N <suit>"  ->  p1 = (50 + 2*suit)*100 + star*10 + slot
+#       5211 = suit 1 Endearment ★1 slot 1      5434 = suit 2 Chaos ★3 slot 4
+#       prefixes run 52/54/56/58/60/62/64/66 for suits 1..8.
+#   items 321..396,   "★N <suit>"         ->  p1 = 2500 + suit*10 + star
+#       2513 = suit 1 Endearment ★3            2586 = suit 8 Devotee ★6
+#
+# The previous version matched only `^52(\d)(\d)$`, so:
+#   * **210 of the 240 boxes did not match at all** -- every suit but Endearment
+#     granted nothing, which is most of the Note's Temple rewards;
+#   * for the 30 that did, it read the last digit as the SUIT when it is the SLOT, so
+#     item 1014 "Random ★3 Endearment" handed over a ★3 **Slayer**.
+#
+# Its comment asserted "5234 = ★3 Slayer" and that the EN names were an unusable
+# copy-paste. Both are wrong, and checkable: the names repeat across SLOTS (1001..1005
+# are all "Random ★I Endearment" because the name omits the slot), not across suits, and
+# all 240 rows agree with the formula above -- see test_goal_rewards.py, which asserts
+# exactly that against every box in the pack.
+# **The NAME is authoritative, `_param1` only corroborates.** There are THIRTEEN suits
+# (equip_suit 1..13, Endearment..Bloodcraze), and the `_param1` encoding above only
+# holds for the first eight: from item 1241 ("Random ★3 Innocence", p1 6666) it
+# degenerates into a flat counter while the name keeps tracking suit and star. Decoding
+# 6666 by formula yields "Devotee ★6" -- confidently wrong. So parse the name, and use
+# `_param1` only as a cross-check on the range it does cover.
+_BOX_NAME = re.compile(r"^(?:Random\s+)?\u2605(I|\d)\s+(\w+)$")
+_SLOTTED_BOX_PREFIX_BASE = 50     # p1 // 100 == 50 + 2*suit, suits 1..8 only
+_PLAIN_BOX_PREFIX = 25            # p1 // 100 == 25, suits 1..8 only
+_suit_ids_by_name = {}
+
+
+def _suit_id(name):
+    if not _suit_ids_by_name:
+        for sid, row in (bt.dd.rows("equip_suit") or {}).items():
+            if row.get("_suitName_en"):
+                _suit_ids_by_name[row["_suitName_en"]] = int(sid)
+    return _suit_ids_by_name.get(name)
+
+
+def _box_param1_star_suit(p):
+    """(star, suit) from `_param1`, for the two families that encode it, else None."""
+    prefix, rest = divmod(int(p), 100)
+    if prefix == _PLAIN_BOX_PREFIX:                       # 2500 + suit*10 + star
+        suit, star = divmod(rest, 10)
+    elif prefix > _SLOTTED_BOX_PREFIX_BASE and not (prefix - _SLOTTED_BOX_PREFIX_BASE) % 2:
+        suit = (prefix - _SLOTTED_BOX_PREFIX_BASE) // 2   # 52->1 .. 66->8
+        star = rest // 10
+    else:
+        return None
+    return (star, suit) if 1 <= suit <= 8 and 1 <= star <= 6 else None
 
 
 def random_rune_box(item_id):
-    """-> (star, suit id) for a 1001..1030 box, or None."""
+    """-> (star, suit) for a per-suit starshard box, or None.
+
+    The slot, where the id carries one, is deliberately dropped: `rune_star_suit_pool`
+    rolls any slot, which is what the "Random" in the name means for the player.
+    """
     row = bt.dd.row("item", int(item_id)) or {}
     if row.get("_action") != 2:
         return None
-    m = RANDOM_RUNE_BOX.match(str(row.get("_param1") or ""))
-    return (int(m.group(1)), int(m.group(2))) if m else None
+    m = _BOX_NAME.match((row.get("_itemName_en") or "").strip())
+    if not m:
+        return None
+    star = 1 if m.group(1) == "I" else int(m.group(1))
+    suit = _suit_id(m.group(2))
+    if not suit or not (1 <= star <= 6):
+        return None
+    return (star, suit)
+
+
+# The canonical per-suit shard bands. A starshard id is `ELEMENT*1000 + slot*100 +
+# rank*10 + star`, and elements 201..221 are the ordinary sets -- 180 ids each, the full
+# 6 slots x 5 ranks x 6 stars grid. Elements 720/726/727 also carry a `_suitID` and so
+# used to leak into these pools: they are fixed-stat event variants ("LR Chaos Starshard
+# II_ATK"), and handing one over for a plain "★3 Chaos" box is the wrong item.
+# NOTE the element is NOT 200 + suit beyond suit 8 -- 209 is suit 11, 212 is suit 9,
+# 214 is suit 10 -- so this is a band test, not an arithmetic one.
+STARSHARD_ELEMENT_BAND = range(201, 222)
+
+
+# The ANY-SUIT boxes: "Random ★N Starshard" (291..296, any rank) and
+# "Random ★N <RANK> Starshard" (311..314, a fixed rank). Name-driven for the same
+# reason as the per-suit ones -- `_param1` is ambiguous across the two: 291 "★I
+# Starshard" is 2401 while 311 "★I SR Starshard" is 2413, so the same 24xx prefix means
+# `2400 + star` in one and `2400 + star*10 + grade` in the other.
+#
+# These used to be hand-listed in RUNE_BUNDLES as `313: (None, 3)`, where the 3 was fed
+# to `rune_bundle_pool` as a GRADE (`_param2` = rank + 1) while the comment called it a
+# star -- so "Random ★3 LR Starshard" rolled any star at SR, and paid out ★6 SR.
+_ANY_SUIT_BOX = re.compile(
+    r"^(?:Random\s+)?\u2605(I|\d)\s+(?:(N|R|SR|UR|LR)\s+)?Starshard$")
+STARSHARD_RANKS = ("N", "R", "SR", "UR", "LR")     # id digit `rank`, 0..4
+
+
+def starshard_any_suit_box(item_id):
+    """-> (star, rank or None) for an any-suit starshard box, else None.
+
+    Accepts `_action` 7 as well as 2: item 226 "★3 LR Starshard" is a SELECTOR whose
+    name follows the identical convention, and the client has no panel to offer the
+    choice anyway (see the selector note in grant_goods).
+    """
+    row = bt.dd.row("item", int(item_id)) or {}
+    if row.get("_action") not in (2, SELECTOR_ACTION):
+        return None
+    m = _ANY_SUIT_BOX.match((row.get("_itemName_en") or "").strip())
+    if not m:
+        return None
+    star = 1 if m.group(1) == "I" else int(m.group(1))
+    rank = STARSHARD_RANKS.index(m.group(2)) if m.group(2) else None
+    return (star, rank) if 1 <= star <= 6 else None
+
+
+def rune_any_suit_pool(star, rank=None):
+    """Every canonical shard at `star`, across all suits, optionally at one rank.
+
+    A shard id is ELEMENT*1000 + slot*100 + rank*10 + star, so both axes are read
+    straight off the id -- rank is NOT missing from the data, which is what the old
+    "rank is not a field on the shard rows" note assumed.
+    """
+    key = ("any", star, rank)
+    if key not in _rune_pool_cache:
+        pool = [int(i) for i in (bt.dd.rows("item") or {})
+                if int(i) // 1000 in STARSHARD_ELEMENT_BAND
+                and int(i) % 10 == star
+                and (rank is None or (int(i) // 10) % 10 == rank)]
+        _rune_pool_cache[key] = sorted(pool)
+    return _rune_pool_cache[key]
 
 
 def rune_star_suit_pool(star, suit):
@@ -374,6 +479,8 @@ def rune_star_suit_pool(star, suit):
         pool = []
         for iid, row in (bt.dd.rows("item") or {}).items():
             if int(row.get("_action") or 0) not in range(111, 117):
+                continue
+            if int(iid) // 1000 not in STARSHARD_ELEMENT_BAND:
                 continue
             if int(row.get("_rarity") or 0) != star:
                 continue
@@ -751,7 +858,15 @@ SELECTOR_POOLS = {
 
 def selector_pool(item_id):
     """The item ids a selector offers, or [] if we do not model that one."""
-    return list(SELECTOR_POOLS.get(int(item_id)) or ())
+    known = SELECTOR_POOLS.get(int(item_id))
+    if known:
+        return list(known)
+    # Starshard selectors name their own contents ("★3 LR Starshard"), so they need no
+    # hand-written pool -- without this, goal step 68 handed over nothing at all.
+    any_suit = starshard_any_suit_box(item_id)
+    if any_suit:
+        return rune_any_suit_pool(*any_suit)
+    return []
 
 
 def is_selector(item_id):
@@ -848,6 +963,18 @@ def grant_goods(state, item_id, amount, rng=None):
     star_suit = random_rune_box(item_id)
     if star_suit:
         pool = rune_star_suit_pool(*star_suit)
+        if pool:
+            from .gear import grant_rune       # local: gear imports core, not us
+            got = None
+            for _ in range(max(1, amount)):
+                got = rng.choice(pool)
+                grant_rune(state, got, rune_slot(got) or 1)
+            return [], got, max(1, amount)
+
+    # An ANY-SUIT box: "Random ★3 LR Starshard" and friends.
+    any_suit = starshard_any_suit_box(item_id)
+    if any_suit:
+        pool = rune_any_suit_pool(*any_suit)
         if pool:
             from .gear import grant_rune       # local: gear imports core, not us
             got = None
