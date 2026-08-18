@@ -25,6 +25,7 @@ from .core import (                                                     # noqa: 
     flat_bonus,
     grant_immunity,
     has_flag,
+    hit_count,
     aoe_damage,
     design_enemy_targets,
     target_range,

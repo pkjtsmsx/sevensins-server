@@ -163,6 +163,22 @@ def design_enemy_targets(skill_id, primary, enemies):
     return None
 
 
+def hit_count(skill_id):
+    """How many separate SWINGS the skill plays -- DesignSkillRow._count, whose design
+    column is literally "hit".
+
+    This is a wire-shape requirement, not flavour. `AttackJsonData.data` is a
+    List<List<DamageInfo>> with ONE INNER LIST PER SWING: the skill's cinematic fires a
+    BscTagKind-5 tag per hit and `AttackBehavior.BscTag` (0x1BE3924) hands
+    `DmgInfo[0]` to OnDamageAndNumber and then `RemoveAt(0)`s it. Ship a 3-hit skill as
+    a single group and the client draws one damage number and silently drops the other
+    two swings.
+    """
+    from design_data import row as _row          # local: keeps this module mock-testable
+    n = int(((_row("skill", int(skill_id)) or {}).get("_count")) or 0)
+    return max(1, n)
+
+
 def aoe_damage(skill_id):
     """True if this skill's FIRST damage op strikes every enemy.
 
@@ -474,7 +490,11 @@ def _new_outcome(trusted=True):
     # `gauge`/`cd` collect turn-flow changes the caller applies to its own Unit fields
     # (scv, cooldowns), which the engine's unit protocol deliberately does not expose.
     # `status_events` = each named status applied this action, for DamageInfo.status icons.
-    return {"hits": [], "self": {"heal": 0, "statuses": [], "gauge": 0},
+    # `strikes` is every INDIVIDUAL blow in swing order -- {"target", "damage", "seq"}
+    # -- kept alongside the per-target fold in `hits` because the client needs one
+    # DamageInfo group per swing to animate a multi-hit skill (see hit_count).
+    return {"hits": [], "strikes": [],
+            "self": {"heal": 0, "statuses": [], "gauge": 0},
             "gauge": [], "cd": [], "status_events": [], "deferred": [], "trusted": trusted}
 
 

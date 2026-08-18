@@ -1195,7 +1195,17 @@ class Battle:
                     # picons stay empty (picons = passive-icon list, not yet used).
                     "status": [], "extra": [], "picons": [], "pskill_id": 0}
 
-        rows = []
+        # `data` is List<List<DamageInfo>>: ONE INNER LIST PER SWING, not one list of
+        # everything. The skill's cinematic fires a BscTagKind-5 tag per hit and
+        # AttackBehavior.BscTag (0x1BE3924) pops `DmgInfo[0]` for each one, so a 3-hit
+        # skill shipped as a single group animates once and drops the other two swings.
+        # DesignSkillRow._count is the swing count (see fx.hit_count).
+        swings = fx.hit_count(skill_id) if skill_id else 1
+        groups = [[] for _ in range(swings)]
+
+        def add(seq, u, amount):
+            groups[min(max(seq, 0), swings - 1)].append(dmg_info(u, amount))
+
         status_events = []
         if attacker and target and fx.is_complete(skill_id):
             # Trusted skill -> full effect engine: correct per-hit coefficients, real
@@ -1210,12 +1220,16 @@ class Battle:
             outcome = fx.execute_skill(attacker, target, allies, enemies, skill_id,
                                        damage_reduce=reduce, env=env)
             status_events += outcome["status_events"]
+            # Totals off the per-target FOLD (one addition per target), the wire rows
+            # off the per-swing list -- same damage, different shape.
             for h in outcome["hits"]:
                 if h["damage"] > 0:
-                    rows.append(dmg_info(h["target"], h["damage"]))
                     self.damage_sum += h["damage"]
                     attacker.dmg_done += h["damage"]
                     h["target"].dmg_taken += h["damage"]
+            for st in outcome["strikes"]:
+                if st["damage"] > 0:
+                    add(st["seq"], st["target"], st["damage"])
             # on_use / after_action gauge & cooldown changes (e.g. drain the target's
             # gauge, delay its skills, refresh the caster's own cooldowns).
             self._apply_gauge_cd(outcome)
@@ -1235,7 +1249,9 @@ class Battle:
                     status_events += c_out["status_events"]
                     for ch in c_out["hits"]:
                         if ch["damage"] > 0:
-                            rows.append(dmg_info(ch["target"], ch["damage"]))
+                            # The counter lands after the combo, so it rides the last
+                            # swing rather than opening the sequence.
+                            add(swings - 1, ch["target"], ch["damage"])
                             self.damage_sum += ch["damage"]
                             tgt.dmg_done += ch["damage"]
                             ch["target"].dmg_taken += ch["damage"]
@@ -1259,28 +1275,47 @@ class Battle:
             for victim in victims:
                 # Rolled per target: `damage` reads the victim's own DEF, so a shared
                 # number would over-hit the tanky and under-hit the frail.
-                damage = self.damage(attacker, victim, skill_id)
-                victim.hp = max(0, victim.hp - damage)
-                self.damage_sum += damage
-                attacker.dmg_done += damage
-                victim.dmg_taken += damage
-                rows.append(dmg_info(victim, damage))
-        if not rows and target:
-            rows.append(dmg_info(target, 0))    # never send an empty combo
+                # The prose coefficient is PER SWING ("Deals 120% DEF as damage 3
+                # times"), which is how the effect engine reads it too, so a multi-hit
+                # skill lands its roll once per swing instead of once in total.
+                for seq in range(swings):
+                    damage = self.damage(attacker, victim, skill_id)
+                    victim.hp = max(0, victim.hp - damage)
+                    self.damage_sum += damage
+                    attacker.dmg_done += damage
+                    victim.dmg_taken += damage
+                    add(seq, victim, damage)
+        # An empty group would eat one of the cinematic's hit tags and show nothing,
+        # so only the groups that actually carry rows go on the wire.
+        groups = [g for g in groups if g]
+        if not groups and target:
+            groups = [[dmg_info(target, 0)]]    # never send an empty combo
+        # `die` belongs on the LAST row that names a unit: dmg_info reads the unit's
+        # FINAL state, so a unit killed on swing 1 would otherwise be told to play its
+        # death animation on every remaining swing.
+        died_seen = set()
+        for g in reversed(groups):
+            for r in reversed(g):
+                if not r["die"]:
+                    continue
+                if r["c"] in died_seen:
+                    r["die"] = 0
+                else:
+                    died_seen.add(r["c"])
         # Attach status icons to the lead DamageInfo. Each entry is [order, skillID,
         # round]: the client resolves the graphic from a _type-6 STATUS skill's
         # _statusID (see _status_wire) and counts `round` down itself, so one push per
         # application is enough. Every entry names its own unit order, so hanging them
         # all off the first row reaches every affected unit.
-        if rows:
-            rows[0]["status"] = self._status_wire(status_events)
+        if groups:
+            groups[0][0]["status"] = self._status_wire(status_events)
         self._tally_statuses(status_events)
 
         cmd = json.loads(self.battle_cmd_json(
             cur_team=attacker.team if attacker else TEAM_PLAYER))
         cmd["combo"] = [{
             "caster": attacker_order, "skill": skill_id, "pskill_id": 0,
-            "data": [rows],
+            "data": groups,
         }]
         # sync/line have to reflect the post-damage state, so rebuild them after
         # applying the hit rather than reusing the pre-attack snapshot.

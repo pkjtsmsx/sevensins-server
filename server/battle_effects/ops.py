@@ -23,7 +23,7 @@ def _damage(eff, ctx):
     eff_atk = effective_atk(a)
     eff_def = a.defense * stat_multiplier(a.statuses, "DEF") + flat_bonus(a.statuses, "DEF")
     for u in ctx.targets(eff.get("target")):
-        for _ in range(times):
+        for i in range(times):
             mitigable = (eff_atk * pct + eff_def * pct_def) / 100.0
             val = mitigable * (1.0 - ctx.reduce(u)) * damage_taken_multiplier(u.statuses)
             val += u.max_hp * pct_hp / 100.0
@@ -33,6 +33,11 @@ def _damage(eff, ctx):
             e = ctx.hit_entry(u)
             e["damage"] += dmg
             e["died"] = not u.alive
+            # Also record the blow on its own, tagged with its swing index: the folded
+            # entry is what the server's totals want, one row per swing is what the
+            # client's animation wants.
+            ctx.outcome["strikes"].append(
+                {"target": u, "damage": dmg, "seq": i})
 
 
 @register("apply_status")
