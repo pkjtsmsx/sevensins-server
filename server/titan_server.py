@@ -646,15 +646,22 @@ def stage_execute_reply():
 def karma_reward_msgs(state, karma):
     """Syncs for whatever a Karma rank-up just paid -> [encoded rpc, ...].
 
-    `grant_karma` stashes the paid lines on the karma dict as `_paid`; a rank bonus is
-    usually Diamonds (currency) but the tables also pay plain items, so route by the
-    same buckets everything else uses.
+    `grant_karma` stashes the paid lines on the karma dict as `_paid`.
+
+    **The Rank Bonus is MAILED**, which the rank-up splash states outright (text 115605,
+    "Sent to mailbox"). So the sync that matters is the MAIL one -- the balances have not
+    moved yet and will not until the player claims. Without this the mail arrives with no
+    unread badge, so nothing on screen suggests there is anything to collect.
+
+    The bucket pushes below are kept because they cost nothing when the buckets are
+    empty and they cover any future rank bonus routed straight to the account.
     """
     paid = (karma or {}).get("_paid") or []
     if not paid:
         return []
+    out = [uint64_msg(PLAYER_MAIL, MAIL_RPLY_UNREAD,
+                      [0, ps.unread_mail_count(state), 0], [])]
     buckets = {ps.item_bucket(iid) for iid, cnt in paid if iid and cnt}
-    out = []
     if "currency" in buckets:
         out.append(sint_msg(0xBC8FDA7C, 512, [], [ps.currency_json(state)]))
     if "backpack" in buckets:

@@ -73,9 +73,18 @@ def check_a_single_rank_up_pays_once():
     k = ps.grant_karma(st, LUCIFER, need)
     check("the rank advances by one", k["flv"] == 2, str(k["flv"]))
     check("  ...and pays only that rank's bonus", k["_paid"] == [(1, 50)], str(k["_paid"]))
-    check("  ...landing in the diamond balance",
-          int(st["currency"]["1"]) - before == 50,
+    # **Mailed, not granted.** The rank-up splash says so itself -- text 115605,
+    # "Sent to mailbox", printed beside the reward on the Karma RANK screen. So the
+    # balance must NOT move; the items wait in the mail until claimed.
+    check("  ...WITHOUT touching the diamond balance",
+          int(st["currency"]["1"]) == before,
           f"{before} -> {st['currency']['1']}")
+    mails = st.get("mail") or []
+    check("  ...and arriving as mail instead", bool(mails), str(mails))
+    check("  ...carrying the 50 diamonds",
+          mails and mails[-1]["items"].get("1") == 50, str(mails[-1] if mails else None))
+    check("  ...titled with the rank reached",
+          mails and mails[-1]["custom"] == "Karma Rank 2", str(mails[-1]["custom"]))
 
 
 def check_multi_rank_pays_every_rank_crossed():
@@ -88,17 +97,24 @@ def check_multi_rank_pays_every_rank_crossed():
     check("  ...and pays every paying rank in the range",
           k["_paid"] == every, f"{len(k['_paid'])} vs {len(every)}")
     diamonds = sum(c for i, c in every if i == 1)
+    # Every crossed rank rides in ONE mail -- the splash announces a rank, and several
+    # ranks crossed at once should not bury the player in mail.
+    mails = st.get("mail") or []
+    check("  ...all in a single mail", len(mails) == 1, str(len(mails)))
     check("  ...for the full diamond total",
-          int(st["currency"]["1"]) - before == diamonds,
-          f"{int(st['currency']['1']) - before} vs {diamonds}")
+          mails and mails[-1]["items"].get("1") == diamonds,
+          f'{mails[-1]["items"] if mails else None} vs {diamonds}')
     check("  ...which is more than a single rank would pay",
           diamonds > 50, str(diamonds))
+    check("  ...and the balance still has not moved",
+          int(st["currency"]["1"]) == before,
+          f'{before} -> {st["currency"]["1"]}')
 
     # Ranking up again from there must not re-pay what was already banked.
-    mid = int(st["currency"]["1"])
+    mid = len(st.get("mail") or [])
     again = ps.grant_karma(st, LUCIFER, 10 ** 5)
     check("re-granting at max pays nothing twice",
-          int(st["currency"]["1"]) == mid, str(again["_paid"]))
+          len(st.get("mail") or []) == mid, str(again["_paid"]))
 
 
 def check_no_rank_up_pays_nothing():

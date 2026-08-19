@@ -1405,6 +1405,12 @@ def char_flv_need_xp(rarity, lv):
 KARMA_UNLOCK_ITEM = 5
 
 
+# Mail format 105 is subject `{custom}` / content `{custom}` -- the only fully generic
+# row in the form. The attachment rides in its OWN field (`6`->`7` in the mail JSON),
+# not via the `{attachment}` content token, so items render regardless of the body text.
+KARMA_RANK_MAIL_FORMAT = 105
+
+
 def karma_rank_rewards(char_id, from_flv, to_flv):
     """[(item_id, count), ...] owed for climbing from `from_flv` to `to_flv`."""
     out = []
@@ -1444,9 +1450,22 @@ def grant_karma(state, char_id, fexp):
     paid = []
     gained = int(k["flv"]) - was
     if gained > 0:
-        for iid, cnt in karma_rank_rewards(char_id, was, int(k["flv"])):
-            grant_reward(state, iid, cnt)
-            paid.append((iid, cnt))
+        # **The Rank Bonus is MAILED, not granted.** The rank-up splash says so in as
+        # many words -- text 115605, "Sent to mailbox", printed next to the reward on
+        # the Karma RANK screen. Granting it straight into the bag left the player with
+        # items and no record of where they came from, and contradicted the one piece
+        # of UI that explains the reward.
+        owed = karma_rank_rewards(char_id, was, int(k["flv"]))
+        if owed:
+            from .mail import add_mail
+            items = {}
+            for iid, cnt in owed:
+                items[str(iid)] = items.get(str(iid), 0) + int(cnt)
+                paid.append((iid, cnt))
+            # One mail per rank-up, not per line: the splash announces a rank, and a
+            # rank can carry several bonus rows.
+            add_mail(state, KARMA_RANK_MAIL_FORMAT, items,
+                     custom=f"Karma Rank {int(k['flv'])}")
         # "Project Power-Up": Increase Casts' Karma Rank N times in total. Counts
         # every rank crossed, so one big gift credits all of them.
         bump_quest_counter(state, QUEST_CASE_KARMA_RANKUP, gained)
