@@ -38,6 +38,24 @@ FILE_LIST = os.path.join(ROOT, "hostapp", "server_files.json")
 DEFAULT_OUT = os.path.join(ROOT, "hostapp_update")
 
 
+# A package directory ships WHOLESALE, so anything lying in it rides along. A stale
+# `player_state/core.py.bak-refactor` (225 KB, ~30% of the payload) was going out to the
+# phone this way: dead weight on a metered connection, and the kind of thing that grows
+# silently because nobody looks at the file list. Editor leftovers and backups are never
+# importable anyway -- a module name cannot contain a dot -- so exclude them by shape
+# rather than maintaining a denylist of specific filenames.
+_STRAY_SUFFIXES = (".orig", ".rej", ".swp", ".swo", "~")
+
+
+def _is_stray(name):
+    if name.endswith(_STRAY_SUFFIXES):
+        return True
+    # core.py.bak-refactor, foo.py.old, bar.json.2 -- anything with a suffix AFTER the
+    # real extension. A legitimate data file has exactly one dot-extension.
+    stem, _, _ = name.partition(".")
+    return name.count(".") > 1 and not name.endswith((".py", ".json", ".html"))
+
+
 def _iter_files(base, rel):
     """-> every real file under base/rel (a module path or a package/data dir), skipping
     __pycache__/.pyc/accounts -- the same exclusions stageServer applies."""
@@ -48,7 +66,7 @@ def _iter_files(base, rel):
     for dirpath, dirs, files in os.walk(full):
         dirs[:] = [d for d in dirs if d != "__pycache__" and d != "accounts"]
         for name in files:
-            if name.endswith(".pyc"):
+            if name.endswith(".pyc") or _is_stray(name):
                 continue
             yield os.path.relpath(os.path.join(dirpath, name), base)
 
