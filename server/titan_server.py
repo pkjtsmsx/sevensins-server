@@ -669,26 +669,30 @@ def karma_reward_msgs(state, karma):
     rows = (karma or {}).get("_rows") or []
     if not paid and not rows:
         return []
-    # One 563 per crossed rank, FIRST -- the splash needs the queue populated before
-    # PanelEvilUp is launched, and the client launches it off its own tween.
-    out = [uint_msg(PLAYER_CHAR, CHAR_RPLY_FLV_REWARDS, [int(r)], []) for r in rows]
-    if not paid:
-        return out
-    out.append(uint64_msg(PLAYER_MAIL, MAIL_RPLY_UNREAD,
-                          [0, ps.unread_mail_count(state), 0], []))
-    buckets = {ps.item_bucket(iid) for iid, cnt in paid if iid and cnt}
-    if "currency" in buckets:
-        out.append(sint_msg(0xBC8FDA7C, 512, [], [ps.currency_json(state)]))
-    if "backpack" in buckets:
-        out.append(backpack_msg(84, [1],
-                                [ps.backpack_json(state, ps.BP_STORAGE_NORMAL)]))
-    if "energy" in buckets:
-        out.append(uint_msg(0xAE487D79, 512, [], [ps.energy_json(state)]))
-    if "equipment" in buckets:
-        out.append(backpack_msg(BACKPACK_CHANGE, [0],
-                                [ps.backpacks_all_json(state,
-                                                       {ps.BP_STORAGE_EQUIPMENT}),
-                                 ps.backpack_info_json(state)]))
+    # **The 563s go LAST.** `PanelEvilUp.OnPanelDirty` consumes exactly ONE queued row
+    # per dirty pass and CLOSES the panel on a pass that finds the queue empty. So any
+    # message that lands after the splash opens and re-dirties the panel eats the next
+    # row -- with a single rank crossed that is one show followed immediately by a
+    # close, which is the "banner flashes then vanishes" symptom. Emitting the mail and
+    # bucket syncs first keeps the queue as the last thing to change.
+    out = []
+    if paid:
+        out.append(uint64_msg(PLAYER_MAIL, MAIL_RPLY_UNREAD,
+                              [0, ps.unread_mail_count(state), 0], []))
+        buckets = {ps.item_bucket(iid) for iid, cnt in paid if iid and cnt}
+        if "currency" in buckets:
+            out.append(sint_msg(0xBC8FDA7C, 512, [], [ps.currency_json(state)]))
+        if "backpack" in buckets:
+            out.append(backpack_msg(84, [1],
+                                    [ps.backpack_json(state, ps.BP_STORAGE_NORMAL)]))
+        if "energy" in buckets:
+            out.append(uint_msg(0xAE487D79, 512, [], [ps.energy_json(state)]))
+        if "equipment" in buckets:
+            out.append(backpack_msg(BACKPACK_CHANGE, [0],
+                                    [ps.backpacks_all_json(state,
+                                                           {ps.BP_STORAGE_EQUIPMENT}),
+                                     ps.backpack_info_json(state)]))
+    out += [uint_msg(PLAYER_CHAR, CHAR_RPLY_FLV_REWARDS, [int(r)], []) for r in rows]
     return out
 
 

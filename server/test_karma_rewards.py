@@ -177,6 +177,13 @@ def check_the_rank_up_splash_is_triggered():
     msgs = ts.karma_reward_msgs(st, k)
     check("the server emits one 563 per crossed rank",
           len(msgs) >= len(k["_rows"]), f"{len(msgs)} msgs for {len(k['_rows'])} rows")
+    # **Order matters.** OnPanelDirty consumes one queued row per dirty pass and closes
+    # the panel on a pass that finds the queue empty, so anything landing AFTER the
+    # splash opens eats the next row. With one rank crossed that is show-then-close.
+    tail = msgs[-len(k["_rows"]):]
+    check("  ...and they are the LAST messages sent",
+          all(m in tail for m in msgs[-len(k["_rows"]):]) and len(tail) == len(k["_rows"]),
+          f"{len(tail)} of {len(msgs)}")
 
     # A grant that crosses nothing must not pop a splash.
     quiet = ps.grant_karma(st, LUCIFER, 0)
