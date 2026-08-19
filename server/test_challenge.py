@@ -308,10 +308,60 @@ def check_guild_member_record():
     check("a guildless account survives a finished run", True)
 
 
+
+def check_fight_uses_the_raid_team():
+    """The raid fields its OWN saved team, and an edit to it has to reach the fight.
+
+    InitTeamIndex case 8 puts the Guild Weekly on `weekday + 9`, and the Edit button on
+    the Preparation panel edits that slot -- the client saves it with PlayerChar cmd 274
+    carrying a 1-BASED index (12 for slot 11). But cmd 528 then starts the fight with
+    only [use_bc, difficulty] and no team index, so the server has to derive the same
+    number. Reading `battle_team_index` instead fielded whatever team the last CAMPAIGN
+    stage used, so editing the raid team changed the panel and nothing else.
+    """
+    st = fresh()
+    ix = ch.challenge_formation_index()
+    check("the raid team is weekday + 9",
+          ix == ch.challenge_weekday() + ps.core.FORMATION_CHALLENGE_BASE, str(ix))
+    check("  ...and is one of the slots we actually send",
+          ix < len(st["formations"]), f"{ix} vs {len(st['formations'])}")
+
+    # Give the campaign team and the raid team different, identifiable rosters.
+    owned = list(st["roster"])
+    raid_five = list(reversed(owned))[:ps.core.FORMATION_SLOTS]
+    st["formations"][0] = {"array": owned[:ps.core.FORMATION_SLOTS], "sup": 0}
+    st["formations"][ix] = {"array": raid_five, "sup": 0}
+    # ...and leave a campaign fight's index lying around, which is what used to win.
+    st["battle_team_index"] = 0
+
+    fielded = [e["uid"] for e in ps.battle_team(st, ch.challenge_formation_index())]
+    check("the raid fields the raid team", fielded == raid_five, str(fielded))
+    check("  ...and NOT the last campaign team",
+          fielded != [e["uid"] for e in ps.battle_team(st, 0)], str(fielded))
+
+    # The client's own save path: 1-based index over the wire.
+    edited = raid_five[1:] + raid_five[:1]
+    ps.set_formation(st, 12 - 1, edited, 0)
+    # set_formation pads to FORMATION_SLOTS, so compare the filled slots.
+    check("a cmd-274 edit at 1-based 12 lands on raid slot 11",
+          [u for u in st["formations"][11]["array"] if u] == edited,
+          str(st["formations"][11]))
+    check("  ...and the next fight picks it up",
+          [e["uid"] for e in ps.battle_team(st, ix)] == edited)
+
+    # Every weekday boss keeps its own team; they must not collide.
+    slots = {wd: ch.challenge_formation_index(
+                 now=__import__("time").time() + 86400 * (wd - ch.challenge_weekday()))
+             for wd in range(1, ch.CHALLENGE_WEEKDAYS + 1)}
+    check("each weekday boss has its own distinct team slot",
+          len(set(slots.values())) == ch.CHALLENGE_WEEKDAYS, str(slots))
+
+
 def main():
     for fn in (check_content_exists, check_weekday_wiring, check_stages_json,
                check_sync_shape, check_try_scores_accumulate,
                check_formation_slots, check_guild_member_record,
+               check_fight_uses_the_raid_team,
                check_fight_and_score, check_daily_roll,
                check_rank_json):
         print(f"\n{fn.__name__}:")

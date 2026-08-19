@@ -3184,9 +3184,22 @@ def handle(conn, addr):
                                 case_v1=ps.CHALLENGE_PASS_ITEM)
                             if bumped:
                                 log(f"    -> guild boss quest counters {bumped}")
-                            team_ix = state.get("battle_team_index", 0)
+                            # **The raid fields its OWN team, not the last one used.**
+                            # InitTeamIndex case 8 puts the Guild Weekly on a dedicated
+                            # saved team per weekday boss (`weekday + 9`), and the Edit
+                            # button on the Preparation panel edits exactly that one.
+                            # This used to read `battle_team_index`, which is set by the
+                            # ordinary stage-execute path -- so the raid fought with
+                            # whatever team the last CAMPAIGN stage used and editing the
+                            # raid team changed the panel and nothing else. Unlike a
+                            # stage execute, cmd 528 carries no team index, so we have to
+                            # derive the same number the client did.
+                            team_ix = ps.challenge_formation_index()
                             team_ix = max(0, min(int(team_ix),
                                                  len(state.get("formations") or [0]) - 1))
+                            # Remembered so the XP payout and a resumed fight use the
+                            # same party, exactly as the stage path does.
+                            state["battle_team_index"] = team_ix
                             party = ps.battle_team(state, team_ix)
                             ps.save(state)
                             log(f"    -> guild weekly: stage {stage_id} "

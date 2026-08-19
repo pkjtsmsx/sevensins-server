@@ -39,6 +39,7 @@ button throws before a single byte is sent. See player_state.roster.stage_json.
 import json, time
 
 from .core import (
+    FORMATION_CHALLENGE_BASE,
     _daily_period,
     grant_reward,
     item_count,
@@ -50,7 +51,7 @@ import battle as bt
 __all__ = [
     "CHALLENGE_PASS_ITEM", "CHALLENGE_MAX_TIMES", "CHALLENGE_BOOK",
     "CHALLENGE_DIFFICULTIES", "challenge_weekday", "challenge_key",
-    "challenge_stage_id", "is_challenge_stage",
+    "challenge_stage_id", "is_challenge_stage", "challenge_formation_index",
     "challenge_stages_json", "challenge_sync_intargs",
     "challenge_reset_seconds", "start_challenge", "finish_challenge",
     "challenge_rank_json", "have_challenge_pass",
@@ -133,6 +134,21 @@ def challenge_stage_id(weekday, difficulty):
     reach the same answer from the same two numbers, because the fight request carries
     the difficulty and nothing else."""
     return _stages().get((int(weekday), int(difficulty)))
+
+
+def challenge_formation_index(now=None):
+    """The saved team the Guild Weekly fields today.
+
+    `PanelBattlePreparation.InitTeamIndex` case 8 sets both _nowTeamListIndex and
+    _maxTeamListIndex to `weekday + 9`, so the raid has a DEDICATED team per weekday
+    boss and the Edit button on the Preparation panel edits that one.
+
+    The server has to reach the same number independently: unlike an ordinary stage,
+    the fight request (528) carries only [use_bc, difficulty] -- no team index. Reading
+    `battle_team_index` instead, as this used to, fielded whatever team the last
+    CAMPAIGN stage happened to use, so editing the raid team changed the panel and
+    nothing else."""
+    return challenge_weekday(now) + FORMATION_CHALLENGE_BASE
 
 
 def challenge_stages_json(state, now=None):
