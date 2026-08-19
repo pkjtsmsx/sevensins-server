@@ -234,7 +234,18 @@ def _default(player_id):
 
 
 # Bump to re-run the balance migration on every account.
-BALANCE_REVISION = 1
+#
+# rev 1 clamped diamonds to a STARTER_DIAMONDS that was briefly **3000** (2026-08-18,
+# roughly 13:55-22:30). Raising the constant back to 10000 does NOT help those accounts
+# on its own: the migration is gated on `balance_rev`, so it never runs again and they
+# stay at 3000 forever. rev 2 exists to repair exactly that.
+BALANCE_REVISION = 2
+# What rev 1 clamped to. The clamp always wrote this value EXACTLY, so an account
+# carrying `balance_rev == 1` and precisely this balance is one we shortchanged rather
+# than a player who happened to spend down to it -- and rev 1 only ever existed for a
+# few hours, which makes the coincidence vanishingly unlikely. The correction favours
+# the player either way.
+STARTER_DIAMONDS_REV1 = 3000
 
 
 def migrate_starting_balances(state):
@@ -248,12 +259,25 @@ def migrate_starting_balances(state):
     progress anyone earned -- it was our seed -- but the file also holds a roster, and
     a bad migration must never be the thing that eats it.
     """
-    if int(state.get("balance_rev", 0)) >= BALANCE_REVISION:
+    was_rev = int(state.get("balance_rev", 0))
+    if was_rev >= BALANCE_REVISION:
         return ""
     notes = []
     key = str(CUR_CASH)
     have = int(state["currency"].get(key, 0))
-    if have > STARTER_DIAMONDS:
+    # Repair for accounts rev 1 clamped to 3000 before the starter went back to 10000.
+    # **Credit the DIFFERENCE, not the target.** Matching on "balance == 3000 exactly"
+    # misses anyone who earned or spent a single diamond since -- the first real account
+    # checked was sitting on 3100. What the wrong constant actually cost them is a fixed
+    # 7000, and refunding exactly that is correct however their balance has moved since.
+    owed = STARTER_DIAMONDS - STARTER_DIAMONDS_REV1 if was_rev == 1 else 0
+    if owed > 0:
+        notes.append(f"diamonds {have} -> {have + owed} (rev1 short-changed by {owed})")
+    elif was_rev == 0 and have > STARTER_DIAMONDS:
+        # The clamp is for accounts seeded with our old 999,999 and NEVER migrated.
+        # It must not re-run on an already-migrated account: by rev 2 a balance above
+        # the starter is diamonds the player EARNED, and confiscating those would be a
+        # far worse bug than the one this revision exists to fix.
         notes.append(f"diamonds {have} -> {STARTER_DIAMONDS}")
     lv = int((state.get("level") or {}).get("lv", 1))
     cap = stamina_cap_for_level(lv)
@@ -268,7 +292,9 @@ def migrate_starting_balances(state):
                 shutil.copy2(src, f"{src}.bak-prebalance")
             except Exception:                                  # noqa: BLE001
                 pass
-        if have > STARTER_DIAMONDS:
+        if owed > 0:
+            state["currency"][key] = have + owed
+        elif was_rev == 0 and have > STARTER_DIAMONDS:
             state["currency"][key] = STARTER_DIAMONDS
         slot["cap"] = cap
         slot["energy"] = min(old_energy, cap)

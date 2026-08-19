@@ -178,11 +178,84 @@ def check_migration_is_one_shot_and_safe():
           "balance_rev" not in _default(1000007))
 
 
+
+def check_rev1_clamp_is_repaired():
+    """Accounts clamped to 3000 must not be stranded there when the starter goes back up.
+
+    STARTER_DIAMONDS was briefly 3000 on 2026-08-18. The migration is gated on
+    `balance_rev`, so simply restoring the constant to 10000 would leave every account
+    that logged in during that window sitting at 3000 FOREVER -- the migration never
+    runs again. Revision 2 exists to repair exactly that.
+
+    It has to be narrow in both directions:
+      * only an account carrying rev 1 AND exactly the value the clamp wrote;
+      * and the downward clamp must NOT re-run on an already-migrated account, because
+        by rev 2 a balance above the starter is diamonds the player EARNED. Confiscating
+        those would be a worse bug than the one being fixed.
+    """
+    from player_state.core import (_default, _seed_roster, migrate_starting_balances,
+                                   STARTER_DIAMONDS, STARTER_DIAMONDS_REV1,
+                                   BALANCE_REVISION)
+
+    def acct(rev, diamonds):
+        st = _default(1); _seed_roster(st)
+        st["balance_rev"] = rev
+        st["currency"]["1"] = diamonds
+        return st
+
+    check("the repair revision is ahead of the one that clamped",
+          BALANCE_REVISION > 1, str(BALANCE_REVISION))
+    check("  ...and the starter is back above the clamped value",
+          STARTER_DIAMONDS > STARTER_DIAMONDS_REV1,
+          f"{STARTER_DIAMONDS} vs {STARTER_DIAMONDS_REV1}")
+
+    owed = STARTER_DIAMONDS - STARTER_DIAMONDS_REV1
+
+    st = acct(1, STARTER_DIAMONDS_REV1)
+    migrate_starting_balances(st)
+    check("an account clamped by rev 1 is made whole",
+          int(st["currency"]["1"]) == STARTER_DIAMONDS, str(st["currency"]["1"]))
+
+    # **Credit the difference, not the target.** The first real account checked was on
+    # 3100, not 3000 -- it had earned 100 since. Matching the exact clamp value would
+    # have silently skipped it.
+    st = acct(1, STARTER_DIAMONDS_REV1 + 100)
+    migrate_starting_balances(st)
+    check("  ...even after earning since the clamp",
+          int(st["currency"]["1"]) == STARTER_DIAMONDS_REV1 + 100 + owed,
+          str(st["currency"]["1"]))
+
+    st = acct(1, 500)
+    migrate_starting_balances(st)
+    check("  ...and after SPENDING since the clamp, refunded what it cost them",
+          int(st["currency"]["1"]) == 500 + owed, str(st["currency"]["1"]))
+
+    st = acct(1, STARTER_DIAMONDS + 2000)
+    migrate_starting_balances(st)
+    check("  ...and earned diamonds are NOT confiscated",
+          int(st["currency"]["1"]) == STARTER_DIAMONDS + 2000 + owed,
+          str(st["currency"]["1"]))
+
+    st = acct(0, 999999)
+    migrate_starting_balances(st)
+    check("a never-migrated seed account is still clamped down",
+          int(st["currency"]["1"]) == STARTER_DIAMONDS, str(st["currency"]["1"]))
+
+    # Idempotent: running twice must not move anything.
+    st = acct(1, STARTER_DIAMONDS_REV1)
+    migrate_starting_balances(st)
+    once = int(st["currency"]["1"])
+    migrate_starting_balances(st)
+    check("the repair is one-time", int(st["currency"]["1"]) == once,
+          f"{once} -> {st['currency']['1']}")
+
+
 def main():
     for fn in (check_the_two_numbers_are_not_the_same_one,
                check_cap_matches_the_client, check_new_account,
                check_rewards_now_move_the_numbers, check_rank_up_pays_what_the_screen_says,
-               check_migration_is_one_shot_and_safe):
+               check_migration_is_one_shot_and_safe,
+               check_rev1_clamp_is_repaired):
         print(f"\n{fn.__name__}:")
         fn()
     print(f"\n{_fail} failure(s)")
