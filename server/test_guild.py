@@ -228,9 +228,47 @@ def check_persistence():
           "guild" in old and old["guild"] is None, str(old.get("guild")))
 
 
+
+def check_sign_reward_labels():
+    """`SignRewardTbl.CountList` is a RUNNING TOTAL, not the per-tier amount.
+
+    `UISignReward.SetRewardData` renders slot 0 as `CountList[0]` and every later slot
+    as `"+" + (CountList[N] - CountList[N-1])` -- the INCREMENT between consecutive
+    entries. Sending our per-tier list straight through made the Signup Bonus row read
+    "20 / +0 / +10 / +0 / +20" (the differences of 20,20,30,30,50) instead of the
+    intended 20/+20/+30/+30/+50. Nothing errors; the numbers are just wrong.
+    """
+    st = with_guild()
+    tbl = json.loads(ps.guild_json(st))["signReward"]
+    cnt = tbl["cntList"]
+    check("cntList is strictly increasing (it is cumulative)",
+          all(b > a for a, b in zip(cnt, cnt[1:])), str(cnt))
+    # Transcribe SetRewardData exactly and compare against what each tier pays.
+    rendered = [cnt[0]] + [cnt[i] - cnt[i - 1] for i in range(1, len(cnt))]
+    check("what the client renders equals what each tier pays",
+          rendered == list(gd.GUILD_SIGN_REWARD_COUNTS),
+          f"{rendered} vs {list(gd.GUILD_SIGN_REWARD_COUNTS)}")
+    check("  ...and no tier renders as +0",
+          all(v > 0 for v in rendered[1:]), str(rendered))
+    # All three lists are indexed by the same slot, so they must stay the same length.
+    check("idList/cntList/limitList agree in length",
+          len({len(tbl["idList"]), len(cnt), len(tbl["limitList"])}) == 1,
+          str({k: len(v) for k, v in tbl.items()}))
+
+    # The payout is per-tier and must NOT become cumulative.
+    total_paid = 0
+    for i in range(len(gd.GUILD_SIGN_LIMITS)):
+        st["guild"]["sign_sum"] = gd.GUILD_SIGN_LIMITS[i]
+        _sum, earned = gd.guild_sign(st)
+        total_paid += sum(c for _i, c in earned)
+    check("signing all the way up pays the cumulative total once",
+          total_paid == cnt[-1], f"{total_paid} vs {cnt[-1]}")
+
+
 def main():
     for fn in (check_create, check_guild_json, check_members_json, check_card_json,
-               check_sign, check_edit_and_quit, check_persistence):
+               check_sign, check_sign_reward_labels, check_edit_and_quit,
+               check_persistence):
         print(f"\n{fn.__name__}:")
         fn()
     print(f"\n{_fail} failure(s)")

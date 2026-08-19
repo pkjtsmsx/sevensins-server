@@ -22,7 +22,7 @@ nor a consistent casing convention -- `OwnerName` is `owner_name`, `UpdateTime` 
 `mbCnt`. Do not "tidy" them.
 """
 
-import json, time
+import itertools, json, time
 
 from .core import (
     CUR_MIRA,
@@ -96,7 +96,19 @@ GUILD_SIGN_LIMITS = (1, 2, 3, 4, 5)
 # This is the point of the exercise: the shop prices nine goods in Guild Pt and
 # nothing else in the server pays any out.
 GUILD_SIGN_REWARD_IDS = (4, 4, 4, 4, 4)
+# What each tier PAYS, one entry per limit. This is the payout truth.
 GUILD_SIGN_REWARD_COUNTS = (20, 20, 30, 30, 50)
+# ...but `SignRewardTbl.CountList` on the wire is the RUNNING TOTAL, not the per-tier
+# amount. `UISignReward.SetRewardData` prints
+#     index 0 : CountList[0]
+#     index N : "+" + (CountList[N] - CountList[N-1])
+# so it renders the INCREMENT between consecutive entries. Sending the per-tier list
+# straight through made the Signup Bonus row read "20 / +0 / +10 / +0 / +20" -- the
+# differences of (20,20,30,30,50) -- instead of the intended 20/+20/+30/+30/+50.
+# Accumulating here keeps one source of truth: guild_sign still grants
+# GUILD_SIGN_REWARD_COUNTS[i], and the wire carries the totals the label wants.
+GUILD_SIGN_REWARD_TOTALS = tuple(
+    itertools.accumulate(GUILD_SIGN_REWARD_COUNTS))
 
 # GuildLogInfo ids are a design-side text table we do not have a form for, so the log
 # stays empty rather than inventing rows the client would render as blanks. listLog is
@@ -146,7 +158,7 @@ def guild_json(state):
         "log": [],
         "signReward": {
             "idList": list(GUILD_SIGN_REWARD_IDS),
-            "cntList": list(GUILD_SIGN_REWARD_COUNTS),
+            "cntList": list(GUILD_SIGN_REWARD_TOTALS),   # cumulative -- see above
             "limitList": list(GUILD_SIGN_LIMITS),
         },
     }, separators=(",", ":"))
