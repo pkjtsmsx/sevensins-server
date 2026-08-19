@@ -30,6 +30,11 @@ SERVER_ENUM_RE = re.compile(
     r"public enum (\w+?)RpcServerCmd\s*//[^\n]*\n\{(.*?)^\}", re.S | re.M)
 MIXED_ENUM_RE = re.compile(
     r"public enum (\w+?)RpcCmd\s*//[^\n]*\n\{(.*?)^\}", re.S | re.M)
+# A THIRD convention this tool originally missed entirely: Campaign/OFA/Raid/Ranking/
+# Stage/Village use RpcRequestCmd + RpcReplyCmd rather than RpcServerCmd + RpcClientCmd.
+# Six whole subsystems were absent from the report -- Stage is most of the campaign flow.
+REQUEST_ENUM_RE = re.compile(
+    r"public enum (\w+?)RpcRequestCmd\s*//[^\n]*\n\{(.*?)^\}", re.S | re.M)
 MEMBER_RE = re.compile(r"public const \w+ (\w+) = (\d+);")
 
 # Members of a mixed enum that are replies/pushes, not things the client asks for.
@@ -40,10 +45,11 @@ def client_commands():
     """-> {subsystem: {cmd: name}} of everything the client can SEND."""
     text = open(DUMP, encoding="utf-8", errors="ignore").read()
     out = {}
-    for sub, body in SERVER_ENUM_RE.findall(text):
-        cmds = {int(n): name for name, n in MEMBER_RE.findall(body)}
-        if cmds:
-            out[sub] = cmds
+    for pat in (SERVER_ENUM_RE, REQUEST_ENUM_RE):
+        for sub, body in pat.findall(text):
+            cmds = {int(n): name for name, n in MEMBER_RE.findall(body)}
+            if cmds:
+                out.setdefault(sub, {}).update(cmds)
     for sub, body in MIXED_ENUM_RE.findall(text):
         cmds = {int(n): name for name, n in MEMBER_RE.findall(body)
                 if not REPLY_HINT.search(name) and int(n) != 65535}
@@ -114,10 +120,14 @@ def handled_pairs():
             cmd = resolve(tok)
             if cmd is not None:
                 pairs.add((labels.get(idx), cmd))
-    # Table-driven: (0xINDEX, cmd): ...
-    for idx_hex, cmd in re.findall(
-            r"\((0x[0-9A-Fa-f]+),\s*(\d+)\)\s*:", src):
-        pairs.add((labels.get(int(idx_hex, 16)), int(cmd)))
+    # Table-driven: (INDEX, cmd): ... -- the keys are written BOTH as literal hex and
+    # as named constants ((PLAYER_LOGINBONUS_SERVER, LOGINBONUS_REQ_SYNC)), and matching
+    # only the hex form left LoginBonus/Redeem/Session reading as unanswered once the
+    # unlabelled-index fallback stopped masking it.
+    for idx_tok, cmd_tok in re.findall(r"\((\w+),\s*(\w+)\)\s*:", src):
+        idx, cmd = resolve(idx_tok), resolve(cmd_tok)
+        if cmd is not None:
+            pairs.add((labels.get(idx), cmd))
     # battle_replies dispatches inside a function.
     try:
         import battle as bt                                     # noqa: E402
