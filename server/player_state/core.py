@@ -1437,6 +1437,32 @@ KARMA_UNLOCK_ITEM = 5
 KARMA_RANK_MAIL_FORMAT = 105
 
 
+def karma_rank_rows(char_id, from_flv, to_flv):
+    """The char_flv ROW IDS crossed by a rank-up, in rank order.
+
+    These are what the RANK UP splash is built from. `PanelEvilUp.OnPanelDirty` pops one
+    entry off `PlayerChar.FlvLevelUpNotifyList` per invocation and shows it -- and if
+    that list is EMPTY it closes the panel immediately instead, which presents as a
+    brief flash and nothing else.
+
+    Only `PlayerChar.getFlvRewards` fills that list, and it is a server command:
+    **cmd 563**, `intargs[0]` = one char_flv row id, looked up in DesignCharFLvForm and
+    appended. So the splash is entirely ours to trigger; the client cannot infer it.
+
+    Every crossed row is sent, not just the paying ones -- the panel renders the row's
+    own `_title`/`_text` ("Holy Blood of Saint" / "Obtain Blood of Saint x50"), and the
+    Kizuna-quest and stat rows have their own screens to show.
+    """
+    rows = []
+    for row in (dd.rows("char_flv") or {}).values():
+        if int(row.get("_char_id") or 0) != int(char_id):
+            continue
+        flv = int(row.get("_flv") or 0)
+        if from_flv < flv <= to_flv:
+            rows.append((flv, int(row.get("_id") or 0)))
+    return [rid for _flv, rid in sorted(rows) if rid]
+
+
 def karma_rank_rewards(char_id, from_flv, to_flv):
     """[(item_id, count), ...] owed for climbing from `from_flv` to `to_flv`."""
     out = []
@@ -1496,6 +1522,8 @@ def grant_karma(state, char_id, fexp):
         # every rank crossed, so one big gift credits all of them.
         bump_quest_counter(state, QUEST_CASE_KARMA_RANKUP, gained)
     k["_paid"] = paid
+    # The row ids the RANK UP splash needs (cmd 563). Empty unless a rank was crossed.
+    k["_rows"] = karma_rank_rows(char_id, was, int(k["flv"])) if gained > 0 else []
     return k
 
 

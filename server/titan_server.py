@@ -491,6 +491,15 @@ CHAR_REQ_KIZUNA_LVUP, CHAR_RPLY_KIZUNA_LVUP = 320, 576    # Soul Book Kizuna: le
 CHAR_REQ_GIFT, CHAR_RPLY_GIFT = 307, 564
 # CharRpcClientCmd.update_friendly -- pushes {charId: [flv, fxp]} into charIDDic.
 CHAR_RPLY_UPDATE_FRIENDLY = 552
+# CharRpcClientCmd -> PlayerChar.getFlvRewards. intargs[0] = ONE char_flv row id, which
+# it resolves in DesignCharFLvForm and appends to `FlvLevelUpNotifyList`.
+#
+# **This is what makes the RANK UP splash appear.** PanelEvilUp.OnPanelDirty pops one
+# entry off that list per invocation and shows it; on an EMPTY list it closes the panel
+# immediately instead -- which is why the splash was only ever a brief flash. Nothing
+# else fills the list, and the client cannot infer it, so the splash is entirely ours to
+# trigger. One message per rank crossed.
+CHAR_RPLY_FLV_REWARDS = 563
 # PlayerChatRoom. The lobby polls `get_pmsg_list` (339) every ~10s from the UpdateGChat
 # coroutine, which is by far the noisiest thing on the wire -- 14575 unanswered in the
 # log before this. RequestServerGetPublicList (0x18F4764) sends intargs=[GChatTimestamp];
@@ -657,10 +666,16 @@ def karma_reward_msgs(state, karma):
     empty and they cover any future rank bonus routed straight to the account.
     """
     paid = (karma or {}).get("_paid") or []
-    if not paid:
+    rows = (karma or {}).get("_rows") or []
+    if not paid and not rows:
         return []
-    out = [uint64_msg(PLAYER_MAIL, MAIL_RPLY_UNREAD,
-                      [0, ps.unread_mail_count(state), 0], [])]
+    # One 563 per crossed rank, FIRST -- the splash needs the queue populated before
+    # PanelEvilUp is launched, and the client launches it off its own tween.
+    out = [uint_msg(PLAYER_CHAR, CHAR_RPLY_FLV_REWARDS, [int(r)], []) for r in rows]
+    if not paid:
+        return out
+    out.append(uint64_msg(PLAYER_MAIL, MAIL_RPLY_UNREAD,
+                          [0, ps.unread_mail_count(state), 0], []))
     buckets = {ps.item_bucket(iid) for iid, cnt in paid if iid and cnt}
     if "currency" in buckets:
         out.append(sint_msg(0xBC8FDA7C, 512, [], [ps.currency_json(state)]))

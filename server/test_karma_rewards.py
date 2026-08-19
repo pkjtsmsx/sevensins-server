@@ -143,10 +143,52 @@ def check_gifts_report_the_bonus():
     check("  ...and refuses cleanly with no items", shape[0] is False)
 
 
+
+def check_the_rank_up_splash_is_triggered():
+    """The RANK UP splash is a SERVER trigger, not something the client infers.
+
+    `PanelEvilUp.OnPanelDirty` pops one entry off `PlayerChar.FlvLevelUpNotifyList` and
+    shows it; on an EMPTY list it calls ClosePanel immediately -- which is exactly the
+    "brief flash" the splash was doing. Only `PlayerChar.getFlvRewards` fills that list,
+    and it is **cmd 563** with intargs[0] = ONE char_flv row id.
+
+    Chain confirmed from the client: gift -> update_friendly (552) raises CharEvent 3
+    (one of 530-533/547/548/551/552/560-562/595/597/598) -> UICharacterRoom.
+    OnCharRoomUpdate sees kizunaLevel differ from its snapshot -> PlayKizunaLevelTextEffect
+    -> tween group 100 -> LaunchPanelLevelUp -> PanelEvilUp. Every step of that was
+    already firing in logcat; only the queue was empty.
+    """
+    st = ps.load(1000035)
+    st["karma"] = {str(LUCIFER): {"flv": 1, "fxp": 0}}
+    k = ps.grant_karma(st, LUCIFER, 10 ** 5)
+    check("a rank-up reports the crossed char_flv rows", bool(k.get("_rows")),
+          str(k.get("_rows")))
+    check("  ...in ascending rank order",
+          k["_rows"] == sorted(k["_rows"]), str(k["_rows"]))
+    # Every crossed rank contributes a row, not just the paying ones.
+    rows_all = ps.karma_rank_rows(LUCIFER, 1, k["flv"])
+    check("  ...one per rank crossed, paying or not",
+          k["_rows"] == rows_all and len(rows_all) >= k["flv"] - 1,
+          f"{len(k['_rows'])} rows for {k['flv'] - 1} ranks")
+    # ...and they must be real rows the client can resolve in DesignCharFLvForm.
+    bad = [r for r in k["_rows"] if not bt.dd.row("char_flv", r)]
+    check("  ...and every id resolves in char_flv", not bad, str(bad))
+
+    msgs = ts.karma_reward_msgs(st, k)
+    check("the server emits one 563 per crossed rank",
+          len(msgs) >= len(k["_rows"]), f"{len(msgs)} msgs for {len(k['_rows'])} rows")
+
+    # A grant that crosses nothing must not pop a splash.
+    quiet = ps.grant_karma(st, LUCIFER, 0)
+    check("no rank-up means no splash rows", not quiet.get("_rows"),
+          str(quiet.get("_rows")))
+
+
 def main():
     for fn in (check_table_matches_the_screenshot, check_a_single_rank_up_pays_once,
                check_multi_rank_pays_every_rank_crossed, check_no_rank_up_pays_nothing,
-               check_the_payout_is_pushed, check_gifts_report_the_bonus):
+               check_the_payout_is_pushed, check_gifts_report_the_bonus,
+               check_the_rank_up_splash_is_triggered):
         print(f"\n{fn.__name__}:")
         fn()
     print(f"\n{_fail} failure(s)")
