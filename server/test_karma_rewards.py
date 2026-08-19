@@ -142,6 +142,26 @@ def check_gifts_report_the_bonus():
     check("give_gifts returns (ok, xp, used, rank_paid)", len(shape) == 4, str(shape))
     check("  ...and refuses cleanly with no items", shape[0] is False)
 
+    # **The gift path has to hand the REAL karma dict to karma_reward_msgs.** It used to
+    # build a synthetic {"_paid": rank_paid}, which silently dropped `_rows` -- so the
+    # 563s never went out and PanelEvilUp closed on an empty queue. karma_of() returns
+    # the same dict grant_karma stashed both on.
+    st2 = ps.load(1000036)
+    st2["karma"] = {str(LUCIFER): {"flv": 1, "fxp": 0}}
+    ps.grant_item(st2, 487, 20)
+    ok, _xp, _used, paid = ps.give_gifts(st2, LUCIFER, [(487, 10)])
+    check("a gift that ranks up succeeds", ok, str(ok))
+    k = ps.karma_of(st2, LUCIFER)
+    check("  ...and karma_of carries the splash rows", bool(k.get("_rows")),
+          str(k.get("_rows")))
+    check("  ...and the bonus lines", bool(paid), str(paid))
+    msgs = ts.karma_reward_msgs(st2, k)
+    check("  ...so the gift path emits the 563s",
+          len(msgs) >= len(k["_rows"]), f"{len(msgs)} msgs, {len(k['_rows'])} rows")
+    # The old synthetic dict must not be able to produce them -- guards the regression.
+    check("  ...which a synthetic {_paid} dict could NOT",
+          len(ts.karma_reward_msgs(st2, {"_paid": paid})) < len(msgs))
+
 
 
 def check_the_rank_up_splash_is_triggered():

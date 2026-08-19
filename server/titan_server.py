@@ -2017,9 +2017,15 @@ def handle(conn, addr):
                                 [ps.backpack_json(state, ps.BP_STORAGE_NORMAL)]))
                             # Gifts can cross several Karma ranks in one feed, and each
                             # crossed rank pays its Rank Bonus row.
-                            if rank_paid:
-                                for _b in karma_reward_msgs(
-                                        state, {"_paid": rank_paid}):
+                            #
+                            # Pass the REAL karma dict, not a synthetic {"_paid": ...}.
+                            # `grant_karma` stashes `_rows` on it too -- the char_flv row
+                            # ids the RANK UP splash is built from -- and a hand-made
+                            # dict silently drops them, so the 563s never went out and
+                            # PanelEvilUp closed on an empty queue. `karma_of` returns
+                            # that same dict, which is why `k` already has both.
+                            if rank_paid or k.get("_rows"):
+                                for _b in karma_reward_msgs(state, k):
                                     send(MSG_RPC, _b)
                             # cmd 84 updates the bag data but dispatches BackpackEvent
                             # 4, which no open panel listens to. Only cmd 145
