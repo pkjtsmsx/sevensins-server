@@ -344,13 +344,15 @@ def check_fight_uses_the_raid_team():
     check("  ...and NOT the last campaign team",
           fielded != [e["uid"] for e in ps.battle_team(st, 0)], str(fielded))
 
-    # The client's own save path: 1-based index over the wire.
+    # The client's own save path: 1-based index over the wire. Derive the number from
+    # TODAY's slot -- hardcoding Tuesday's 12/11 made this fail every other day of the
+    # week, which is a test bug that looks exactly like a product one.
     edited = raid_five[1:] + raid_five[:1]
-    ps.set_formation(st, 12 - 1, edited, 0)
+    ps.set_formation(st, ix, edited, 0)          # cmd 274 sends ix + 1, 1-based
     # set_formation pads to FORMATION_SLOTS, so compare the filled slots.
-    check("a cmd-274 edit at 1-based 12 lands on raid slot 11",
-          [u for u in st["formations"][11]["array"] if u] == edited,
-          str(st["formations"][11]))
+    check(f"a cmd-274 edit at 1-based {ix + 1} lands on raid slot {ix}",
+          [u for u in st["formations"][ix]["array"] if u] == edited,
+          str(st["formations"][ix]))
     check("  ...and the next fight picks it up",
           [e["uid"] for e in ps.battle_team(st, ix)] == edited)
 

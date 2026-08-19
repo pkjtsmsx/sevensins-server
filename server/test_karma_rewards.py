@@ -211,11 +211,66 @@ def check_the_rank_up_splash_is_triggered():
           str(quiet.get("_rows")))
 
 
+
+def check_avg_choice_is_one_based_on_the_wire():
+    """The AVG sync's locked-option field is 1-BASED; the choice request is 0-based.
+
+    `AvgUIOptions.UpdateAVGOptionLockState`:
+
+        v13 = _replayMode ? 0 : mOptionTag[0]
+        if (v13 <= 0):  lock all, then unlock by the digits of mOptionTag[1]
+        else:           v15 = 10^(v13 - 1);  unlock ONLY btnOptions[digit - 1]
+
+    -- v13 is a 1-based position and 0 means "undecided", the same convention as the
+    unlock digits. `RequestServerAvgSelectOption` however sends a 0-BASED index, so the
+    stored value must be shifted on the way out. Echoing it raw broke both cases:
+    picking the FIRST option sent 0 and re-opened the entire scene (all options
+    selectable again on a replay), and picking any other locked in the option BEFORE the
+    one actually chosen.
+
+    Getting this right also delivers the replay skip for free: `OnBtnClick` dispatches
+    straight through when `_skipPerform` is set, which the locked-in branch sets.
+    """
+    st = ps.load(1000037)
+    check("an undecided scene reports 0", ps.avg_choice_wire(st, 10102) == 0,
+          str(ps.avg_choice_wire(st, 10102)))
+    check("  ...and avg_choice says None, not 0",
+          ps.avg_choice(st, 10102) is None, str(ps.avg_choice(st, 10102)))
+
+    # Option 0 is a REAL answer -- the first button -- and must not read as undecided.
+    ps.set_avg_choice(st, 10102, 0)
+    check("picking the FIRST option reports 1, not 0",
+          ps.avg_choice_wire(st, 10102) == 1, str(ps.avg_choice_wire(st, 10102)))
+    check("  ...which is what stops the scene re-opening",
+          ps.avg_choice_wire(st, 10102) > 0)
+
+    ps.set_avg_choice(st, 10103, 2)
+    check("the third option reports 3", ps.avg_choice_wire(st, 10103) == 3,
+          str(ps.avg_choice_wire(st, 10103)))
+    check("  ...and the stored value stays 0-based",
+          ps.avg_choice(st, 10103) == 2, str(ps.avg_choice(st, 10103)))
+
+    # Every stored choice must round-trip to the button the player actually pressed.
+    for opt in range(4):
+        st2 = ps.load(1000038 + opt)
+        ps.set_avg_choice(st2, 99000 + opt, opt)
+        wire = ps.avg_choice_wire(st2, 99000 + opt)
+        check(f"option {opt} -> wire {opt + 1} -> btnOptions[{opt}]",
+              wire == opt + 1 and wire - 1 == opt, str(wire))
+
+    # A scene pays once; re-deciding on the same scene is refused.
+    check("re-deciding a scene is refused",
+          ps.set_avg_choice(st, 10103, 0) is False)
+    check("  ...and does not overwrite the original pick",
+          ps.avg_choice(st, 10103) == 2, str(ps.avg_choice(st, 10103)))
+
+
 def main():
     for fn in (check_table_matches_the_screenshot, check_a_single_rank_up_pays_once,
                check_multi_rank_pays_every_rank_crossed, check_no_rank_up_pays_nothing,
                check_the_payout_is_pushed, check_gifts_report_the_bonus,
-               check_the_rank_up_splash_is_triggered):
+               check_the_rank_up_splash_is_triggered,
+               check_avg_choice_is_one_based_on_the_wire):
         print(f"\n{fn.__name__}:")
         fn()
     print(f"\n{_fail} failure(s)")

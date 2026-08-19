@@ -1657,8 +1657,16 @@ def handle(conn, addr):
                         # scene with the previous pick set, and only a different
                         # difficulty lets you choose again -- so this has to be the
                         # stored answer, not a flat 0.
-                        chosen = ps.avg_choice(state, rid)
-                        log(f"    -> avg sync reply (avg {rid}, locked option {chosen})")
+                        # **1-BASED on the way out, 0-based on the way in.** The choice
+                        # request sends a 0-based index; UpdateAVGOptionLockState reads
+                        # this field as a 1-based position with 0 meaning "undecided"
+                        # (it computes 10^(v-1) to pick the unlock digit). Echoing the
+                        # stored value raw meant picking the FIRST option sent 0 and
+                        # re-opened the whole scene, and picking any other locked in the
+                        # option before the one actually chosen.
+                        chosen = ps.avg_choice_wire(state, rid)
+                        log(f"    -> avg sync reply (avg {rid}, locked option "
+                            f"{chosen or 'none'})")
                         send(MSG_RPC, uint64_msg(PLAYER_STAGE, STAGE_RPLY_AVG_SYNC,
                                                  [chosen, AVG_OPTIONS_UNLOCKED, 0, 0],
                                                  [], req_id=rid))

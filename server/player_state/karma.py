@@ -76,8 +76,34 @@ def karma_reward(avg_id, option):
 
 
 def avg_choice(state, avg_id):
-    """The option already locked in for this scene, 0 if it has never been decided."""
-    return state.setdefault("avg_choices", {}).get(str(avg_id), 0)
+    """The 0-BASED option already locked in for this scene, or None if never decided.
+
+    None rather than 0, because option 0 is a real answer -- the first button -- and
+    conflating the two is what let a decided scene re-open. See avg_choice_wire.
+    """
+    return state.setdefault("avg_choices", {}).get(str(avg_id))
+
+
+def avg_choice_wire(state, avg_id):
+    """intargs[0] of the AVG sync reply: the locked option, **1-BASED**, 0 = undecided.
+
+    `AvgUIOptions.UpdateAVGOptionLockState` reads it as
+
+        v13 = _replayMode ? 0 : mOptionTag[0]
+        if (v13 <= 0):  lock everything, then unlock by the digits of mOptionTag[1]
+        else:           v15 = 10^(v13 - 1);  unlock ONLY btnOptions[digit - 1]
+
+    so it is a 1-based position and 0 means "nothing chosen" -- the same 1-based
+    convention as the unlock digits, which index `_btnOptions[digit - 1]`.
+
+    The request side is 0-BASED (`RequestServerAvgSelectOption` sends
+    [avgID, optionIndex]), so the two directions disagree and the stored value has to be
+    shifted on the way out. Echoing it raw broke both cases: picking the FIRST option
+    sent 0 and re-opened the whole scene, and picking any other locked in the option
+    before the one actually chosen.
+    """
+    chosen = avg_choice(state, avg_id)
+    return 0 if chosen is None else int(chosen) + 1
 
 
 def set_avg_choice(state, avg_id, option):
