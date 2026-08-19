@@ -55,6 +55,7 @@ __all__ = [
     "challenge_stages_json", "challenge_sync_intargs",
     "challenge_reset_seconds", "start_challenge", "finish_challenge",
     "challenge_rank_json", "have_challenge_pass",
+    "settle_day", "take_pending_settlement", "CHALLENGE_RPLY_REWARD_GET",
 ]
 
 # The Guild Weekly stages live in book 8 and nothing else does.
@@ -83,6 +84,9 @@ CHALLENGE_TRIES_SHOWN = CHALLENGE_MAX_TIMES
 REWARD_PERSONAL_DAILY = 3
 REWARD_GUILD_DAILY = 5
 REWARD_PERSONAL_BEST = 6
+
+# ChallengeRpcClientCmd.reward_get_reply -- the end-of-day settlement announcement.
+CHALLENGE_RPLY_REWARD_GET = 785
 
 
 def challenge_weekday(now=None):
@@ -197,6 +201,61 @@ def challenge_stages_json(state, now=None):
     }, separators=(",", ":"))
 
 
+def _bracket_rewards(reward_type, group, score):
+    """[(item_id, count), ...] for EVERY bracket `score` reaches in one table.
+
+    The whole ladder up to the score, not just the top rung: the tables are cumulative
+    ladders and the settlement pays all of them at once.
+    """
+    rows = _reward_rows(reward_type, group)
+    out = []
+    for row in rows[:_bracket_index(rows, int(score)) + 1]:
+        for iid, cnt in zip(row.get("_idList") or [], row.get("_countList") or []):
+            if iid and cnt:
+                out.append((int(iid), int(cnt)))
+    return out
+
+
+def settle_day(state, ch):
+    """Pay out a finished day and stash the announcement for reply 785.
+
+    **Both ladders are END-OF-DAY settlements**, which is what reply 785
+    (`reward_get_reply`, server-initiated, no request) exists for. Decompiled, it takes
+    `intargs.Count == 2` and `strargs.Count == 2` and shows PanelItemMsg's item-list
+    popup TWICE:
+
+        intargs[0] -> text 2510 "Previous personal score: {0}"  + strargs[0]'s items
+        intargs[1] -> text 2512 "Previous Guild Score: {0}"     + strargs[1]'s items
+
+    Each strarg is a `Dictionary<int, List<RewardItem>>` (LuaTableConverter), and
+    RewardItem's wire keys are plain `id` / `count`. The client flattens every value
+    into one list per popup, so the dictionary key is only a grouping -- we key by
+    bracket index.
+
+    For a guild of one the guild score IS this member's best, which is already what
+    `challenge_sync_intargs` reports as the guild total, so the two ladders are read off
+    the same number and the panel and the payout cannot disagree.
+
+    -> the pending announcement dict, or None when the day earned nothing (an unplayed
+    day must not pop two empty popups).
+    """
+    score = int(ch.get("best", 0))
+    if score <= 0:
+        return None
+    # The group the day was PLAYED under, not today's -- a settlement that lands after
+    # midnight would otherwise pay the wrong boss's table.
+    group = int(ch.get("group") or challenge_weekday())
+    personal = _bracket_rewards(REWARD_PERSONAL_DAILY, group, score)
+    guild = _bracket_rewards(REWARD_GUILD_DAILY, group, score)
+    for iid, cnt in personal + guild:
+        grant_reward(state, iid, cnt)
+    if not personal and not guild:
+        return None
+    return {"pscore": score, "gscore": score,
+            "personal": [[i, c] for i, c in personal],
+            "guild": [[i, c] for i, c in guild]}
+
+
 def _challenge(state, now=None):
     """The account's challenge record, rolled to the current day/week."""
     ch = state.get("challenge")
@@ -207,18 +266,49 @@ def _challenge(state, now=None):
         ch.clear()
         ch["key"] = key
     if ch.get("day") != period:
-        # Scores and reward brackets are DAILY (rewardType 3 and 5 are both "daily"
-        # tables); only the week key outlives the 4AM rollover.
+        # Scores are DAILY (rewardType 3 and 5 are both "daily" tables); only the week
+        # key outlives the 4AM rollover. Settle the day that just ended BEFORE wiping
+        # it -- this is the only moment the finished day's score still exists.
+        if ch.get("day"):
+            pending = settle_day(state, ch)
+            if pending:
+                state.setdefault("challenge_pending", []).append(pending)
         ch["day"] = period
         ch["today"] = []
         ch["best"] = 0
-        ch["paid"] = 0
         ch["runs"] = 0
+        # Remember which boss's tables today's runs are earning against, so a
+        # settlement can pay the right ones however late it happens.
+        ch["group"] = challenge_weekday(now)
     ch.setdefault("today", [])
     ch.setdefault("best", 0)
-    ch.setdefault("paid", 0)
     ch.setdefault("runs", 0)
+    ch.setdefault("group", challenge_weekday(now))
     return ch
+
+
+def take_pending_settlement(state):
+    """-> (intargs, strargs) for one queued reply 785, or None.
+
+    Popped rather than peeked: the popup is a one-time announcement, and re-sending it
+    on every panel open would re-announce rewards already in the bag.
+    """
+    queue = state.get("challenge_pending") or []
+    if not queue:
+        return None
+    p = queue.pop(0)
+    if not queue:
+        state.pop("challenge_pending", None)
+
+    def _dict(pairs):
+        # Dictionary<int, List<RewardItem>> -- one entry per reward, keyed by index.
+        # The client iterates the keys and flattens, so the grouping is free.
+        return json.dumps({str(i): [{"id": int(iid), "count": int(cnt)}]
+                           for i, (iid, cnt) in enumerate(pairs)},
+                          separators=(",", ":"))
+
+    return ([int(p.get("pscore", 0)), int(p.get("gscore", 0))],
+            [_dict(p.get("personal") or []), _dict(p.get("guild") or [])])
 
 
 def challenge_reset_seconds(now=None):
@@ -323,19 +413,14 @@ def finish_challenge(state, damage, now=None):
     if total > prev_best:
         ch["best"] = total
 
-    rows = _reward_rows(REWARD_PERSONAL_DAILY, weekday)
+    # **Nothing is paid here.** Both daily tables are END-OF-DAY settlements -- see
+    # settle_day() and reply 785, which announces them as two item popups naming the
+    # previous personal and guild scores. Paying per-run would double up against that
+    # sweep and would also pay a ladder the player had not finished climbing.
+    #
+    # PersonalBest (rewardType 6) is never paid at all: all ten of its brackets pay
+    # literally 1x Coin in this build, which is placeholder data, not a reward.
     payouts = []
-    reached = _bracket_index(rows, int(ch["best"]))
-    paid = int(ch.get("paid", 0))
-    if reached >= paid:
-        for row in rows[paid:reached + 1]:
-            ids = row.get("_idList") or []
-            counts = row.get("_countList") or []
-            for iid, cnt in zip(ids, counts):
-                if iid and cnt:
-                    grant_reward(state, int(iid), int(cnt))
-                    payouts.append((int(iid), int(cnt)))
-        ch["paid"] = reached + 1
 
     # Two fields on the GUILD member record are what the raid panel's leaderboard and
     # My Record actually read, and neither lives in `challenge`:

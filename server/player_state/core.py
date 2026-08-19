@@ -58,7 +58,11 @@ CUR_CASH, CUR_MIRA, CUR_REAL, CUR_DMM, CUR_GUILD = 1, 16, 32, 48, 64
 #
 # An earlier pass here read `5*lv+10` as the CAP -- it is the recovery, and taking it
 # for the cap gave 15 stamina at rank 1.
-STARTER_DIAMONDS = 3000
+# 10,000 rather than the live game's 3,000: this is a private server whose players are
+# also its testers, and 3,000 does not go far enough to exercise the gacha/shop paths.
+# A deliberate house rule, not a reading of the client. `migrate_starting_balances`
+# clamps DOWN to this, so raising it never touches an account that already migrated.
+STARTER_DIAMONDS = 10000
 STAMINA_CAP_BASE = 148            # cap(lv) = BASE + PER_LEVEL * lv, so cap(1) = 150
 STAMINA_CAP_PER_LEVEL = 2
 STAMINA_CAP_MAX = 300             # implied by the badge hiding at 2*lv >= 153

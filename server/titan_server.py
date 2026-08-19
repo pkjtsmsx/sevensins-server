@@ -3156,6 +3156,25 @@ def handle(conn, addr):
                         send(MSG_RPC, sint_msg(
                             CHALLENGE_CLIENT, CHALLENGE_RPLY_SYNC, ints,
                             [ps.challenge_stages_json(state)]))
+                        # A day that ended while the account was away has already been
+                        # PAID by the rollover inside challenge_sync_intargs; 785 is
+                        # only the announcement. It is server-initiated with no request
+                        # of its own, so the panel opening is the natural moment: the
+                        # player is looking at the raid, and PanelItemMsg is loaded.
+                        #
+                        # ChallengeRewardGetReply wants EXACTLY 2 ints and 2 strings and
+                        # returns silently otherwise. It then shows the item popup twice
+                        # -- "Previous personal score: {0}" then "Previous Guild Score:
+                        # {0}" -- so this is the notice that the sweep happened.
+                        pending = ps.take_pending_settlement(state)
+                        if pending:
+                            p_ints, p_strs = pending
+                            ps.save(state)
+                            log(f"    -> challenge settlement announced: "
+                                f"personal {p_ints[0]}, guild {p_ints[1]}")
+                            send(MSG_RPC, sint_msg(
+                                CHALLENGE_CLIENT, ps.CHALLENGE_RPLY_REWARD_GET,
+                                p_ints, p_strs))
                     elif index == CHALLENGE_SERVER and cmd == CHALLENGE_REQ_FIGHT:
                         # **intargs = [use_bc, mode]** -- the difficulty is [1], not
                         # [0]. No stage id is sent; we re-derive it from the same

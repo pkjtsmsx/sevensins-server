@@ -166,8 +166,10 @@ def check_fight_and_score():
           f"{dmg}+{bonus} != {total}")
     check("Normal pays a smaller bonus than Nightmare",
           bonus < 600000 * 3 // 4, str(bonus))
-    check("crossing brackets pays out", bool(payouts), str(payouts))
-    check("  ...in Guild Pt", st["currency"]["64"] > gp_before,
+    check("a run pays NOTHING immediately (both tables settle at end of day)",
+          payouts == [], str(payouts))
+    check("  ...so the Guild Pt balance is untouched mid-day",
+          st["currency"]["64"] == gp_before,
           f"{gp_before} -> {st['currency']['64']}")
 
     ints = ch.challenge_sync_intargs(st)
@@ -179,13 +181,13 @@ def check_fight_and_score():
     ch.start_challenge(st, 2)
     gp_mid = st["currency"]["64"]
     _, _, _, again = ch.finish_challenge(st, 600001)
-    check("an equal-ish rerun pays nothing new", again == [], str(again))
+    check("a rerun pays nothing either", again == [], str(again))
     check("  ...and leaves the balance alone", st["currency"]["64"] == gp_mid)
 
     ch.start_challenge(st, 4)
     _, _, big, topup = ch.finish_challenge(st, 4000000)
-    check("a much better run pays the newly-climbed brackets", bool(topup), str(topup))
-    check("  ...and raises the best", ch.challenge_sync_intargs(st)[1] == big)
+    check("a much better run still pays nothing yet", topup == [], str(topup))
+    check("  ...but raises the best", ch.challenge_sync_intargs(st)[1] == big)
 
     stage_id, why = ch.start_challenge(st, 1)
     check("a fourth run is refused once the passes are gone",
@@ -201,7 +203,10 @@ def check_daily_roll():
     st["challenge"]["day"] = "1999-01-01"
     after = ch.challenge_sync_intargs(st)
     check("the 4AM rollover clears the day's score", after[1] == 0, str(after))
-    check("  ...and re-arms the reward brackets", st["challenge"]["paid"] == 0)
+    # The rollover settles the finished day rather than "re-arming brackets": nothing
+    # is paid per-run any more, so the day's score is what gets swept and cleared.
+    check("  ...and settles it into an announcement",
+          len(st.get("challenge_pending") or []) == 1, str(st.get("challenge_pending")))
     # The week key outlives the day; only a new week wipes it.
     check("the week key survives a day rollover",
           st["challenge"]["key"] == ch.challenge_key(), st["challenge"]["key"])
@@ -357,11 +362,97 @@ def check_fight_uses_the_raid_team():
           len(set(slots.values())) == ch.CHALLENGE_WEEKDAYS, str(slots))
 
 
+
+def check_guild_daily_rewards():
+    """Both daily tables settle AT END OF DAY, announced by reply 785.
+
+    challenge_reward ships three buckets keyed by _rewardType:
+      3 PersonalDaily -- 15 brackets, the main ladder
+      5 GuildDaily    -- 10 brackets, thresholds ~19x higher, Guild Pt + Diamonds +
+                         Holy Water. For a guild of one the guild total IS this
+                         member's best, which is what challenge_sync_intargs reports.
+      6 PersonalBest  -- never paid: every bracket pays 1x Coin in this build, which is
+                         placeholder data.
+
+    `ChallengeRewardGetReply` (785) takes EXACTLY 2 ints and 2 strings and shows the
+    item popup twice -- text 2510 "Previous personal score: {0}" and 2512 "Previous
+    Guild Score: {0}". Each string is a Dictionary<int, List<RewardItem>> and
+    RewardItem's wire keys are plain `id`/`count`.
+    """
+    wd = ch.challenge_weekday()
+    pd = ch._reward_rows(ch.REWARD_PERSONAL_DAILY, wd)
+    gd_rows = ch._reward_rows(ch.REWARD_GUILD_DAILY, wd)
+    check("today has a PersonalDaily table", len(pd) > 0, str(len(pd)))
+    check("today has a GuildDaily table", len(gd_rows) > 0, str(len(gd_rows)))
+    check("  ...whose entry threshold is far higher",
+          int(gd_rows[1]["_lower"]) > int(pd[1]["_lower"]),
+          f'{gd_rows[1]["_lower"]} vs {pd[1]["_lower"]}')
+
+    st = fresh()
+    gp_before = st["currency"]["64"]
+    ch.start_challenge(st, 1)
+    ch.finish_challenge(st, int(gd_rows[1]["_lower"]))     # clears guild bracket 2
+    check("mid-day nothing has been paid", st["currency"]["64"] == gp_before,
+          f'{gp_before} -> {st["currency"]["64"]}')
+    check("  ...and nothing is queued to announce",
+          not st.get("challenge_pending"), str(st.get("challenge_pending")))
+
+    # Roll the day over -- this is the settlement.
+    st["challenge"]["day"] = "1999-01-01"
+    ch.challenge_sync_intargs(st)
+    check("the rollover pays out", st["currency"]["64"] > gp_before,
+          f'{gp_before} -> {st["currency"]["64"]}')
+    check("  ...and queues exactly one announcement",
+          len(st.get("challenge_pending") or []) == 1, str(st.get("challenge_pending")))
+    check("  ...and clears the day's score", int(st["challenge"]["best"]) == 0)
+
+    # Holy Water exists only in the guild table -- proof that ladder paid too.
+    hw = {int(i) for r in gd_rows[:2] for i in (r.get("_idList") or []) if i} - \
+         {int(i) for r in pd for i in (r.get("_idList") or []) if i}
+    check("  ...including an item only the guild table pays",
+          bool(hw) and any(ps.item_count(st, i) > 0 for i in hw), str(hw))
+
+    # The 785 payload.
+    got = ch.take_pending_settlement(st)
+    check("a settlement is available to announce", got is not None)
+    ints, strs = got
+    check("785 carries EXACTLY two ints", len(ints) == 2, str(ints))
+    check("  ...the personal and guild scores", ints[0] > 0 and ints[1] > 0, str(ints))
+    check("785 carries EXACTLY two strings", len(strs) == 2, str(len(strs)))
+    for label, blob in (("personal", strs[0]), ("guild", strs[1])):
+        d = json.loads(blob)
+        check(f"  the {label} blob is a dict of reward lists",
+              isinstance(d, dict) and all(isinstance(v, list) for v in d.values()),
+              blob[:80])
+        rows_ = [r for v in d.values() for r in v]
+        check(f"  ...whose entries use id/count", 
+              all(set(r) == {"id", "count"} for r in rows_), str(rows_[:2]))
+        check(f"  ...and are non-empty", bool(rows_), blob[:80])
+
+    check("the queue is emptied once announced",
+          ch.take_pending_settlement(st) is None)
+
+    # An unplayed day announces nothing -- two empty popups would be noise.
+    idle = fresh()
+    ch.challenge_sync_intargs(idle)          # create the record
+    idle["challenge"]["day"] = "1999-01-01"
+    ch.challenge_sync_intargs(idle)
+    check("an unplayed day settles nothing",
+          not idle.get("challenge_pending"), str(idle.get("challenge_pending")))
+
+    # PersonalBest stays unpaid.
+    pb = ch._reward_rows(ch.REWARD_PERSONAL_BEST, wd)
+    if pb:
+        amounts = {int(c) for r in pb for c in (r.get("_countList") or []) if c}
+        check("PersonalBest is placeholder data (1x per bracket), left unpaid",
+              amounts == {1}, str(amounts))
+
+
 def main():
     for fn in (check_content_exists, check_weekday_wiring, check_stages_json,
                check_sync_shape, check_try_scores_accumulate,
                check_formation_slots, check_guild_member_record,
-               check_fight_uses_the_raid_team,
+               check_fight_uses_the_raid_team, check_guild_daily_rewards,
                check_fight_and_score, check_daily_roll,
                check_rank_json):
         print(f"\n{fn.__name__}:")
