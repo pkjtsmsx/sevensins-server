@@ -1642,33 +1642,37 @@ def handle(conn, addr):
                     if index == PLAYER_SESSION_SERVER and cmd == SESSION_HEARTBEAT_REQUEST:
                         send(MSG_RPC, heartbeat_reply(rid))
                     elif index == PLAYER_STAGE_SERVER and cmd == STAGE_REQ_AVG_SYNC:
-                        # HandleAVGSyncReplyCmd wants EXACTLY 4 ints and stores the
-                        # first three in PlayerStage.mOptionTag.
-                        #   [0] = the option already chosen for this scene (0 = none)
-                        #   [1] = which options are UNLOCKED, encoded as decimal
-                        #         digits: AvgUIOptions.UpdateAVGOptionLockState reads
-                        #         digit i as `tag[1] / 10^i % 10` and unlocks
-                        #         _btnOptions[digit - 1]. With 0 it locks the lot,
-                        #         which is why every choice came up chained.
-                        # 4321 therefore unlocks options 1..4; scenes with fewer
-                        # buttons simply never read the higher digits.
-                        # [0] is the option already locked in for this scene. A choice
-                        # is PERMANENT per difficulty -- replaying a stage re-shows the
-                        # scene with the previous pick set, and only a different
-                        # difficulty lets you choose again -- so this has to be the
-                        # stored answer, not a flat 0.
-                        # **1-BASED on the way out, 0-based on the way in.** The choice
-                        # request sends a 0-based index; UpdateAVGOptionLockState reads
-                        # this field as a 1-based position with 0 meaning "undecided"
-                        # (it computes 10^(v-1) to pick the unlock digit). Echoing the
-                        # stored value raw meant picking the FIRST option sent 0 and
-                        # re-opened the whole scene, and picking any other locked in the
-                        # option before the one actually chosen.
+                        # HandleAVGSyncReplyCmd wants EXACTLY 4 ints, and it **SKIPS
+                        # intArgs[0]**:
+                        #
+                        #     _avgRecord[0] = intArgs[1]
+                        #     _avgRecord[1] = intArgs[2]
+                        #     _avgRecord[2] = intArgs[3]
+                        #
+                        # so the payload is shifted by one and slot 0 is unread. Sending
+                        # [chosen, unlocks, 0, 0] therefore landed `unlocks` (4321) in
+                        # the LOCKED-OPTION field and 0 in the unlock digits: 10^(4321-1)
+                        # overflows to infinity, the digit lookup yields 0, and
+                        # UpdateAVGOptionLockState's else-branch locks nothing at all --
+                        # every option stayed selectable no matter what we put in [0].
+                        # That is why a decided scene re-opened even once the value
+                        # itself was right.
+                        #
+                        # _avgRecord[0] -- the option already chosen, **1-BASED**, 0 for
+                        #   undecided. UpdateAVGOptionLockState computes 10^(v-1) to pick
+                        #   the unlock digit, and treats <= 0 as "nothing chosen".
+                        #   The CHOICE REQUEST is 0-based (RequestServerAvgSelectOption
+                        #   passes SelectedIndex straight into EndingOptions[]), so the
+                        #   two directions disagree -- hence avg_choice_wire's +1.
+                        # _avgRecord[1] -- which options are UNLOCKED, as decimal digits:
+                        #   digit i is `tag[1] / 10^i % 10` and unlocks
+                        #   _btnOptions[digit - 1]. 4321 unlocks options 1..4; scenes with
+                        #   fewer buttons never read the higher digits. 0 locks the lot.
                         chosen = ps.avg_choice_wire(state, rid)
                         log(f"    -> avg sync reply (avg {rid}, locked option "
                             f"{chosen or 'none'})")
                         send(MSG_RPC, uint64_msg(PLAYER_STAGE, STAGE_RPLY_AVG_SYNC,
-                                                 [chosen, AVG_OPTIONS_UNLOCKED, 0, 0],
+                                                 [0, chosen, AVG_OPTIONS_UNLOCKED, 0],
                                                  [], req_id=rid))
                     elif index == PLAYER_STAGE_SERVER and cmd == STAGE_REQ_AVG_CHOICE:
                         # MUST be exactly 4 ints: HandleAVGChoice only calls
