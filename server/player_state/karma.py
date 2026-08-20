@@ -45,6 +45,20 @@ from .core import (
 # to the client as intargs[0] of the AVG sync reply (see titan_server). It also settles
 # the payout question: a scene pays the FIRST time it is decided and never again.
 KARMA_TUTORIAL_CHAR = 11001            # Jacqueline; the portrait matches her, unconfirmed
+KARMA_CHAPTER2_CHAR = 10981            # Caillen
+
+# Which cast a chapter's decisions pay karma to, keyed by the stage BOOK the scene
+# belongs to. The chapter is resolved from the design data rather than from the avg id's
+# digits: `_avg_stage_index` maps every avg id back to the stage that plays it, so this
+# keeps working if the numbering is not as regular as it looks.
+#
+# Chapter 1 is Jacqueline (the tutorial portrait). Chapter 2 is Caillen -- she is the
+# cast the chapter is actually about, and paying its karma to Jacqueline was just the
+# fallback showing through.
+KARMA_CHAPTER_CHAR = {
+    1: KARMA_TUTORIAL_CHAR,
+    2: KARMA_CHAPTER2_CHAR,
+}
 
 # Observed in the tutorial, as (decision, option picked, gems, fexp). These become
 # KARMA_REWARDS entries as soon as a run tells us the avg ids -- the handler logs them.
@@ -70,9 +84,60 @@ KARMA_REWARDS = {
 KARMA_DEFAULT = (CUR_CASH, 5, KARMA_TUTORIAL_CHAR, 10)
 
 
+_avg_stage_cache = None
+
+
+def _avg_stage_index():
+    """{avg id: stage id} built from every stage row's four AVG columns.
+
+    Derived rather than pattern-matched on the id: 10103 belongs to stage 1101 and 20901
+    to 2109, which LOOKS like a simple prefix rule, but the columns are the authority and
+    a scene shared between stages would break the guess.
+    """
+    global _avg_stage_cache
+    if _avg_stage_cache is None:
+        import battle as _bt
+        out = {}
+        for sid, row in (_bt.dd.rows("stage") or {}).items():
+            for col in ("_preAVG_datas", "_beforeBattleAVG_datas",
+                        "_afterBattleAVG_datas", "_interludeAVG_datas"):
+                for tok in str(row.get(col) or "").split(","):
+                    tok = tok.strip()
+                    if tok.isdigit() and int(tok):
+                        out.setdefault(int(tok), int(sid))
+        _avg_stage_cache = out
+    return _avg_stage_cache
+
+
+def avg_chapter(avg_id):
+    """The story chapter a decision belongs to.
+
+    The stage index is the authority (stage ids are <chapter><nn>, so 2109 -> 2), but it
+    only lists the scenes a stage ENTERS at -- scenes chain onward from there, so a mid
+    -chain id like 10102 appears nowhere in the columns even though the client plays it.
+    For those, fall back to the id's own layout: avg ids are
+    <chapter><stage-in-chapter><seq>, i.e. 10103 -> chapter 1 and 20901 -> chapter 2.
+    """
+    stage = _avg_stage_index().get(int(avg_id))
+    if stage is not None:
+        return int(stage) // 1000
+    return int(avg_id) // 10000 or None
+
+
+def karma_char_for(avg_id):
+    """Which cast a decision pays karma to."""
+    return KARMA_CHAPTER_CHAR.get(avg_chapter(avg_id), KARMA_TUTORIAL_CHAR)
+
+
 def karma_reward(avg_id, option):
-    """(currencyType, amount, charID, fexp) for a decision, or the default."""
-    return KARMA_REWARDS.get((int(avg_id), int(option)), KARMA_DEFAULT)
+    """(currencyType, amount, charID, fexp) for a decision, or the default.
+
+    The character is resolved per CHAPTER even when the amounts fall back to the
+    default, so an undocumented chapter-2 decision still pays the right cast.
+    """
+    cur, amount, char_id, fexp = KARMA_REWARDS.get((int(avg_id), int(option)),
+                                                   KARMA_DEFAULT)
+    return cur, amount, karma_char_for(avg_id), fexp
 
 
 def avg_choice(state, avg_id):
@@ -114,10 +179,6 @@ def set_avg_choice(state, avg_id, option):
         return False
     seen[str(avg_id)] = int(option)
     return True
-
-
-def karma_reward(avg_id, option):
-    return KARMA_REWARDS.get((int(avg_id), int(option)), KARMA_DEFAULT)
 
 
 def grant_currency(state, cur_type, amount):

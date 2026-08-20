@@ -265,12 +265,47 @@ def check_avg_choice_is_one_based_on_the_wire():
           ps.avg_choice(st, 10103) == 2, str(ps.avg_choice(st, 10103)))
 
 
+
+def check_avg_chapter_character():
+    """Each chapter's decisions pay karma to that chapter's cast.
+
+    Chapter 1 is Jacqueline (the tutorial portrait). Chapter 2 is Caillen -- it was
+    paying Jacqueline only because every unmapped decision fell through to the default.
+    """
+    check("chapter 2 is mapped to Caillen",
+          ps.KARMA_CHAPTER_CHAR.get(2) == 10981, str(ps.KARMA_CHAPTER_CHAR))
+    ch1 = [10101, 10102, 10103, 10107]
+    ch2 = [20101, 20202, 20901, 20902, 21001]
+    for a in ch1:
+        check(f"avg {a} is chapter 1 -> Jacqueline",
+              ps.avg_chapter(a) == 1 and ps.karma_reward(a, 0)[2] == 11001,
+              f"chapter {ps.avg_chapter(a)} char {ps.karma_reward(a, 0)[2]}")
+    for a in ch2:
+        check(f"avg {a} is chapter 2 -> Caillen",
+              ps.avg_chapter(a) == 2 and ps.karma_reward(a, 0)[2] == 10981,
+              f"chapter {ps.avg_chapter(a)} char {ps.karma_reward(a, 0)[2]}")
+    # 10102 is played by the client but appears in NO stage's AVG columns -- scenes
+    # chain onward from the entry point the stage lists. It must still resolve, via the
+    # id's own <chapter><stage><seq> layout.
+    check("a mid-chain scene still resolves its chapter",
+          ps.avg_chapter(10102) == 1, str(ps.avg_chapter(10102)))
+    # The character override must not disturb the amounts of a documented decision.
+    cur, amt, cid, fexp = ps.karma_reward(10103, 1)
+    check("a documented decision keeps its amounts",
+          (amt, fexp) == (10, 20), f"{amt} gems +{fexp}")
+    check("  ...and its chapter's cast", cid == 11001, str(cid))
+    # Both casts must be real char rows, or the AVG reply names a portrait that fails.
+    for cid in set(ps.KARMA_CHAPTER_CHAR.values()):
+        check(f"char {cid} is a real cast", bool(bt.dd.row("char", cid)))
+
+
 def main():
     for fn in (check_table_matches_the_screenshot, check_a_single_rank_up_pays_once,
                check_multi_rank_pays_every_rank_crossed, check_no_rank_up_pays_nothing,
                check_the_payout_is_pushed, check_gifts_report_the_bonus,
                check_the_rank_up_splash_is_triggered,
-               check_avg_choice_is_one_based_on_the_wire):
+               check_avg_choice_is_one_based_on_the_wire,
+               check_avg_chapter_character):
         print(f"\n{fn.__name__}:")
         fn()
     print(f"\n{_fail} failure(s)")
