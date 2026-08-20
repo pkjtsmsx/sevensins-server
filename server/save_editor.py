@@ -167,6 +167,39 @@ def _limits(state):
             "star_max": STAR_MAX, "super_star_max": SUPER_STAR_MAX}
 
 
+def _num(value, default=0):
+    """int(value), treating a stored NULL as the default.
+
+    `dict.get(key, default)` returns the stored None for a key that exists and is null,
+    which is not what any of these call sites want. And null is MEANINGFUL here: a
+    roster entry stores `star: None` to mean "use the cast's rarity default" (see
+    player_state.charprogress), so `int(c.get("star", 1))` raised TypeError and the
+    editor could not open ANY account whose roster had one -- every account but the one
+    that happened to have every star set explicitly.
+    """
+    if value is None:
+        return int(default)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _display_star(entry):
+    """The star this cast actually has.
+
+    A roster entry stores `star: None` to mean "use the cast's rarity default" (see
+    player_state.roster, which resolves it the same way). Showing a bare 1 there would
+    be wrong AND dangerous: the UI posts the value back, so opening an account and
+    saving would have written star=1 over a 5-star cast.
+    """
+    star = entry.get("star")
+    if star:
+        return int(star)
+    row = dd.row("char", entry.get("id") or 0) or {}
+    return int(ps.char_star(row.get("_rarity")) or 1)
+
+
 def account_view(pid):
     """The state, plus every id resolved to a name, in the shape the UI renders."""
     state = _read(pid)
@@ -186,8 +219,8 @@ def account_view(pid):
             iid = rec.get("iid")
             if iid is None:
                 continue
-            items.append({"storage": stype, "slot": sid, "iid": int(iid),
-                          "name": item_name(iid), "amount": int(rec.get("amount", 0)),
+            items.append({"storage": stype, "slot": sid, "iid": _num(iid, 0),
+                          "name": item_name(iid), "amount": _num(rec.get("amount"), 0),
                           "uid": rec.get("uid") or ""})
     items.sort(key=lambda r: r["name"].lower())
 
@@ -206,12 +239,12 @@ def account_view(pid):
                 party_of[slot] = i + 1
     helper = state.get("helper")
 
-    roster = [{"uid": uid, "id": int(c.get("id", 0)), "name": char_name(c.get("id", 0)),
+    roster = [{"uid": uid, "id": _num(c.get("id"), 0), "name": char_name(c.get("id", 0)),
                "display": char_display(c.get("id", 0)),
-               "lv": int(c.get("lv", 1)), "star": int(c.get("star", 1)),
-               "super_star": int(c.get("super_star", 0)),
-               "limit_book": int(c.get("limit_book", 0)),
-               "limit_char": int(c.get("limit_char", 0)),
+               "lv": _num(c.get("lv"), 1), "star": _display_star(c),
+               "super_star": _num(c.get("super_star"), 0),
+               "limit_book": _num(c.get("limit_book"), 0),
+               "limit_char": _num(c.get("limit_char"), 0),
                "party": party_of.get(uid),
                "helper": uid == helper,
                "gear": sum(1 for e in (c.get("equips_list") or []) if e)}

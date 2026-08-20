@@ -130,10 +130,53 @@ def check_ordinary_items_are_still_stacks():
     check("  ...and 0 removes the slot", not rows, str(rows))
 
 
+
+def check_every_account_opens():
+    """A stored NULL must not stop the editor opening an account.
+
+    `dict.get(key, default)` returns the stored None for a key that EXISTS and is null,
+    which is not what the view wants -- and null is meaningful here: a roster entry
+    stores `star: None` to mean "use the cast's rarity default". `int(c.get("star", 1))`
+    therefore raised
+
+        TypeError: int() argument must be a string, a bytes-like object or a real
+                   number, not 'NoneType'
+
+    and the editor could not open ANY account whose roster had one. Only the account
+    that happened to have every star set explicitly worked, so it looked like the
+    default selection was broken rather than most saves being unreadable.
+    """
+    check("_num treats a stored null as the default",
+          se._num(None, 7) == 7, str(se._num(None, 7)))
+    check("  ...and junk too", se._num("nonsense", 3) == 3)
+    check("  ...while a real value passes through", se._num("12", 0) == 12)
+
+    st = ps.load(1000063)
+    uid = next(iter(st["roster"]))
+    st["roster"][uid]["star"] = None            # the legitimate "use the default" form
+    ps.save(st)
+    try:
+        view = se.account_view("1000063")
+    except TypeError as exc:                    # noqa: BLE001
+        check("an account with a null star still opens", False, str(exc))
+        return
+    check("an account with a null star still opens", True)
+
+    row = next(r for r in view["roster"] if r["uid"] == uid)
+    # **Not 1.** The UI posts this value back, so showing a bare 1 would write star=1
+    # over the cast on the next save.
+    cid = st["roster"][uid].get("id")
+    want = int(ps.char_star((bt.dd.row("char", cid) or {}).get("_rarity")) or 1)
+    check("  ...showing the cast's real default star, not 1",
+          row["star"] == want, f'{row["star"]} vs {want}')
+    check("    ...which for a high-rarity cast is above 1", want > 1, str(want))
+
+
 def main():
     for fn in (check_instances_go_to_their_own_storage,
                check_counts_go_up_and_down,
-               check_ordinary_items_are_still_stacks):
+               check_ordinary_items_are_still_stacks,
+               check_every_account_opens):
         print(f"\n{fn.__name__}:")
         fn()
     print(f"\n{_fail} failure(s)")
