@@ -185,31 +185,51 @@ def avg_options_taken(state, avg_id, exclude_difficulty=None):
 def avg_sync_tags(state, avg_id, difficulty=1):
     """-> (tag0, tag1), the two values HandleAVGSyncReplyCmd stores as _avgRecord[0..1].
 
-    `UpdateAVGOptionLockState` reads them together:
+    `UpdateAVGOptionLockState` has THREE branches, and which one runs decides both what
+    is selectable AND whether the decision pays:
 
         v13 = _replayMode ? 0 : tag[0]
-        if (v13 <= 0):  lock all, then UNLOCK btnOptions[d-1] for each digit d of tag[1]
+        if (v13 <= 0):                      lock all, UNLOCK the digits of tag[1]
+            _skipPerform = 1
         else:
             v17 = tag[1] / 10^(v13-1) % 10
-            if v17 >= 1: lock all, UNLOCK only btnOptions[v17-1]   (already chosen here)
-            else:        LOCK btnOptions[d-1] for each digit d of tag[1]
+            if v17 >= 1:                    lock all, UNLOCK only btnOptions[v17-1]
+                _skipPerform = 1
+            else:                           LOCK the digits of tag[1]
+                _skipPerform = 0
 
-    so tag[0] is the option chosen ON THIS DIFFICULTY (1-based, 0 = undecided) and tag[1]
-    is the identity mask with the digits of options used on OTHER difficulties zeroed.
+    and `_skipPerform` is the whole ballgame, because `OnBtnClick` dispatches
+    AvgUIOptionsEvent **3** (`OnAvgOptionsSkipover` -- no request, no reward) when it is
+    set, and **1** (`OnAvgOptionsSelected` -> RequestServerAvgSelectOption -> the reward
+    banner) when it is not. Event types confirmed from PanelAvg.Init's AddListener calls.
 
-    The stage has three difficulties and each scene three options, so a full clear takes
-    a different branch each time and the mask empties one digit per difficulty. Sending a
-    flat 4321 made the "already chosen" test true for every value of tag[0], which is why
-    Hard showed the same single option as Easy instead of the two untried ones.
+    So there are exactly two shapes worth sending:
+
+      * **decided on this difficulty** -> (chosen+1, identity mask). The digit at
+        position chosen is chosen+1, so v17 >= 1: only that option shows and the click
+        skips over without paying again. This is the replay behaviour.
+      * **not yet decided here** -> tag[1] carries ONLY the digits of options used on
+        other difficulties (a LOCK-OUT list), and tag[0] points at a position whose
+        digit is 0 so that v17 == 0 and _skipPerform stays 0. The untried options are
+        selectable and the pick pays.
+
+    tag[1]'s meaning therefore inverts between the branches -- unlock-list in the first
+    two, lock-list in the third -- which is why a single "unlock mask" cannot serve both.
+    An identity 4321 makes v17 >= 1 for every tag[0], so it always takes the skip path:
+    that is what silenced the reward popups.
     """
     chosen = avg_choice(state, avg_id, difficulty)
+    if chosen is not None:
+        return chosen + 1, AVG_UNLOCK_IDENTITY
     taken = avg_options_taken(state, avg_id, exclude_difficulty=difficulty)
-    tag1 = 0
-    for pos in range(AVG_OPTION_SLOTS):
-        if pos in taken:
-            continue                      # locked out: used on another difficulty
-        tag1 += (pos + 1) * (10 ** pos)
-    return (0 if chosen is None else chosen + 1), tag1
+    # Lock-out list: option o sits as digit (o+1) at position o, matching the identity
+    # layout so the client's `digit - 1` lands back on the right button.
+    tag1 = sum((o + 1) * (10 ** o) for o in taken if 0 <= o < AVG_OPTION_SLOTS)
+    # Any position whose digit is 0 forces v17 == 0, keeping _skipPerform clear. With at
+    # most three options used, the fourth slot is always free.
+    tag0 = next(p for p in range(AVG_OPTION_SLOTS)
+                if tag1 // 10 ** p % 10 == 0) + 1
+    return tag0, tag1
 
 
 def avg_choice_wire(state, avg_id, difficulty=1):

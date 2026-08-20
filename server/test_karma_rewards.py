@@ -235,29 +235,50 @@ def check_avg_choice_is_per_difficulty():
     """
     AVG = 10103
 
-    def client_unlocked(tag0, tag1, buttons=3):
-        """Transcribe UpdateAVGOptionLockState -> the set of selectable buttons."""
+    def client(tag0, tag1, buttons=3):
+        """Transcribe UpdateAVGOptionLockState -> (selectable buttons, pays?).
+
+        `_skipPerform` is what decides the payout: OnBtnClick dispatches
+        AvgUIOptionsEvent 3 (OnAvgOptionsSkipover -- no request, no reward) when it is
+        set, and 1 (OnAvgOptionsSelected -> RequestServerAvgSelectOption) when clear.
+        """
         if tag0 <= 0:
-            return {tag1 // 10 ** i % 10 - 1
-                    for i in range(buttons) if tag1 // 10 ** i % 10 >= 1}
+            unlocked = {tag1 // 10 ** i % 10 - 1
+                        for i in range(buttons) if tag1 // 10 ** i % 10 >= 1}
+            return unlocked, False              # _skipPerform = 1
         v17 = tag1 // 10 ** (tag0 - 1) % 10
         if v17 >= 1:
-            return {v17 - 1}
+            return {v17 - 1}, False             # _skipPerform = 1
         locked = {tag1 // 10 ** i % 10 - 1
                   for i in range(buttons) if tag1 // 10 ** i % 10 >= 1}
-        return set(range(buttons)) - locked
+        return set(range(buttons)) - locked, True   # _skipPerform = 0 -> pays
+
+    def client_unlocked(tag0, tag1, buttons=3):
+        return client(tag0, tag1, buttons)[0]
+
+    def client_pays(tag0, tag1, buttons=3):
+        return client(tag0, tag1, buttons)[1]
 
     st = ps.load(1000040)
     check("undecided on Easy offers everything",
           client_unlocked(*ps.avg_sync_tags(st, AVG, 1)) == {0, 1, 2},
+          str(ps.avg_sync_tags(st, AVG, 1)))
+    check("  ...and PAYS -- a first decision must reward",
+          client_pays(*ps.avg_sync_tags(st, AVG, 1)),
           str(ps.avg_sync_tags(st, AVG, 1)))
 
     ps.set_avg_choice(st, AVG, 0, 1)                       # Easy -> option 1
     check("  ...and after choosing, only that option",
           client_unlocked(*ps.avg_sync_tags(st, AVG, 1)) == {0},
           str(ps.avg_sync_tags(st, AVG, 1)))
+    check("  ...and a replay does NOT pay again",
+          not client_pays(*ps.avg_sync_tags(st, AVG, 1)),
+          str(ps.avg_sync_tags(st, AVG, 1)))
     check("HARD offers the two UNTRIED options",
           client_unlocked(*ps.avg_sync_tags(st, AVG, 2)) == {1, 2},
+          str(ps.avg_sync_tags(st, AVG, 2)))
+    check("  ...and PAYS, because it is a fresh decision",
+          client_pays(*ps.avg_sync_tags(st, AVG, 2)),
           str(ps.avg_sync_tags(st, AVG, 2)))
 
     ps.set_avg_choice(st, AVG, 1, 2)                       # Hard -> option 2
@@ -266,6 +287,9 @@ def check_avg_choice_is_per_difficulty():
           str(ps.avg_sync_tags(st, AVG, 2)))
     check("NIGHTMARE is down to the last option",
           client_unlocked(*ps.avg_sync_tags(st, AVG, 3)) == {2},
+          str(ps.avg_sync_tags(st, AVG, 3)))
+    check("  ...and still pays for it",
+          client_pays(*ps.avg_sync_tags(st, AVG, 3)),
           str(ps.avg_sync_tags(st, AVG, 3)))
 
     ps.set_avg_choice(st, AVG, 2, 3)
@@ -279,12 +303,17 @@ def check_avg_choice_is_per_difficulty():
     check("  ...and leaves that difficulty's pick alone",
           ps.avg_choice(st, AVG, 1) == 0, str(ps.avg_choice(st, AVG, 1)))
 
-    # tag[0] is 1-BASED (0 = undecided) while the choice REQUEST is 0-based.
+    # tag[0] must never be 0. Zero takes the `v13 <= 0` branch, which sets
+    # _skipPerform = 1 -> event 3 -> OnAvgOptionsSkipover -> no request and no reward.
+    # For an undecided scene it points at a FREE digit slot instead, so v17 == 0 keeps
+    # _skipPerform clear and the decision pays.
     st2 = ps.load(1000041)
-    check("an undecided scene reports tag0 0",
-          ps.avg_sync_tags(st2, AVG, 1)[0] == 0)
+    t0, t1 = ps.avg_sync_tags(st2, AVG, 1)
+    check("an undecided scene never reports tag0 0", t0 > 0, str((t0, t1)))
+    check("  ...and points at a digit slot that is empty",
+          t1 // 10 ** (t0 - 1) % 10 == 0, str((t0, t1)))
     ps.set_avg_choice(st2, AVG, 0, 1)
-    check("  ...and option 0 reports tag0 1, not 0",
+    check("  ...while a decided one is 1-BASED (option 0 -> 1)",
           ps.avg_sync_tags(st2, AVG, 1)[0] == 1,
           str(ps.avg_sync_tags(st2, AVG, 1)))
 
