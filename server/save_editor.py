@@ -426,6 +426,47 @@ def apply_edits(pid, edits):
             "changed": changed}
 
 
+def _instance_storage(iid):
+    """Which storage an INSTANCE item lives in, or None for an ordinary stack.
+
+    Starshards (storage 2) and Soulmirrors (storage 3) are instances, not stacks: each
+    one is its own slot with a uid and a rolled `attr` block. `item_bucket` already
+    encodes the same rule for deciding which sync to push, so ask it rather than
+    re-deriving the action ranges here.
+    """
+    if ps.item_bucket(iid) != "equipment":
+        return None
+    action = (dd.row("item", iid) or {}).get("_action")
+    return (str(ps.BP_STORAGE_SOULFRAG)
+            if action in ps.SOULFRAG_SLOT_INDEX else str(ps.BP_STORAGE_EQUIPMENT))
+
+
+def _set_instances(state, iid, want):
+    """Bring the number of owned instances of `iid` to `want`, granting or deleting.
+
+    **Instances cannot be written as a stack.** The editor used to add
+    `{"amount": n, "attr": {}, "iid": iid, "uid": ""}` to storage 1 for everything,
+    which for a starshard or soulmirror is wrong in three ways at once: wrong storage,
+    no uid, and no rolled attributes. The client then failed to file the row and the
+    WHOLE list went blank -- "No Available Soulmirror", Owned -/- -- until the bad entry
+    was removed again. Granting goes through the same path drops use, so an edited piece
+    is indistinguishable from an earned one.
+    """
+    storage = _instance_storage(iid)
+    bag = state.setdefault("backpack", {}).setdefault(storage, {})
+    owned = [sid for sid, rec in bag.items() if int(rec.get("iid", -1)) == iid]
+    want = _clamp(int(want), 0, 200)
+    if want > len(owned):
+        for _ in range(want - len(owned)):
+            ps.grant_reward(state, iid, 1)
+    else:
+        # Drop the highest slots first; a lower slot is more likely to be equipped and
+        # referenced by a cast, and deleting one of those leaves a dangling reference.
+        for sid in sorted(owned, key=lambda x: -int(x))[:len(owned) - want]:
+            bag.pop(sid, None)
+    return want
+
+
 def _set_item(state, row):
     """Set an item's amount, adding it to a free slot if the player has none.
 
@@ -433,8 +474,12 @@ def _set_item(state, row):
     item id living in the record -- so "give me 50 Awaker Scrolls" is either an
     amount change on an existing slot or a brand new slot, never a dict update keyed
     by item id.
+
+    Starshards and Soulmirrors are the exception and are handled as instances.
     """
     iid = int(row["iid"])
+    if _instance_storage(iid):
+        return _set_instances(state, iid, row.get("amount", 0))
     amount = _clamp(int(row.get("amount", 0)), 0, 999_999)
     storage = str(row.get("storage") or "1")
     bp = state.setdefault("backpack", {}).setdefault(storage, {})
