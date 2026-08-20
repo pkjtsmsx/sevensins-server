@@ -250,12 +250,56 @@ def check_rev1_clamp_is_repaired():
           f"{once} -> {st['currency']['1']}")
 
 
+
+def check_rank_up_pushes_the_new_cap():
+    """A rank-up raises MAX Stamina, and the CLIENT has to be told.
+
+    The level update (513) carries only the Level row; the cap and the "Stamina
+    Recovered" payout both live in the ENERGY sync. Without that push the client keeps
+    the cap it was told at login -- 178 at rank 15 while the server had already moved to
+    182 at rank 17 -- so the rank-up screen animates numbers the header contradicts until
+    the next relaunch.
+    """
+    from player_state.core import (_default, _seed_roster, grant_player_xp,
+                                   stamina_cap_for_level, stamina_recovered_on_rank_up,
+                                   player_level_xp_cap, ENERGY_ACTION)
+    st = _default(1000050); _seed_roster(st)
+    slot = st["energy"][str(ENERGY_ACTION)]
+    lv0 = int(st["level"]["lv"])
+    slot["cap"] = stamina_cap_for_level(lv0)
+    slot["energy"] = 0
+
+    # Enough xp to cross two ranks at once -- the case that surfaced this.
+    need = player_level_xp_cap(lv0) + player_level_xp_cap(lv0 + 1)
+    levelled, old_lv, new_lv = grant_player_xp(st, need)
+    check("two ranks are gained at once", levelled and new_lv == old_lv + 2,
+          f"{old_lv} -> {new_lv}")
+    check("  ...and the cap follows the new rank",
+          slot["cap"] == stamina_cap_for_level(new_lv),
+          f"{slot['cap']} vs {stamina_cap_for_level(new_lv)}")
+    check("  ...and it actually went UP",
+          slot["cap"] > stamina_cap_for_level(old_lv), str(slot["cap"]))
+    expect = sum(stamina_recovered_on_rank_up(r) for r in range(old_lv + 1, new_lv + 1))
+    check("  ...paying the recovery for EVERY rank crossed",
+          slot["energy"] == expect, f"{slot['energy']} vs {expect}")
+
+    # The push itself: the reply set must carry the energy sync, not just the level row.
+    import titan_server as ts
+    src = open(os.path.join(HERE, "titan_server.py"), encoding="utf-8").read()
+    lvl_block = src[src.index("levelled, old_lv, new_lv = ps.grant_player_xp"):]
+    lvl_block = lvl_block[:2000]
+    check("the level-up path pushes the energy sync",
+          "0xAE487D79" in lvl_block and "if levelled:" in lvl_block,
+          "no energy push found after grant_player_xp")
+
+
 def main():
     for fn in (check_the_two_numbers_are_not_the_same_one,
                check_cap_matches_the_client, check_new_account,
                check_rewards_now_move_the_numbers, check_rank_up_pays_what_the_screen_says,
                check_migration_is_one_shot_and_safe,
-               check_rev1_clamp_is_repaired):
+               check_rev1_clamp_is_repaired,
+               check_rank_up_pushes_the_new_cap):
         print(f"\n{fn.__name__}:")
         fn()
     print(f"\n{_fail} failure(s)")

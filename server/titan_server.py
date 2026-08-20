@@ -1162,6 +1162,16 @@ def battle_end_reward(battle, state):
         log(f"    -> account xp +{acc_xp}"
             + (f" -- LEVEL UP {old_lv} -> {new_lv}" if levelled else
                f" (lv {new_lv}, {state['level']['xp']}/{state['level']['xp_cap']})"))
+        if levelled:
+            # A rank-up raises MAX Stamina and pays the "Stamina Recovered" figure, and
+            # BOTH live in the energy sync -- the level update (513) carries only the
+            # Level row. Without this push the client keeps the cap it was told at login
+            # (178 at rank 15 while the server had already moved to 182 at rank 17), so
+            # the rank-up screen animates numbers the header then contradicts until the
+            # next relaunch.
+            msgs.append(uint_msg(0xAE487D79, 512, [], [ps.energy_json(state)]))
+            log(f"    -> stamina now {state['energy'][str(ps.ENERGY_ACTION)]['energy']}"
+                f"/{state['energy'][str(ps.ENERGY_ACTION)]['cap']} (cap pushed)")
         # Battle XP changed lv/xp on the roster, and charDic is cached from login the
         # same way StageSyncData is -- without this the lobby keeps showing the old
         # levels until relaunch, even though the results panel just animated them.
