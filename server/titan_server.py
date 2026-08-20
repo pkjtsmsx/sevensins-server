@@ -1668,11 +1668,12 @@ def handle(conn, addr):
                         #   digit i is `tag[1] / 10^i % 10` and unlocks
                         #   _btnOptions[digit - 1]. 4321 unlocks options 1..4; scenes with
                         #   fewer buttons never read the higher digits. 0 locks the lot.
-                        chosen = ps.avg_choice_wire(state, rid)
-                        log(f"    -> avg sync reply (avg {rid}, locked option "
-                            f"{chosen or 'none'})")
+                        diff = int(state.get("avg_difficulty", 1))
+                        chosen, unlocks = ps.avg_sync_tags(state, rid, diff)
+                        log(f"    -> avg sync reply (avg {rid}, difficulty {diff}, "
+                            f"locked option {chosen or 'none'}, unlock mask {unlocks})")
                         send(MSG_RPC, uint64_msg(PLAYER_STAGE, STAGE_RPLY_AVG_SYNC,
-                                                 [0, chosen, AVG_OPTIONS_UNLOCKED, 0],
+                                                 [0, chosen, unlocks, 0],
                                                  [], req_id=rid))
                     elif index == PLAYER_STAGE_SERVER and cmd == STAGE_REQ_AVG_CHOICE:
                         # MUST be exactly 4 ints: HandleAVGChoice only calls
@@ -1700,14 +1701,16 @@ def handle(conn, addr):
                         cur_type, cur_val, char_id, fexp = ps.karma_reward(avg_id, option)
                         # A scene pays once. Re-deciding is only possible on another
                         # difficulty, and set_avg_choice is what enforces that.
-                        first_time = ps.set_avg_choice(state, avg_id, option)
+                        diff = int(state.get("avg_difficulty", 1))
+                        first_time = ps.set_avg_choice(state, avg_id, option, diff)
                         if not first_time:
                             cur_val = fexp = 0
                         if cur_val:
                             ps.grant_currency(state, cur_type, cur_val)
                         karma = ps.grant_karma(state, char_id, fexp) if fexp else None
                         ps.save(state)
-                        log(f"    -> avg choice reply (avg {avg_id}, option {option}"
+                        log(f"    -> avg choice reply (avg {avg_id} diff {diff}, "
+                            f"option {option}"
                             f"{'' if first_time else ', ALREADY DECIDED - no payout'}): "
                             f"currency {cur_type}x{cur_val}, char {char_id} +{fexp} "
                             f"karma -> {karma}")
@@ -3372,6 +3375,14 @@ def handle(conn, addr):
                         # so crediting the notional cost is the only way that mission can
                         # move without changing the economy.
                         srow = bt.dd.row("stage", stage_id) or {}
+                        # Which difficulty the AVG decisions of this run belong to.
+                        # Stages 1101/1201/1301 are the SAME scene ("Third Faction",
+                        # 1-1) at _difficulty 1/2/3 and share their AVG ids, so the scene
+                        # alone cannot tell them apart -- and a choice is permanent PER
+                        # DIFFICULTY, with three difficulties and three options meaning
+                        # one option each. The AVG sync request carries only the scene,
+                        # so the difficulty has to be remembered from the stage entry.
+                        state["avg_difficulty"] = int(srow.get("_difficulty") or 1)
                         ap = int(srow.get("_ap") or 0)
                         if ap and int(srow.get("_ap_type") or 0) != 2:
                             ps.bump_quest_counter(state, ps.QUEST_CASE_SPEND_ITEM, ap,

@@ -140,44 +140,100 @@ def karma_reward(avg_id, option):
     return cur, amount, karma_char_for(avg_id), fexp
 
 
-def avg_choice(state, avg_id):
-    """The 0-BASED option already locked in for this scene, or None if never decided.
+# The identity unlock mask: digit at position i has the value i+1, so option N sits at
+# position N-1 and `tag[1] / 10^(N-1) % 10 == N`. Zeroing a digit removes that option
+# from the unlock set (and from the "already chosen" test), which is how an option taken
+# on another difficulty is locked out.
+AVG_UNLOCK_IDENTITY = 4321
+AVG_OPTION_SLOTS = 4
+
+
+def _avg_record(state, avg_id):
+    """{difficulty: option} for one scene, migrating the old flat format.
+
+    Choices used to be stored as a bare `{avg_id: option}`, which could not express the
+    per-difficulty rule at all. An old value is read as difficulty 1.
+    """
+    seen = state.setdefault("avg_choices", {})
+    rec = seen.get(str(avg_id))
+    if rec is None:
+        return {}
+    if not isinstance(rec, dict):
+        rec = {"1": int(rec)}
+        seen[str(avg_id)] = rec
+    return rec
+
+
+def avg_choice(state, avg_id, difficulty=1):
+    """The 0-BASED option locked in for this scene ON THIS DIFFICULTY, or None.
 
     None rather than 0, because option 0 is a real answer -- the first button -- and
-    conflating the two is what let a decided scene re-open. See avg_choice_wire.
+    conflating the two is what let a decided scene re-open.
     """
-    return state.setdefault("avg_choices", {}).get(str(avg_id))
+    rec = _avg_record(state, avg_id)
+    v = rec.get(str(int(difficulty)))
+    return None if v is None else int(v)
 
 
-def avg_choice_wire(state, avg_id):
-    """intargs[0] of the AVG sync reply: the locked option, **1-BASED**, 0 = undecided.
+def avg_options_taken(state, avg_id, exclude_difficulty=None):
+    """The 0-based options already used on OTHER difficulties."""
+    rec = _avg_record(state, avg_id)
+    skip = None if exclude_difficulty is None else str(int(exclude_difficulty))
+    return {int(v) for k, v in rec.items() if k != skip}
 
-    `AvgUIOptions.UpdateAVGOptionLockState` reads it as
 
-        v13 = _replayMode ? 0 : mOptionTag[0]
-        if (v13 <= 0):  lock everything, then unlock by the digits of mOptionTag[1]
-        else:           v15 = 10^(v13 - 1);  unlock ONLY btnOptions[digit - 1]
+def avg_sync_tags(state, avg_id, difficulty=1):
+    """-> (tag0, tag1), the two values HandleAVGSyncReplyCmd stores as _avgRecord[0..1].
 
-    so it is a 1-based position and 0 means "nothing chosen" -- the same 1-based
-    convention as the unlock digits, which index `_btnOptions[digit - 1]`.
+    `UpdateAVGOptionLockState` reads them together:
 
-    The request side is 0-BASED (`RequestServerAvgSelectOption` sends
-    [avgID, optionIndex]), so the two directions disagree and the stored value has to be
-    shifted on the way out. Echoing it raw broke both cases: picking the FIRST option
-    sent 0 and re-opened the whole scene, and picking any other locked in the option
-    before the one actually chosen.
+        v13 = _replayMode ? 0 : tag[0]
+        if (v13 <= 0):  lock all, then UNLOCK btnOptions[d-1] for each digit d of tag[1]
+        else:
+            v17 = tag[1] / 10^(v13-1) % 10
+            if v17 >= 1: lock all, UNLOCK only btnOptions[v17-1]   (already chosen here)
+            else:        LOCK btnOptions[d-1] for each digit d of tag[1]
+
+    so tag[0] is the option chosen ON THIS DIFFICULTY (1-based, 0 = undecided) and tag[1]
+    is the identity mask with the digits of options used on OTHER difficulties zeroed.
+
+    The stage has three difficulties and each scene three options, so a full clear takes
+    a different branch each time and the mask empties one digit per difficulty. Sending a
+    flat 4321 made the "already chosen" test true for every value of tag[0], which is why
+    Hard showed the same single option as Easy instead of the two untried ones.
     """
-    chosen = avg_choice(state, avg_id)
-    return 0 if chosen is None else int(chosen) + 1
+    chosen = avg_choice(state, avg_id, difficulty)
+    taken = avg_options_taken(state, avg_id, exclude_difficulty=difficulty)
+    tag1 = 0
+    for pos in range(AVG_OPTION_SLOTS):
+        if pos in taken:
+            continue                      # locked out: used on another difficulty
+        tag1 += (pos + 1) * (10 ** pos)
+    return (0 if chosen is None else chosen + 1), tag1
 
 
-def set_avg_choice(state, avg_id, option):
-    """Record a decision. Returns False if this scene was already decided, in which case
-    the reward must NOT be paid again -- the client re-shows the locked-in option."""
+def avg_choice_wire(state, avg_id, difficulty=1):
+    """tag[0] alone -- kept for callers that only need the locked option."""
+    return avg_sync_tags(state, avg_id, difficulty)[0]
+
+
+def set_avg_choice(state, avg_id, option, difficulty=1):
+    """Record a decision for one scene ON ONE DIFFICULTY.
+
+    -> False if this scene was already decided on this difficulty, in which case the
+    reward must NOT be paid again (the client re-shows the locked-in option).
+
+    A scene pays once PER DIFFICULTY, not once ever: the stage has three difficulties and
+    the scene three options, so a full clear is three different decisions, and
+    KARMA_REWARDS is keyed by (scene, option) precisely because each pays its own amount.
+    """
     seen = state.setdefault("avg_choices", {})
-    if str(avg_id) in seen:
+    rec = _avg_record(state, avg_id)
+    key = str(int(difficulty))
+    if key in rec:
         return False
-    seen[str(avg_id)] = int(option)
+    rec[key] = int(option)
+    seen[str(avg_id)] = rec
     return True
 
 

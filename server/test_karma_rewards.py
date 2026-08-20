@@ -212,59 +212,90 @@ def check_the_rank_up_splash_is_triggered():
 
 
 
-def check_avg_choice_is_one_based_on_the_wire():
-    """The AVG sync's locked-option field is 1-BASED; the choice request is 0-based.
+def check_avg_choice_is_per_difficulty():
+    """Three difficulties, three options: one option per run, locked out thereafter.
 
-    `AvgUIOptions.UpdateAVGOptionLockState`:
+    Stages 1101/1201/1301 are the SAME scene ("Third Faction", 1-1) at _difficulty 1/2/3
+    and share their AVG ids, so a choice is permanent PER DIFFICULTY and a full clear
+    uses up all three options.
 
-        v13 = _replayMode ? 0 : mOptionTag[0]
-        if (v13 <= 0):  lock all, then unlock by the digits of mOptionTag[1]
-        else:           v15 = 10^(v13 - 1);  unlock ONLY btnOptions[digit - 1]
+    `UpdateAVGOptionLockState` reads the two tags together:
 
-    -- v13 is a 1-based position and 0 means "undecided", the same convention as the
-    unlock digits. `RequestServerAvgSelectOption` however sends a 0-BASED index, so the
-    stored value must be shifted on the way out. Echoing it raw broke both cases:
-    picking the FIRST option sent 0 and re-opened the entire scene (all options
-    selectable again on a replay), and picking any other locked in the option BEFORE the
-    one actually chosen.
+        v13 = _replayMode ? 0 : tag[0]
+        if (v13 <= 0):  lock all, then UNLOCK btnOptions[d-1] for each digit d of tag[1]
+        else:
+            v17 = tag[1] / 10^(v13-1) % 10
+            if v17 >= 1: lock all, UNLOCK only btnOptions[v17-1]
+            else:        LOCK btnOptions[d-1] for each digit d of tag[1]
 
-    Getting this right also delivers the replay skip for free: `OnBtnClick` dispatches
-    straight through when `_skipPerform` is set, which the locked-in branch sets.
+    so tag[0] is the option taken ON THIS DIFFICULTY (1-based, 0 = undecided) and tag[1]
+    is the identity mask 4321 with the digits of options used on OTHER difficulties
+    zeroed. A flat 4321 made the "already chosen" test true for every tag[0], which is
+    why Hard showed the same single option as Easy instead of the two untried ones.
     """
-    st = ps.load(1000037)
-    check("an undecided scene reports 0", ps.avg_choice_wire(st, 10102) == 0,
-          str(ps.avg_choice_wire(st, 10102)))
-    check("  ...and avg_choice says None, not 0",
-          ps.avg_choice(st, 10102) is None, str(ps.avg_choice(st, 10102)))
+    AVG = 10103
 
-    # Option 0 is a REAL answer -- the first button -- and must not read as undecided.
-    ps.set_avg_choice(st, 10102, 0)
-    check("picking the FIRST option reports 1, not 0",
-          ps.avg_choice_wire(st, 10102) == 1, str(ps.avg_choice_wire(st, 10102)))
-    check("  ...which is what stops the scene re-opening",
-          ps.avg_choice_wire(st, 10102) > 0)
+    def client_unlocked(tag0, tag1, buttons=3):
+        """Transcribe UpdateAVGOptionLockState -> the set of selectable buttons."""
+        if tag0 <= 0:
+            return {tag1 // 10 ** i % 10 - 1
+                    for i in range(buttons) if tag1 // 10 ** i % 10 >= 1}
+        v17 = tag1 // 10 ** (tag0 - 1) % 10
+        if v17 >= 1:
+            return {v17 - 1}
+        locked = {tag1 // 10 ** i % 10 - 1
+                  for i in range(buttons) if tag1 // 10 ** i % 10 >= 1}
+        return set(range(buttons)) - locked
 
-    ps.set_avg_choice(st, 10103, 2)
-    check("the third option reports 3", ps.avg_choice_wire(st, 10103) == 3,
-          str(ps.avg_choice_wire(st, 10103)))
-    check("  ...and the stored value stays 0-based",
-          ps.avg_choice(st, 10103) == 2, str(ps.avg_choice(st, 10103)))
+    st = ps.load(1000040)
+    check("undecided on Easy offers everything",
+          client_unlocked(*ps.avg_sync_tags(st, AVG, 1)) == {0, 1, 2},
+          str(ps.avg_sync_tags(st, AVG, 1)))
 
-    # Every stored choice must round-trip to the button the player actually pressed.
-    for opt in range(4):
-        st2 = ps.load(1000038 + opt)
-        ps.set_avg_choice(st2, 99000 + opt, opt)
-        wire = ps.avg_choice_wire(st2, 99000 + opt)
-        check(f"option {opt} -> wire {opt + 1} -> btnOptions[{opt}]",
-              wire == opt + 1 and wire - 1 == opt, str(wire))
+    ps.set_avg_choice(st, AVG, 0, 1)                       # Easy -> option 1
+    check("  ...and after choosing, only that option",
+          client_unlocked(*ps.avg_sync_tags(st, AVG, 1)) == {0},
+          str(ps.avg_sync_tags(st, AVG, 1)))
+    check("HARD offers the two UNTRIED options",
+          client_unlocked(*ps.avg_sync_tags(st, AVG, 2)) == {1, 2},
+          str(ps.avg_sync_tags(st, AVG, 2)))
 
-    # A scene pays once; re-deciding on the same scene is refused.
-    check("re-deciding a scene is refused",
-          ps.set_avg_choice(st, 10103, 0) is False)
-    check("  ...and does not overwrite the original pick",
-          ps.avg_choice(st, 10103) == 2, str(ps.avg_choice(st, 10103)))
+    ps.set_avg_choice(st, AVG, 1, 2)                       # Hard -> option 2
+    check("  ...and after choosing on Hard, only that one",
+          client_unlocked(*ps.avg_sync_tags(st, AVG, 2)) == {1},
+          str(ps.avg_sync_tags(st, AVG, 2)))
+    check("NIGHTMARE is down to the last option",
+          client_unlocked(*ps.avg_sync_tags(st, AVG, 3)) == {2},
+          str(ps.avg_sync_tags(st, AVG, 3)))
 
+    ps.set_avg_choice(st, AVG, 2, 3)
+    check("Easy still shows its own pick afterwards",
+          client_unlocked(*ps.avg_sync_tags(st, AVG, 1)) == {0},
+          str(ps.avg_sync_tags(st, AVG, 1)))
 
+    # A scene pays once PER DIFFICULTY -- three difficulties, three payouts.
+    check("re-deciding the same difficulty is refused",
+          ps.set_avg_choice(st, AVG, 1, 1) is False)
+    check("  ...and leaves that difficulty's pick alone",
+          ps.avg_choice(st, AVG, 1) == 0, str(ps.avg_choice(st, AVG, 1)))
+
+    # tag[0] is 1-BASED (0 = undecided) while the choice REQUEST is 0-based.
+    st2 = ps.load(1000041)
+    check("an undecided scene reports tag0 0",
+          ps.avg_sync_tags(st2, AVG, 1)[0] == 0)
+    ps.set_avg_choice(st2, AVG, 0, 1)
+    check("  ...and option 0 reports tag0 1, not 0",
+          ps.avg_sync_tags(st2, AVG, 1)[0] == 1,
+          str(ps.avg_sync_tags(st2, AVG, 1)))
+
+    # Saves written before per-difficulty keying stored a bare int.
+    st3 = ps.load(1000042)
+    st3["avg_choices"] = {str(AVG): 2}
+    check("a legacy flat choice migrates to difficulty 1",
+          ps.avg_choice(st3, AVG, 1) == 2, str(ps.avg_choice(st3, AVG, 1)))
+    check("  ...and still locks that option out elsewhere",
+          client_unlocked(*ps.avg_sync_tags(st3, AVG, 2)) == {0, 1},
+          str(ps.avg_sync_tags(st3, AVG, 2)))
 
 def check_avg_chapter_character():
     """Each chapter's decisions pay karma to that chapter's cast.
@@ -304,7 +335,7 @@ def main():
                check_multi_rank_pays_every_rank_crossed, check_no_rank_up_pays_nothing,
                check_the_payout_is_pushed, check_gifts_report_the_bonus,
                check_the_rank_up_splash_is_triggered,
-               check_avg_choice_is_one_based_on_the_wire,
+               check_avg_choice_is_per_difficulty,
                check_avg_chapter_character):
         print(f"\n{fn.__name__}:")
         fn()
