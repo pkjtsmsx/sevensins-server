@@ -101,6 +101,19 @@ def holds(name):
     return _f
 
 
+# What a rule DOES. Most clauses apply a status, but not all -- Raphael cuts a gauge,
+# Jacqueline heals herself on a hit -- and those have no status row to point at.
+APPLY_STATUS = "status"
+HEAL = "heal"
+DAMAGE = "damage"
+GAUGE = "gauge"
+
+# What a magnitude is a percentage OF.
+OF_SELF_ATK = "self_atk"
+OF_SELF_MAX_HP = "self_max_hp"
+OF_OTHER_ATK = "other_atk"          # the other party to the event (attacker or victim)
+
+
 @dataclasses.dataclass
 class Rule:
     """One clause of one passive.
@@ -118,6 +131,9 @@ class Rule:
     magnitude: Optional[float] = None
     once: bool = False                 # fire at most once per battle
     permanent: bool = False            # explicitly "for the entire battle"
+    effect: str = APPLY_STATUS
+    basis: str = OF_SELF_ATK           # what `magnitude` is a percentage of
+    chance: Optional[float] = None      # None = certain
     note: str = ""
 
 
@@ -162,6 +178,10 @@ PASSIVES = {
              note="Healthy Strike II: before the action, if HP>90%, ATK+25%"),
         Rule(TURN_START, "Healthy Guard II", SELF, when=hp_at_least(0.90),
              note="Healthy Guard II: before the action, if HP>90%, DEF+30%"),
+        Rule(ON_DAMAGE_DEALT, effect=HEAL, to=SELF, magnitude=9.0,
+             basis=OF_SELF_MAX_HP, chance=0.25, once=True,
+             note="Life Steal II: 25% chance to recover 9% HP when dealing damage. "
+                  "This effect can only be triggered 1 time."),
     ],
 
     # LUCIFER -- Abyssal Prime
@@ -199,6 +219,9 @@ PASSIVES = {
         Rule(BATTLE_START, "CC Immunity (SP)", SELF, permanent=True,
              note="AND its CC immunity -- which is why a raid boss should never have "
                   "been stun-lockable in the first place"),
+        Rule(AFTER_ACTION, effect=GAUGE, to=ENEMIES_TOP_HP(1), magnitude=-30.0,
+             note="After the action, reduces the Move Gauge of the enemy with the "
+                  "highest HP by 30%."),
     ],
 }
 
@@ -210,10 +233,13 @@ UNMODELLED = {
               "the Admonition -> Minor Demerit -> Major Demerit promotion chain",
               "the second-tier Holy Arbiter / Shadow Ruler classes (Fetish unlocks)"],
     2094131: ["the Serum Injection death-triggered revive"],
-    1100131: ["Life Steal II: 25% chance to recover 9% HP on dealing damage, once"],
+    1100131: [],
     2080131: ["The Fallen branches (Keen/Teardown, and stripping the target's buffs)"],
-    2090131: ["Return's reflect and Swift Blade's gauge cut both need damage hooks"],
-    100001431: ["after the action, reduce the Move Gauge of the highest-HP enemy by 30%"],
+    2090131: ["Swift Blade's gauge cut (needs the attacker's SPD vs the target's)",
+              "Return's reflect lives in status.REFLECT -- it is a status the ENEMY "
+              "holds, so it cannot be a rule in MICHAEL's table: fire_all runs a "
+              "passive for its own holder"],
+    100001431: [],
 }
 
 
@@ -235,6 +261,25 @@ def rules_for(skill_id):
     return PASSIVES.get(spec.get("group") or skill_id, [])
 
 
+def _amount(rule, holder, target, ctx):
+    """-> the size of a non-status effect, from its magnitude and basis.
+
+    A negative magnitude is a reduction; `GAUGE` uses it directly as gauge points, since
+    the bar is already a 0..100 scale and "reduce the Move Gauge by 30%" means 30 points.
+    """
+    mag = float(rule.magnitude or 0)
+    if rule.effect == GAUGE:
+        return mag
+    if rule.basis == OF_SELF_MAX_HP:
+        base = holder.max_hp
+    elif rule.basis == OF_OTHER_ATK:
+        other = (ctx or {}).get("attacker") or (ctx or {}).get("victim") or target
+        base = getattr(other, "atk", 0)
+    else:
+        base = holder.atk
+    return int(abs(base) * mag / 100.0)
+
+
 def fire(trigger, holder, passive_skill_id, units, ctx=None, fired=None):
     """Run one passive's rules for one trigger. -> [(unit, Active)] actually applied.
 
@@ -246,13 +291,34 @@ def fire(trigger, holder, passive_skill_id, units, ctx=None, fired=None):
     ids = _status_ids(spec)
     applied = []
     for i, rule in enumerate(rules_for(passive_skill_id)):
-        if rule.trigger != trigger or not rule.status:
+        if rule.trigger != trigger:
             continue
+        if rule.effect == APPLY_STATUS and not rule.status:
+            continue          # only a status rule needs a status to name
         key = (passive_skill_id, i)
         if rule.once and fired is not None and key in fired:
             continue
         if not rule.when(holder, units, ctx):
             continue
+        if rule.chance is not None and (ctx or {}).get("rng") is not None:
+            if (ctx or {}).get("rng").random() >= rule.chance:
+                continue
+
+        if rule.effect != APPLY_STATUS:
+            for target in rule.to(holder, units, ctx):
+                amount = _amount(rule, holder, target, ctx)
+                if rule.effect == HEAL:
+                    target.hp = min(target.max_hp, target.hp + amount)
+                elif rule.effect == DAMAGE:
+                    target.hp = max(0, target.hp - amount)
+                elif rule.effect == GAUGE:
+                    target.scv = max(0.0, min(
+                        100.0, float(getattr(target, "scv", 0.0)) + amount))
+                applied.append((target, rule.effect, amount))
+            if rule.once and fired is not None:
+                fired.add(key)
+            continue
+
         found = ids.get(rule.status)
         if not found:
             continue                       # the skill does not carry that status
@@ -288,14 +354,20 @@ def fire(trigger, holder, passive_skill_id, units, ctx=None, fired=None):
     return applied
 
 
-def fire_all(trigger, units, ctx=None, fired=None):
-    """Run every unit's passive for this trigger. -> [(unit, Active)].
+def fire_all(trigger, holders, units=None, ctx=None, fired=None):
+    """Run the passives of `holders` for this trigger. -> [(unit, ...)].
+
+    `holders` is who OWNS the passive; `units` is the field its selectors see. They are
+    separate on purpose: an after-action rule like Raphael's "reduce the Move Gauge of
+    the enemy with the highest HP" is held by one unit but selects across the whole
+    field, and passing only the holder would make ENEMIES resolve to nothing.
 
     A unit's passive is its fourth skill slot -- com_attack / skill / sp_skill / PASSIVE
     is the layout every cast uses.
     """
+    field = list(units if units is not None else holders)
     applied = []
-    for holder in list(units):
+    for holder in list(holders):
         if not holder.alive:
             continue
         for sid in (getattr(holder, "skills", None) or []):
@@ -303,5 +375,5 @@ def fire_all(trigger, units, ctx=None, fired=None):
                 continue
             spec = specs.skill(sid)
             if spec and spec.get("type") == "passive":
-                applied += fire(trigger, holder, sid, units, ctx, fired)
+                applied += fire(trigger, holder, sid, field, ctx, fired)
     return applied

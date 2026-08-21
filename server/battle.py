@@ -1882,6 +1882,12 @@ class Battle:
             # On the NEW path the engine owns this and spends durations at the START of a
             # unit's turn instead, so the legacy tick does not run at all.
             if NEW_ENGINE:
+                # After-action passives fire before the duration tick, so an effect the
+                # actor's own turn produces is not immediately aged by it.
+                _engine_passives.fire_all(
+                    _engine_passives.AFTER_ACTION, [acted],
+                    list(self.units.values()),
+                    fired=getattr(self, "_passives_fired", None))
                 # A resolved turn spends a turn of the actor's own statuses.
                 _engine_status.tick_duration(acted)
             elif acted.statuses:
@@ -1924,7 +1930,7 @@ class Battle:
             # the turn, if you have a Commendation, you gain CC Immunity" has to be able
             # to stop the very stun being checked for.
             _engine_passives.fire_all(
-                _engine_passives.TURN_START, [unit],
+                _engine_passives.TURN_START, [unit], list(self.units.values()),
                 fired=getattr(self, "_passives_fired", None))
         if (_engine_status.is_immobilized(unit) if NEW_ENGINE
                 else fx.is_immobilized(unit.statuses)):

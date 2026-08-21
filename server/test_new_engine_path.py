@@ -283,6 +283,65 @@ def check_raid_boss_is_cc_immune():
     check("  ...and a stun is refused", landed is None, str(landed))
 
 
+
+def check_damage_and_after_action_hooks():
+    """Passive clauses that fire on damage or after acting, not at battle start.
+
+    These are the shapes the rule table could not express until the hooks existed:
+    a reflect held by the VICTIM, a chance heal on dealing damage, and a gauge cut
+    after the holder acts.
+    """
+    import random
+    from engine import passives, status as est2
+
+    battle, state = a_battle(stage=1000005)
+    boss = next((u for u in battle.units.values() if u.team == bt.TEAM_ENEMY), None)
+    ally = next(u for u in battle.units.values() if u.team == bt.TEAM_PLAYER)
+    if boss is None:
+        check("the raid stage has a boss", False)
+        return
+
+    # Return is held by the VICTIM, so it cannot be a rule in Michael's table --
+    # fire_all runs a passive for its own holder. It lives in status.REFLECT instead.
+    # Applied directly here so the check does not depend on Michael being in the party.
+    boss.statuses.append(est2.Active(status_id=402, name="Return", kind="other",
+                                     category="misc", remaining=None))
+    boss.max_hp = boss.hp = 10 ** 8
+    before = ally.hp
+    battle.attack_cmd_json(ally.order, boss.order, ally.skills[0])
+    check("attacking a unit with Return costs the attacker its own ATK",
+          before - ally.hp >= ally.atk * 0.9,
+          f"{before} -> {ally.hp}, atk {ally.atk}")
+
+    # Once per SKILL, not per swing: "triggers once while dealing multiple attacks".
+    multi = next((s for s in (ally.skills or [])
+                  if (specs.skill(s) or {}).get("swings", 0) >= 2), None)
+    if multi:
+        ally.hp = before = 10 ** 7
+        battle.attack_cmd_json(ally.order, boss.order, multi)
+        paid = before - ally.hp
+        check("  ...once per skill, not once per swing",
+              paid <= ally.atk * 1.5, f"paid {paid} for atk {ally.atk}")
+
+    # After-action: the holder acts, the field is selected across.
+    battle2, _ = a_battle(stage=1000005)
+    boss2 = next(u for u in battle2.units.values() if u.team == bt.TEAM_ENEMY)
+    gauges = {u.order: u.scv for u in battle2.units.values()
+              if u.team == bt.TEAM_PLAYER}
+    passives.fire_all(passives.AFTER_ACTION, [boss2],
+                      list(battle2.units.values()))
+    moved = [o for o, v in gauges.items() if battle2.units[o].scv != v]
+    check("the boss's after-action rule cuts one ally's gauge", len(moved) == 1,
+          f"{len(moved)} moved")
+
+    # A selector must see the whole field, not just the holder -- passing only the
+    # holder made ENEMIES resolve to nothing and the rule silently did nothing.
+    none_moved = {u.order: u.scv for u in battle2.units.values()}
+    passives.fire_all(passives.AFTER_ACTION, [boss2], [boss2])
+    check("...and with only the holder as the field, it selects nobody",
+          all(battle2.units[o].scv == v for o, v in none_moved.items()))
+
+
 def main():
     was = bt.NEW_ENGINE
     bt.NEW_ENGINE = True                     # the whole point of this file
@@ -291,6 +350,7 @@ def main():
         for fn in (check_a_whole_fight,
                    check_passives_fire_at_battle_start,
                    check_raid_boss_is_cc_immune,
+                   check_damage_and_after_action_hooks,
                    check_statuses_reach_the_unit,
                    check_control_actually_skips_a_turn,
                    check_legacy_and_engine_statuses_coexist):

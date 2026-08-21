@@ -256,6 +256,38 @@ def remove_category(unit, category):
     return gone
 
 
+# --- statuses whose behaviour is not derivable ------------------------------------
+#
+# Same problem as passives, same answer: a small table rather than special cases. The
+# registry says Return is `kind: other` -- nothing in the data says it reflects. Its
+# prose does: "While taking damage, deals Target's 100% ATK as damage (triggers once
+# while dealing multiple attacks)."
+#
+# Keyed by a lowercase name fragment, matched loosely as elsewhere. A reflect is a
+# percentage of the ATTACKER's ATK, paid back to the attacker.
+REFLECT = {
+    "return": 100.0,
+}
+
+# "triggers once while dealing multiple attacks" -- a multi-hit skill reflects ONE time,
+# not once per swing, or a 4-hit skill would pay four times.
+REFLECT_ONCE_PER_SKILL = True
+
+
+def reflect_amount(victim, attacker):
+    """-> damage the victim's statuses pay back to `attacker`, or 0."""
+    if attacker is None:
+        return 0
+    total = 0.0
+    for st in _actives(victim):
+        name = (st.name or "").lower()
+        for frag, pct in REFLECT.items():
+            if frag in name:
+                total += float(getattr(attacker, "atk", 0) or 0) * pct / 100.0
+                break
+    return int(total)
+
+
 # --- the reads -------------------------------------------------------------------
 
 def _actives(unit):

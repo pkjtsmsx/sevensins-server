@@ -9,7 +9,7 @@ import dataclasses
 import random
 from typing import Any, Dict, List, Optional
 
-from . import formula, specs, status as _status
+from . import formula, passives as _passives, specs, status as _status
 
 TEAM_PLAYER, TEAM_ENEMY = 1, 2
 
@@ -417,6 +417,12 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
         else:
             out.skipped.append({"op": op, "why": "unhandled", "skill": skill_id})
 
+    if apply_damage and depth == 0:
+        # Damage-triggered passives and status behaviours, once per SKILL rather than
+        # per swing: "triggers once while dealing multiple attacks" is how the prose
+        # words it, and a 4-hit skill paying four reflects would be wrong.
+        _damage_hooks(caster, targets, out, units, r)
+
     # AFTER the riders and follow-ups: those deal damage too, so flagging deaths any
     # earlier would miss a kill that a rider landed.
     _flag_deaths(out, targets)
@@ -427,6 +433,29 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
         out.skipped.append({"op": f"raw_{u.get('opcode')}", "why": "undecoded opcode",
                             "skill": skill_id})
     return out
+
+
+def _damage_hooks(caster, targets, out, units, rng):
+    """Reflects and on-hit passives, after all of a skill's damage has landed."""
+    struck = {s.target for s in out.strikes}
+    if not struck:
+        return
+    ctx = {"attacker": caster, "rng": rng}
+
+    for tgt in targets:
+        if tgt.order not in struck:
+            continue
+        back = _status.reflect_amount(tgt, caster)
+        if back:
+            caster.hp = max(0, caster.hp - back)
+            out.strikes.append(Strike(swing=0, target=caster.order, amount=back,
+                                      detail={"reflect": tgt.order}))
+        _passives.fire_all(_passives.ON_DAMAGE_TAKEN, [tgt], units,
+                           ctx={"attacker": caster, "rng": rng},
+                           fired=getattr(caster, "_passives_fired", None))
+
+    _passives.fire_all(_passives.ON_DAMAGE_DEALT, [caster], units, ctx=ctx,
+                       fired=getattr(caster, "_passives_fired", None))
 
 
 def _flag_deaths(out, targets):
