@@ -149,8 +149,13 @@ def attack_json(outcome, *, caster_order=None, skill_id=None):
     # gauge left the payload -- see above). The client still needs a combo entry to drive
     # the animation and yield the turn, so it gets a single zero-damage row, which is
     # what the old engine did for the same reason. An EMPTY combo is not an option.
-    if not any(groups) and outcome.targets:
-        groups[0].append(_row(outcome.targets[0], MODE_HP, 0))
+    # The caster is the fallback when the skill resolved no targets at all -- a
+    # caster-only gauge effect is the case that reaches here, and a combo entry still
+    # has to name somebody.
+    if not any(groups):
+        who = outcome.targets[0] if outcome.targets else outcome.caster
+        if who:
+            groups[0].append(_row(who, MODE_HP, 0))
 
     # Trailing empties are legitimate: every target died before the later swings landed,
     # and the cinematic simply plays those swings with no number. An INTERIOR empty is

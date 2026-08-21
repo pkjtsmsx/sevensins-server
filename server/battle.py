@@ -1804,6 +1804,14 @@ class Battle:
             # Taking the turn is what SPENDS the move gauge -- the bar empties here
             # and refills over the following turns at the unit's own SPD.
             acted.scv = 0.0
+            # ...and only THEN does an "After the action, the caster's Move Gauge will
+            # increase 25%" effect land. Applying it during the attack is pointless: the
+            # caster is at a full bar when it acts, so the increase clamps to 100 and is
+            # then wiped by the line above. Carried as a pending delta so it survives.
+            pending = getattr(acted, "pending_scv", 0.0)
+            if pending:
+                acted.scv = max(0.0, min(float(SCV_FULL), acted.scv + pending))
+                acted.pending_scv = 0.0
             # Count down this unit's statuses on its own turn; drop the expired.
             if acted.statuses:
                 acted.statuses = [s for s in acted.statuses if not s.tick()]

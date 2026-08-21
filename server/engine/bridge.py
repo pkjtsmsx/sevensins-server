@@ -21,6 +21,8 @@ import random
 
 from . import core, specs, wire
 
+SCV_FULL = 100.0
+
 
 def _mirror(battle):
     """-> {order: core.Unit} reflecting the old battle's live field."""
@@ -51,8 +53,13 @@ def _write_back(battle, mirrors, outcome):
         u = battle.units.get(g["target"])
         if u is None or g.get("percent") is None:
             continue
-        u.scv = max(0.0, min(float(getattr(battle, "SCV_FULL", 100)),
-                             float(u.scv) + float(g["percent"])))
+        if g["target"] == outcome.caster:
+            # The caster is mid-turn at a full bar, and `end_turn` is about to zero it.
+            # Stashed instead, and applied there once the bar has been spent -- which is
+            # what "After the action, the caster's Move Gauge will increase N%" means.
+            u.pending_scv = getattr(u, "pending_scv", 0.0) + float(g["percent"])
+        else:
+            u.scv = max(0.0, min(SCV_FULL, float(u.scv) + float(g["percent"])))
 
     dealt = outcome.total_damage()
     caster = battle.units.get(outcome.caster)

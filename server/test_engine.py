@@ -260,6 +260,31 @@ def main():
         check("the gauge change is still reported on the outcome",
               bool(o.gauge) or True)
 
+    # The gauge's magnitude and RECIPIENT both come from the prose clause, and both
+    # were wrong at first: the magnitude picked up the damage coefficient, and the
+    # recipient defaulted to the skill's targets -- which would speed up the enemies the
+    # skill just hit.
+    for sid, want_pct, want_who in ((2080101, 25.0, "caster"),
+                                    (2094101, 40.0, "allies"),
+                                    (2087101, 20.0, "caster")):
+        sp = specs.skill(sid)
+        ge = [x for x in sp["effects"] if x["op"] == "modify_gauge"]
+        ok = ge and ge[0].get("percent") == want_pct and ge[0].get("target") == want_who
+        check(f"{sp['name']}: gauge {want_pct:g}% to {want_who}", bool(ok),
+              f"{ge[0] if ge else None}")
+
+    caster, units = field()
+    mate = unit("102", core.TEAM_PLAYER, atk=9999)
+    units.append(mate)
+    o = core.execute(caster, specs.skill(2094101), units, random.Random(1),
+                     apply_damage=False)
+    check("an ally-targeted gauge goes to an ALLY, not the struck enemy",
+          [g["target"] for g in o.gauge] == [mate.order], f"{o.gauge}")
+    o = core.execute(caster, specs.skill(2080101), units, random.Random(1),
+                     apply_damage=False)
+    check("a caster-targeted gauge goes to the caster",
+          [g["target"] for g in o.gauge] == [caster.order], f"{o.gauge}")
+
     # The fatal one: a duplicate throws inside the client's dictionary insert, the
     # exception is swallowed, and the attacker never yields its turn.
     dup = [[wire._row("200", wire.MODE_HP, -5), wire._row("200", wire.MODE_HP, -7)]]

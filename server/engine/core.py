@@ -298,7 +298,29 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
                 out.skipped.append({"op": op, "why": "magnitude unknown",
                                     "skill": skill_id})
             else:
-                out.gauge.extend({"target": t.order, "percent": pct} for t in targets)
+                # The RECIPIENT is not the skill's target. The prose says whose gauge
+                # moves, and it is usually the caster or an ally: "the caster's Move
+                # Gauge will increase 25%", "Grant the ally with the highest ATK an Move
+                # Gauge increase of 40%". Handing it to `targets` would speed up the
+                # enemies the skill just hit.
+                who = e.get("target")
+                if who == "caster":
+                    recip = [caster]
+                elif who == "allies":
+                    # Approximation: the clause often names ONE ally ("with the highest
+                    # ATK") and that selection is not modelled, so the strongest living
+                    # ally stands in. Applying it to the whole team would be a bigger
+                    # error than picking the wrong single ally.
+                    mates = [u for u in units
+                             if u.team == caster.team and u.alive]
+                    recip = [max(mates, key=lambda u: u.atk)] if mates else []
+                elif who == "targets":
+                    recip = targets
+                else:
+                    out.skipped.append({"op": op, "why": "gauge recipient unknown",
+                                        "skill": skill_id})
+                    recip = []
+                out.gauge.extend({"target": t.order, "percent": pct} for t in recip)
         elif op == "revive":
             pct = e.get("percent")
             for tgt in targets:

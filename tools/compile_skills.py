@@ -119,6 +119,67 @@ def attack_rider(r):
             "percent": float(m.group(1)) if m else None,
             "source": "prose" if m else None}
 
+# --- op 116's magnitude and recipient --------------------------------------------
+#
+# The gauge clause states both, but only NEXT TO the words "Move Gauge" -- taking the
+# first percentage in the note picks up the damage coefficient instead, which is how a
+# 180-point gauge change reached the wire and hung the client.
+#
+# The recipient matters as much as the number: it is usually the CASTER or an ally, not
+# the skill's target. "the caster's Move Gauge will increase 25%", "Grant the ally with
+# the highest ATK an Move Gauge increase of 40%". Applying it to the skill's targets
+# would speed up the enemies the skill just hit.
+_GAUGE_WORD = re.compile(r"move gauge|行動值", re.I)
+_GAUGE_PCT = re.compile(r"(\d+(?:\.\d+)?)\s*%")
+_GAUGE_SELF = re.compile(r"caster|self|its own|自身|我方自身", re.I)
+_GAUGE_ALLY = re.compile(r"\ball(y|ies)\b|我方", re.I)
+_GAUGE_ENEMY = re.compile(r"enem|敵方|对方", re.I)
+_GAUGE_DOWN = re.compile(r"reduc|decreas|lower|lose|下降|減少|降低", re.I)
+_GAUGE_UP = re.compile(r"increas|rise|gain|restor|提升|增加|上升", re.I)
+
+
+def gauge_effect(r):
+    """-> {percent, target, source} for op 116, read from the gauge CLAUSE only.
+
+    Two traps, both hit on the first attempt:
+
+      * looking BEFORE the phrase first picks up the damage coefficient. Poison
+        Injection reads "Deals 180% ATK as damage. Grant the ally ... an Move Gauge
+        increase of 40%" -- the 40 is what matters and it comes after. So the search
+        runs forward first and only falls back to a short lookbehind.
+      * a direction word from an UNRELATED clause flips the sign. Sign of Ill Fortune
+        reads "removes the target's All DMG Reduction. After the action, increases the
+        caster's Move Gauge by 20%" -- "removes" is 60 characters away and made it -20.
+        So "increase" wins over "reduce" when both appear.
+    """
+    note = r.get("_note1_en") or ""
+    m = _GAUGE_WORD.search(note)
+    if not m:
+        return {"percent": None, "target": None, "source": None}
+    after = note[m.end():m.end() + 80]
+    before = note[max(0, m.start() - 45):m.start()]
+
+    pm = _GAUGE_PCT.search(after) or _GAUGE_PCT.search(before)
+    pct = float(pm.group(1)) if pm else None
+    if pct is not None and _is_damage_coefficient(r, pct):
+        pct = None                      # still the coefficient -- not this effect's
+
+    clause = before + note[m.start():m.end() + 80]
+    if pct is not None and _GAUGE_DOWN.search(clause) and not _GAUGE_UP.search(clause):
+        pct = -pct
+
+    if _GAUGE_SELF.search(clause):
+        tgt = "caster"
+    elif _GAUGE_ENEMY.search(clause):
+        tgt = "targets"
+    elif _GAUGE_ALLY.search(clause):
+        tgt = "allies"
+    else:
+        tgt = None
+    return {"percent": pct, "target": tgt,
+            "source": "prose" if pct is not None else None}
+
+
 # Percent for the operandless effects, e.g. "increases Move Gauge by 30%",
 # "recovers the caster's Max HP by 15%", "recovers their HP by 35%".
 _PCT_ANY = re.compile(r"(\d+(?:\.\d+)?)\s*%")
@@ -325,9 +386,12 @@ def effects(rows, r):
             # and unknown is the honest answer.
             if pct is not None and _is_damage_coefficient(r, pct):
                 pct = None
-            out.append({"op": OP_EFFECT_NO_OPERAND[op], "slot": i,
-                        "percent": pct,
-                        "source": ("prose" if pct is not None else None)})
+            entry = {"op": OP_EFFECT_NO_OPERAND[op], "slot": i,
+                     "percent": pct,
+                     "source": ("prose" if pct is not None else None)}
+            if op == 116:
+                entry.update(gauge_effect(r))
+            out.append(entry)
         else:
             # Not decoded. Kept OUT of `effects` on purpose: the engine executes
             # `effects`, so an undecoded opcode sitting in that list would be silently
