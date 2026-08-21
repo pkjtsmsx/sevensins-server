@@ -148,6 +148,64 @@ def check_status_state():
     check("a DEF break raises damage taken", broken > base, f"{base} -> {broken}")
 
 
+
+def check_effect_recipients():
+    """An effect's recipient is NOT the skill's target.
+
+    Three live bugs in a row came from assuming it was: a move gauge handed to the enemy
+    it was cast at, a heal that restored the raid boss, and a party buff applied to the
+    boss instead of the party. An attack skill routinely aims at an enemy and does
+    something to its own side, and only the prose says which.
+    """
+    caster, units = field(n_enemy=2)
+    mate = unit("102", core.TEAM_PLAYER)
+    units.append(mate)
+
+    # Michael's Gate of Judgement: an ENEMY-targeting attack that heals all ALLIES.
+    spec = specs.skill(2090101)
+    heals = [e for e in spec["effects"] if e["op"] == "heal"]
+    check("Gate of Judgement's heal is marked for allies",
+          heals and heals[0].get("target") == "allies", str(heals[:1]))
+    for u in units:
+        u.hp = u.max_hp // 2
+    out = core.execute(caster, spec, units, random.Random(1))
+    healed = {h["target"] for h in out.heals}
+    foes = {u.order for u in units if u.team == core.TEAM_ENEMY}
+    check("  ...and no enemy is healed by it", not (healed & foes), str(healed))
+    check("  ...while allies are", healed and healed <= {u.order for u in units
+                                                         if u.team == core.TEAM_PLAYER})
+
+    # Metatron's Serum Injection: an enemy-targeting attack that buffs one ally.
+    spec = specs.skill(2094111)
+    buffs = [e for e in spec["effects"]
+             if e["op"] == "apply_status" and "Serum" in (e["status"]["name"] or "")]
+    check("Serum Injection is marked for allies",
+          buffs and all(b.get("recipient") == "allies" for b in buffs), str(buffs[:1]))
+    caster2, units2 = field(n_enemy=1)
+    out = core.execute(caster2, spec, units2, random.Random(1))
+    on_foe = [e for e in out.statuses
+              if e.applied and e.target in {u.order for u in units2
+                                            if u.team == core.TEAM_ENEMY}
+              and "Serum" in (e.name or "")]
+    check("  ...and the struck enemy does not get it", not on_foe, str(on_foe))
+
+    # The ordinary case must still work: "inflicts X on the target" has no recipient
+    # marking and has to fall through to the skill's targets.
+    plain = next((s for s in specs.skills().values()
+                  if s["type"] in ("com_attack", "skill")
+                  and (s.get("target") or {}).get("group") == "enemy"
+                  and any(e["op"] == "apply_status" and e.get("recipient") is None
+                          and not e.get("conditional") for e in s["effects"])), None)
+    check("a plain debuff still lands on the target", plain is not None)
+    if plain:
+        c3, u3 = field(n_enemy=1)
+        out = core.execute(c3, plain, u3, random.Random(1))
+        foe = u3[1].order
+        check("  ...on the enemy, not the caster",
+              any(e.target == foe for e in out.statuses if e.applied),
+              str([(e.target, e.name) for e in out.statuses]))
+
+
 def main():
     print("\ntargeting:")
     caster, units = field()
@@ -247,6 +305,9 @@ def main():
 
     print("\nstatus state (phase 6):")
     check_status_state()
+
+    print("\neffect recipients:")
+    check_effect_recipients()
 
     print("\nconditional application:")
     # Eclipse Slash gates its Freeze on "the caster is affected by The Divine" and its

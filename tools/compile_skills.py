@@ -176,6 +176,33 @@ def clause_percent(r, op):
 
 
 
+def clause_target(r, op):
+    """-> who an operandless effect acts on: "caster", "allies", "targets", or None.
+
+    The recipient is NOT the skill's target, and assuming it is has now caused two
+    live bugs. Michael's Gate of Judgement "restores HP of all allies by 200% ATK" is
+    an ENEMY-targeting attack, so healing its targets healed the raid boss -- with five
+    casts using it, the fight could not end.
+
+    Read from the effect's own clause, the same way its magnitude is.
+    """
+    word = EFFECT_WORD.get(op)
+    note = r.get("_note1_en") or ""
+    if word is None or not note:
+        return None
+    m = word.search(note)
+    if not m:
+        return None
+    clause = note[max(0, m.start() - 45):m.end() + 80]
+    if _GAUGE_SELF.search(clause):
+        return "caster"
+    if _GAUGE_ALLY.search(clause):
+        return "allies"
+    if _GAUGE_ENEMY.search(clause):
+        return "targets"
+    return None
+
+
 def gauge_effect(r):
     """-> {percent, target, source} for op 116, read from the gauge CLAUSE only.
 
@@ -435,6 +462,7 @@ def effects(rows, r):
                         "chance": op == OP_APPLY_CHANCE,
                         "conditional": is_conditional(r, meta.get("name")),
                         "requires": condition_requires(r, meta.get("name")),
+                        "recipient": status_target(r, meta.get("name")),
                         "status": meta,
                         # Per-(skill, status): no column carries these, and they change
                         # with skill level while act_id does not. See contract doc 5.1.
@@ -477,6 +505,10 @@ def effects(rows, r):
                      "source": ("prose" if pct is not None else None)}
             if op == 116:
                 entry.update(gauge_effect(r))
+            elif name in ("heal", "revive"):
+                # Same recipient problem as the gauge: a heal on an attack skill goes to
+                # allies, not to the enemy being hit.
+                entry["target"] = clause_target(r, name)
             out.append(entry)
         else:
             # Not decoded. Kept OUT of `effects` on purpose: the engine executes
@@ -503,11 +535,22 @@ _CONDITIONAL = re.compile(r"\b(if|when|whenever|upon|while|should)\b", re.I)
 
 
 def _clause_for(note, name):
-    """-> the sentence naming this status, or None."""
+    """-> the sentence naming this status, or None.
+
+    Tries the qualifier-stripped name too: the prose writes "Cast Serum Injection on up
+    to 1 allies with the highest ATK" while the status rows are `Serum Injection(ATK)`
+    and `(CRT)`. Without this the clause is never found, so the status looks
+    unconditional and un-retargeted -- which is how a party buff ended up on the boss.
+    """
     if not note or not name:
         return None
+    wanted = [name.lower()]
+    bare = re.sub(r"\s*\([^)]*\)\s*$", "", name).strip().lower()
+    if bare and bare != wanted[0]:
+        wanted.append(bare)
     for sentence in re.split(r"(?<=[.!?])\s+", note):
-        if name.lower() in sentence.lower():
+        low = sentence.lower()
+        if any(w in low for w in wanted):
             return sentence
     return None
 
@@ -525,6 +568,35 @@ _AFFECTED = re.compile(
     re.I)
 
 _SELF_WORDS = {"caster", "self"}
+
+
+def status_target(r, status_name):
+    """-> who a status is applied to: "caster", "allies", "targets", or None.
+
+    **The recipient is not the skill's target.** This has now caused three live bugs in
+    a row -- a move gauge handed to the enemy it was cast at, a heal that restored the
+    raid boss, and Metatron's "Cast Serum Injection on up to 1 allies with the highest
+    ATK" buffing the boss instead. An attack skill routinely aims at an enemy and applies
+    something to its own side.
+
+    Read from the sentence naming the status, the same way its duration and condition
+    are. `None` means the prose does not say, and the engine falls back to the skill's
+    targets -- which is right for the ordinary "inflicts X on the target" case.
+    """
+    clause = _clause_for(r.get("_note1_en") or "", status_name)
+    if not clause:
+        return None
+    # Enemy wins when both appear: "grants all allies X and inflicts Y on all enemies"
+    # is two clauses in one sentence, and the status we are asked about is usually the
+    # one nearer its own verb -- so prefer the explicit ally/self wording only when no
+    # enemy wording is present.
+    if _GAUGE_ENEMY.search(clause):
+        return None
+    if _GAUGE_SELF.search(clause):
+        return "caster"
+    if _GAUGE_ALLY.search(clause):
+        return "allies"
+    return None
 
 
 def condition_requires(r, status_name):

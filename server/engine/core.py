@@ -212,6 +212,27 @@ CONDITIONAL_POLICY = "roll"
 CONDITIONAL_CHANCE = 0.5
 
 
+def _status_recipients(who, caster, targets, units):
+    """-> who a status is applied to. Defaults to the skill's targets."""
+    if who == "caster":
+        return [caster]
+    if who == "allies":
+        return [u for u in units if u.team == caster.team and u.alive]
+    return targets
+
+
+def _heal_recipients(who, caster, targets, units, out, op, skill_id):
+    """-> who a heal actually restores, or [] when the prose does not say."""
+    if who == "caster":
+        return [caster]
+    if who == "allies":
+        return [u for u in units if u.team == caster.team and u.alive]
+    if who == "targets":
+        return targets
+    out.skipped.append({"op": op, "why": "heal recipient unknown", "skill": skill_id})
+    return []
+
+
 def _holds_status(unit, name):
     """Does this unit hold a status by (loose) name?
 
@@ -331,7 +352,10 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
         if op == "damage":
             continue
         if op == "apply_status":
-            for tgt in targets:
+            # The recipient is not always the skill's target -- an attack routinely
+            # buffs its own side. `None` means the prose did not say, which is the
+            # ordinary "inflicts X on the target" case.
+            for tgt in _status_recipients(e.get("recipient"), caster, targets, units):
                 ev = _status_event(caster, tgt, e, r)
                 if ev is None:
                     continue
@@ -353,7 +377,13 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
                 out.skipped.append({"op": op, "why": "magnitude unknown",
                                     "skill": skill_id})
             else:
-                for tgt in targets:
+                # The RECIPIENT is not the skill's target. Michael's Gate of Judgement
+                # "restores HP of all allies" is an enemy-targeting attack, so healing
+                # its targets healed the raid boss -- five casts using it made the fight
+                # unendable. Unknown recipient is skipped, not guessed.
+                recip = _heal_recipients(e.get("target"), caster, targets, units, out,
+                                         op, skill_id)
+                for tgt in recip:
                     amount = int(tgt.max_hp * pct / 100.0)
                     if apply_damage:
                         tgt.hp = min(tgt.max_hp, tgt.hp + amount)
@@ -389,12 +419,16 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
                 out.gauge.extend({"target": t.order, "percent": pct} for t in recip)
         elif op == "revive":
             pct = e.get("percent")
-            for tgt in targets:
-                if not tgt.alive:
-                    hp = int(tgt.max_hp * (pct or 0) / 100.0) or 1
-                    if apply_damage:
-                        tgt.hp = hp
-                    out.revives.append({"target": tgt.order, "hp": hp})
+            # A revive raises the CASTER's fallen allies, not the units it is aimed at.
+            who = e.get("target") or "allies"
+            pool = ([u for u in units if u.team == caster.team and not u.alive]
+                    if who in ("allies", "caster") else
+                    [t for t in targets if not t.alive])
+            for tgt in pool:
+                hp = int(tgt.max_hp * (pct or 0) / 100.0) or 1
+                if apply_damage:
+                    tgt.hp = hp
+                out.revives.append({"target": tgt.order, "hp": hp})
         elif op == "attack_rider":
             _rider(caster, e, targets, out, r, apply_damage, skill_id)
         elif op == "follow_up":
