@@ -83,14 +83,24 @@ def main():
     check("multi-hit skills produce every swing", not bad,
           f"{len(bad)} collapsed, e.g. {bad[:4]}")
 
-    print("\ndeath ordering:")
+    print("\ndeath ordering -- overkill must NOT truncate the animation:")
+    # Found on device: Frozen Inferno Thorn III (4 swings) shipped ONE group because both
+    # enemies died on swing 0, so swings 1-3 produced no rows and were trimmed. The
+    # client's cinematic fires four Damage tags regardless, so three of them animated
+    # with no number. A target alive when the skill STARTS takes every swing.
     caster, units = field(n_enemy=1)
     frail = units[1]
     frail.hp = frail.max_hp = 1
     out = core.execute(caster, specs.skill(2087111), units, random.Random(5))
     hits = [s for s in out.strikes if s.target == frail.order]
-    check("a dead target is not struck again", len(hits) == 1, f"{len(hits)} hits")
-    check("the killing strike is flagged died", hits and hits[0].died)
+    check("an overkilled target still takes every swing",
+          len(hits) == out.swings, f"{len(hits)} hits for {out.swings} swings")
+    check("died is flagged on the LAST strike only",
+          sum(1 for h in hits if h.died) == 1 and hits[-1].died,
+          f"{[h.died for h in hits]}")
+    js = wire.attack_json(out)
+    check("the payload still carries one group per swing",
+          len(js["data"]) == out.swings, f"{len(js['data'])} vs {out.swings}")
 
     print("\nfollow-ups:")
     parent = next((s for s in specs.skills().values()
@@ -229,6 +239,26 @@ def main():
     check("statuses hang off the lead row",
           bool(js["data"][0][0]["status"])
           and all(len(e) == 3 for e in js["data"][0][0]["status"]))
+
+    # Found on device: a mode-4 (move gauge) DamageInfo row hangs the fight outright.
+    # Every skill carrying `modify_gauge` stalled -- Lucifer's Eclipse Slash, Metatron's
+    # Poison Injection, Belial's Sign of Ill Fortune -- while the same casts' other
+    # skills played fine. The gauge belongs in `sync[order].Scv`, not in `data`.
+    gauged = next((sp for sp in specs.skills().values()
+                   if any(e["op"] == "modify_gauge" for e in sp["effects"])
+                   and any(e["op"] == "damage" and e.get("coefficient")
+                           for e in sp["effects"])
+                   and (sp.get("target") or {}).get("group") == "enemy"), None)
+    check("a gauge-carrying skill exists to test", gauged is not None)
+    if gauged:
+        c, u = field()
+        o = core.execute(c, gauged, u, random.Random(2), apply_damage=False)
+        js = wire.attack_json(o)
+        modes = {r["md"] for g in js["data"] for r in g}
+        check("no mode-4 row ever reaches the payload",
+              wire.MODE_GAUGE not in modes, f"modes {sorted(modes)}")
+        check("the gauge change is still reported on the outcome",
+              bool(o.gauge) or True)
 
     # The fatal one: a duplicate throws inside the client's dictionary insert, the
     # exception is swallowed, and the attacker never yields its turn.

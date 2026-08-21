@@ -215,6 +215,38 @@ undersupplying `data`: "the animation plays but no number comes up on some hits"
 how different this is from the too-many-rows-per-group case below, which throws and stalls
 the fight -- one bug is silent-and-cosmetic, the other is silent-and-fatal.
 
+### Mode 4 (move gauge) must NOT be sent as a `DamageInfo` row
+
+`OnDamage` has a `case 4` that calls `ShowScvBar`, so a mode-4 row looks legitimate. It
+is not: **including one in `data` hangs the fight.** The animation plays, the payload is
+accepted, and the attacker never yields its turn.
+
+Found on device, and the correlation is exact — every skill carrying a `modify_gauge`
+(op 116) effect stalled, while the same characters' other skills played normally:
+
+| skill | move-gauge component | result |
+|---|---|---|
+| Lucifer — Eclipse Slash | yes | stalls |
+| Metatron — Poison Injection | yes | stalls |
+| Belial — Sign of Ill Fortune | yes | stalls |
+| their other three skills each | no | fine |
+
+The gauge has its own channel and does not belong in the attack payload at all:
+**`BattleCmd.sync[order][2]` is `LightBattleChar.Scv`**, which is what the client reads to
+draw the bar *and* what `GetNextAction` re-runs the ATB from to place the "Next" badge
+(§3.5). Apply the change to the unit and let the next `sync` carry it.
+
+(`ShowScvBar` itself is null-guarded and cannot throw, so the hang is further along —
+plausibly the cinematic's tag/group pairing, since a mode-4 row consumes a slot in a
+group that the Damage tags are counting through. Not chased further: the row should not
+be there in the first place.)
+
+### A skill with no rows still needs a combo entry
+
+Once the gauge left the payload, skills whose only effect *was* the gauge produced no
+rows at all. An empty combo is not valid — the client needs an entry to drive the
+animation and yield the turn — so such a skill ships a single zero-damage row.
+
 ### The other hard constraint on `data`
 
 Within one group, a unit may appear **at most once** — the client reads each group into a

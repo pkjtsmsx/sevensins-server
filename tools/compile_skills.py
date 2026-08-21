@@ -317,9 +317,17 @@ def effects(rows, r):
             # than filing the whole thing under `unknown` and executing nothing.
             note = r.get("_note1_en") or r.get("_note1") or ""
             m = _PCT_ANY.search(note)
+            pct = float(m.group(1)) if m else None
+            # ...but "the first percentage in the note" is the DAMAGE COEFFICIENT on an
+            # attack skill. Lucifer's Eclipse Slash reads "Deals 180% ATK as damage
+            # twice", and that 180 was being emitted as a 180-point move-gauge change.
+            # If the number matches the coefficient it is not this effect's magnitude,
+            # and unknown is the honest answer.
+            if pct is not None and _is_damage_coefficient(r, pct):
+                pct = None
             out.append({"op": OP_EFFECT_NO_OPERAND[op], "slot": i,
-                        "percent": float(m.group(1)) if m else None,
-                        "source": ("prose" if m else None)})
+                        "percent": pct,
+                        "source": ("prose" if pct is not None else None)})
         else:
             # Not decoded. Kept OUT of `effects` on purpose: the engine executes
             # `effects`, so an undecoded opcode sitting in that list would be silently
@@ -329,6 +337,17 @@ def effects(rows, r):
             unknown.append({"opcode": op, "slot": i,
                             **({"operand": aid} if aid else {})})
     return out, unknown
+
+
+def _is_damage_coefficient(r, pct):
+    """Is `pct` just the skill's own damage coefficient restated?"""
+    m = _COEF.search(r.get("_note1_en") or "")
+    if m and abs(float(m.group(1)) - pct) < 1e-6:
+        return True
+    m = _COEF_ZH.search(r.get("_note1") or "")
+    if m and abs(float(m.group(2) or m.group(3)) - pct) < 1e-6:
+        return True
+    return False
 
 
 def damage(r, targets_enemy):

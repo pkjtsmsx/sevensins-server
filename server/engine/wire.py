@@ -131,12 +131,26 @@ def attack_json(outcome, *, caster_order=None, skill_id=None):
     lead = groups[0]
     for h in outcome.heals:
         fold(lead, h["target"], MODE_HP, int(h["amount"]), False, False)
-    for g in outcome.gauge:
-        fold(lead, g["target"], MODE_GAUGE, int(g.get("percent") or 0), False, False)
+    # NO mode-4 rows. Emitting the move-gauge change as a DamageInfo row stalls the
+    # client outright -- found on device: every skill carrying `modify_gauge` (Lucifer's
+    # Eclipse Slash, Metatron's Poison Injection) hung the fight after the animation,
+    # while the same casts' other skills were fine.
+    #
+    # It is also the wrong channel. The gauge is server-authoritative and reaches the
+    # client through `sync[order].Scv`, which is the very field `GetNextAction` re-runs
+    # the ATB from to draw the "Next" badge (contract doc 3.5). The caller applies
+    # `outcome.gauge` to the unit and lets `sync` carry it; see engine/bridge.py.
     for rv in outcome.revives:
         # Mode 2 returns early in OnDamage, so it must be its OWN row -- merging a
         # revive into an HP row would drop whichever effect lost the merge.
         lead.append(_row(rv["target"], MODE_REVIVE, int(rv.get("hp") or 0)))
+
+    # A skill whose only effect was the move gauge now produces no rows at all (the
+    # gauge left the payload -- see above). The client still needs a combo entry to drive
+    # the animation and yield the turn, so it gets a single zero-damage row, which is
+    # what the old engine did for the same reason. An EMPTY combo is not an option.
+    if not any(groups) and outcome.targets:
+        groups[0].append(_row(outcome.targets[0], MODE_HP, 0))
 
     # Trailing empties are legitimate: every target died before the later swings landed,
     # and the cinematic simply plays those swings with no number. An INTERIOR empty is

@@ -45,6 +45,15 @@ def _write_back(battle, mirrors, outcome):
             continue
         u.hp = max(0, int(m.hp))
 
+    # The move gauge travels in `sync`, NOT as a mode-4 DamageInfo row (see wire.py).
+    # Applied here so the next BattleCmd carries the new Scv.
+    for g in _flat_gauge(outcome):
+        u = battle.units.get(g["target"])
+        if u is None or g.get("percent") is None:
+            continue
+        u.scv = max(0.0, min(float(getattr(battle, "SCV_FULL", 100)),
+                             float(u.scv) + float(g["percent"])))
+
     dealt = outcome.total_damage()
     caster = battle.units.get(outcome.caster)
     if caster is not None:
@@ -54,6 +63,13 @@ def _write_back(battle, mirrors, outcome):
         victim = battle.units.get(st.target)
         if victim is not None:
             victim.dmg_taken += st.amount
+
+
+def _flat_gauge(outcome):
+    out = list(outcome.gauge)
+    for ch in outcome.children:
+        out.extend(_flat_gauge(ch))
+    return out
 
 
 def _flat_strikes(outcome):

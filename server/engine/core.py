@@ -242,8 +242,14 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
     for e in dmg:
         for sw in range(swings):
             for tgt in targets:
-                if not tgt.alive:
-                    continue
+                # A target that was alive when the skill STARTED takes every swing, even
+                # if an earlier one killed it. Skipping the dead mid-skill looks correct
+                # and is not: a 4-hit skill that overkills on swing 1 then emits nothing
+                # for swings 2-4, those groups get trimmed, and the client -- whose
+                # cinematic fires four Damage tags regardless -- animates three swings
+                # with no number. Found on device: Frozen Inferno Thorn III shipped ONE
+                # group instead of four. Overkill is simply wasted; death resolves at the
+                # end of the skill, which is also where the `die` flag belongs.
                 amount, detail = formula.strike(
                     caster, tgt, e.get("coefficient"), e.get("basis") or "ATK", r)
                 if amount is None:
@@ -253,7 +259,7 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
                 if apply_damage:
                     tgt.hp = max(0, tgt.hp - amount)
                 out.strikes.append(Strike(swing=sw, target=tgt.order, amount=amount,
-                                          detail=detail, died=not tgt.alive))
+                                          detail=detail, died=False))
 
     # --- everything else, once ------------------------------------------------------
     for e in effects:
@@ -323,12 +329,34 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
         else:
             out.skipped.append({"op": op, "why": "unhandled", "skill": skill_id})
 
+    # AFTER the riders and follow-ups: those deal damage too, so flagging deaths any
+    # earlier would miss a kill that a rider landed.
+    _flag_deaths(out, targets)
+
     # Effects the compiler could not decode at all. Carried, not dropped: a caller that
     # wants to know "did this skill run in full?" must be able to ask.
     for u in spec.get("unknown") or []:
         out.skipped.append({"op": f"raw_{u.get('opcode')}", "why": "undecoded opcode",
                             "skill": skill_id})
     return out
+
+
+def _flag_deaths(out, targets):
+    """Mark `died` on the LAST strike naming each unit that ended the skill dead.
+
+    Exactly one row per unit, which is what the wire requires -- rows carry final state,
+    so flagging every strike after the fatal one would replay the death animation on
+    every remaining swing.
+    """
+    dead = {t.order for t in targets if not t.alive}
+    if not dead:
+        return
+    for st in reversed(out.strikes):
+        if st.target in dead:
+            st.died = True
+            dead.discard(st.target)
+            if not dead:
+                return
 
 
 def _rider(caster, eff, targets, out, rng, apply_damage, skill_id):
@@ -345,8 +373,8 @@ def _rider(caster, eff, targets, out, rng, apply_damage, skill_id):
         out.heals.append({"target": caster.order, "amount": amount, "from": "rider"})
     elif kind == "bonus_damage":
         for tgt in targets:
-            if not tgt.alive:
-                continue
+            # Same rule as the main damage loop: the rider belongs to this attack, so a
+            # target that was alive when it started still takes it.
             amount, detail = formula.strike(caster, tgt, pct / 100.0, "ATK", rng)
             if amount is None:
                 continue
@@ -354,4 +382,4 @@ def _rider(caster, eff, targets, out, rng, apply_damage, skill_id):
                 tgt.hp = max(0, tgt.hp - amount)
             detail["rider"] = True
             out.strikes.append(Strike(swing=0, target=tgt.order, amount=amount,
-                                      detail=detail, died=not tgt.alive))
+                                      detail=detail, died=False))
