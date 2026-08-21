@@ -158,6 +158,37 @@ exactly 5.
 with no Damage tags consumes the whole list at once and the group count need not match
 anything.
 
+### The 193 disagreements, fully accounted for
+
+Every one is explained, and none of them is a real conflict:
+
+| bucket | n | why |
+|---|---|---|
+| **PASSIVE** skills with `hit = 0` | 136 | pure stat passives ("Base HP Stat +150") — they never attack, so `hit = 0` is right and their `_actName` is vestigial |
+| **mob** cinematics (`bmo*`) | 42 | enemy skills, Chinese-only prose |
+| dev placeholder rows | 13 | `_note1` is literally `不該看到這級技能` — "you should not see this skill level" — or `無` ("none") |
+| `team_skill_s03` | 2 | team-skill path |
+
+Filtering to skills that are actually player-facing attacks — not PASSIVE/STATUS, a `bch*`
+cinematic that has tags, and a non-empty English description that is not a dev placeholder:
+
+```
+REAL player attack skills with a tagged cinematic and English prose: 3138
+   hit == cinematic swings : 3138
+   DISAGREE                :    0
+```
+
+**Perfect agreement.** So `hit` is trustworthy wherever it matters, and the residue is
+entirely passives, untranslated mob rows and dev leftovers.
+
+Practical consequences for an engine:
+
+* ignore `_actName` entirely for `PASSIVE` (4) and `STATUS` (6) — those rows carry one but
+  never render an attack;
+* for **mob** skills the cinematic still wins, since it is what consumes the groups —
+  those 42 rows are the one place `hit` and the animation genuinely differ on units that
+  do attack.
+
 So the complete rule for how many groups to send:
 
 * **cinematic has N Damage tags** → send exactly **N** groups; the tag count is the
