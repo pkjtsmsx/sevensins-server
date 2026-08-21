@@ -97,7 +97,13 @@ def glossary_lines(note):
 
 
 def norm_name(s):
-    """Join key: strips the `(N)` stack cap and `(SP)` variant marker."""
-    s = re.sub(r"\s*\(\s*SP\s*\)\s*$", "", s or "", flags=re.I)
-    s = re.sub(r"\s*\(\d+\)\s*$", "", s)
+    """Join key for matching a status row's name to its `* Name:` glossary line.
+
+    Strips ANY trailing parenthetical, not just `(N)` and `(SP)`. Status rows carry
+    qualifiers the glossary line does not repeat -- `Serum Injection(ATK)` and
+    `Serum Injection(CRT)` are two rows sharing one `* Serum Injection:` entry, and
+    `Admonition (Reduce CRT)` / `(Reduce SPD)` likewise. Without this they join to
+    nothing and both lose the duration the prose plainly states.
+    """
+    s = re.sub(r"\s*\([^)]*\)\s*$", "", s or "")
     return " ".join(re.sub(r"[^a-z0-9]+", " ", s.lower()).split())

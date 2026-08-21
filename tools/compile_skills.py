@@ -129,13 +129,51 @@ def attack_rider(r):
 # the skill's target. "the caster's Move Gauge will increase 25%", "Grant the ally with
 # the highest ATK an Move Gauge increase of 40%". Applying it to the skill's targets
 # would speed up the enemies the skill just hit.
-_GAUGE_WORD = re.compile(r"move gauge|行動值", re.I)
+# Each operandless effect states its magnitude next to its OWN phrase, never first in
+# the note -- the first percentage is the damage coefficient. This was fixed for the move
+# gauge after a 180-point "gauge change" (Lucifer's 180% ATK) hung the client; heal and
+# revive had exactly the same bug and simply failed quieter, losing the magnitude and
+# doing nothing at all.
+#
+#   heal    "restores HP of all allies by 250% ATK", "restore 25% of the max HP"
+#   revive  "Revive 2 random dead allies and restore 25% of their HP"
+EFFECT_WORD = {
+    "modify_gauge": re.compile(r"move gauge|行動值", re.I),
+    "heal": re.compile(r"restores?|recovers?|heals?|回復|恢復|補血", re.I),
+    "revive": re.compile(r"reviv|resurrect|復活", re.I),
+}
+
+_GAUGE_WORD = EFFECT_WORD["modify_gauge"]
 _GAUGE_PCT = re.compile(r"(\d+(?:\.\d+)?)\s*%")
 _GAUGE_SELF = re.compile(r"caster|self|its own|自身|我方自身", re.I)
 _GAUGE_ALLY = re.compile(r"\ball(y|ies)\b|我方", re.I)
 _GAUGE_ENEMY = re.compile(r"enem|敵方|对方", re.I)
 _GAUGE_DOWN = re.compile(r"reduc|decreas|lower|lose|下降|減少|降低", re.I)
 _GAUGE_UP = re.compile(r"increas|rise|gain|restor|提升|增加|上升", re.I)
+
+
+def clause_percent(r, op):
+    """-> the percentage stated next to THIS effect's own phrase, or None.
+
+    Searches forward from the phrase first and falls back to a short lookbehind, then
+    rejects anything equal to the skill's damage coefficient -- that is exactly the
+    number the naive "first percentage in the note" rule kept picking up.
+    """
+    word = EFFECT_WORD.get(op)
+    note = r.get("_note1_en") or ""
+    if word is None or not note:
+        return None
+    m = word.search(note)
+    if not m:
+        return None
+    after = note[m.end():m.end() + 80]
+    before = note[max(0, m.start() - 45):m.start()]
+    pm = _GAUGE_PCT.search(after) or _GAUGE_PCT.search(before)
+    if not pm:
+        return None
+    pct = float(pm.group(1))
+    return None if _is_damage_coefficient(r, pct) else pct
+
 
 
 def gauge_effect(r):
@@ -389,7 +427,10 @@ def effects(rows, r):
             # and unknown is the honest answer.
             if pct is not None and _is_damage_coefficient(r, pct):
                 pct = None
-            entry = {"op": OP_EFFECT_NO_OPERAND[op], "slot": i,
+            name = OP_EFFECT_NO_OPERAND[op]
+            if pct is None:
+                pct = clause_percent(r, name)      # try this effect's own clause
+            entry = {"op": name, "slot": i,
                      "percent": pct,
                      "source": ("prose" if pct is not None else None)}
             if op == 116:
