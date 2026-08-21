@@ -94,7 +94,16 @@ def _has(unit, name, min_stacks):
     if name == "Elite" and getattr(unit, "elite", False):
         return True
     classifier = _CLASSES.get(name)
+    # Only statuses THIS engine owns. A unit's list also holds the new engine's
+    # `status.Active`, which has no `.definition`. Duck-typed rather than importing
+    # core.own: core imports this module, so a module-level import back is a cycle.
+    #
+    # Note this module swallows exceptions by design ("evaluation NEVER throws"), so a
+    # missing guard here does not crash -- it silently evaluates the gate False, which is
+    # how it was found: two status gates started failing with no error at all.
     for st in unit.statuses:
+        if getattr(st, "definition", None) is None:
+            continue
         if classifier is not None:
             if not classifier(st.definition):
                 continue

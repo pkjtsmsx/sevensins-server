@@ -5,7 +5,7 @@ core's dispatch. Every op the parser can emit MUST have a handler here, or a `co
 skill silently does nothing (asserted by the regression harness via registry.registered_ops).
 """
 from .conditions import _CLASSES
-from .core import (Status, absorb_shield, apply_status, damage_taken_multiplier,
+from .core import (Status, absorb_shield, apply_status, damage_taken_multiplier, own,
                    effective_atk, flat_bonus, grant_immunity, has_flag, resolve_targets,
                    stat_multiplier)
 from .registry import register
@@ -25,7 +25,7 @@ def _damage(eff, ctx):
     for u in ctx.targets(eff.get("target")):
         for i in range(times):
             mitigable = (eff_atk * pct + eff_def * pct_def) / 100.0
-            val = mitigable * (1.0 - ctx.reduce(u)) * damage_taken_multiplier(u.statuses)
+            val = mitigable * (1.0 - ctx.reduce(u)) * damage_taken_multiplier(own(u.statuses))
             val += u.max_hp * pct_hp / 100.0
             dmg = max(1, int(val))
             dmg = absorb_shield(u, dmg)          # Shield status drains before HP does
@@ -77,7 +77,9 @@ def _removable(s):
 def _cleanse(eff, ctx):
     names = set(eff.get("statuses", []))
     for u in ctx.targets(eff.get("target")):
-        u.statuses = [s for s in u.statuses if s.name not in names or not _removable(s)]
+        u.statuses = [s for s in u.statuses
+                      if not isinstance(s, Status)
+                      or s.name not in names or not _removable(s)]
 
 
 @register("cleanse_class")
@@ -156,6 +158,6 @@ def _extend_status(eff, ctx):
     add = eff.get("duration") or 0
     pool = [ctx.attacker] + ctx.targets("enemy_target")
     for u in pool:
-        for s in u.statuses:
+        for s in own(u.statuses):
             if s.name == name and s.remaining != "battle":
                 s.remaining += add

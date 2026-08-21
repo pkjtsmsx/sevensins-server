@@ -162,36 +162,59 @@ def is_immune(unit, row):
     return False
 
 
-def tick(unit):
-    """Advance this unit's statuses by one of ITS turns. -> (dot, hot, expired names).
+# Damage and duration are deliberately SEPARATE calls, and the order matters.
+#
+# A turn goes: tick_damage -> decide whether the unit can act -> tick_duration. Doing
+# both in one call at the start of a turn means a 1-turn Stun expires on the same tick
+# that should have skipped the turn, so it never stops anybody -- which is exactly what
+# happened, and what the new-path suite caught. The old engine had the same split for the
+# same reason.
 
-    Called at the START of the unit's own turn: every DoT/HoT in the pack is worded "when
-    a turn starts, deals/restores...", so that is when the damage lands and when a
-    duration is spent.
 
-    DoT damage uses the INFLICTER's ATK, snapshotted at apply time. It bypasses DEF --
+def tick_damage(unit):
+    """DoT/HoT for the START of this unit's turn. -> (dot, hot).
+
+    Every DoT/HoT in the pack is worded "when a turn starts, deals/restores...", so this
+    is when the damage lands.
+
+    The amount uses the INFLICTER's ATK, snapshotted at apply time, and bypasses DEF --
     the prose says "deal N% of the effect owner's ATK as damage" with no mitigation
     clause, and the old engine read it the same way.
     """
     dot = hot = 0
+    for st in _actives(unit):
+        if st.kind not in ("dot", "heal") or st.magnitude is None:
+            continue
+        base = st.source_atk if st.source_atk else getattr(unit, "atk", 0)
+        amount = int(base * float(st.magnitude) / 100.0) * max(1, st.stacks)
+        if st.kind == "dot":
+            dot += amount
+        else:
+            hot += amount
+    return dot, hot
+
+
+def tick_duration(unit):
+    """Spend one of this unit's turns off every status it holds. -> expired names.
+
+    Called once the turn is resolved -- including a turn that was SKIPPED, since a
+    skipped turn still counts against a duration or a stun would never wear off.
+    """
     expired = []
     for st in list(unit.statuses):
-        if not isinstance(st, Active):
-            continue
-        if st.kind in ("dot", "heal") and st.magnitude is not None:
-            base = st.source_atk if st.source_atk else getattr(unit, "atk", 0)
-            amount = int(base * float(st.magnitude) / 100.0) * max(1, st.stacks)
-            if st.kind == "dot":
-                dot += amount
-            else:
-                hot += amount
-        if st.permanent:
+        if not isinstance(st, Active) or st.permanent:
             continue
         st.remaining = int(st.remaining) - 1
         if st.remaining <= 0:
             unit.statuses.remove(st)
             expired.append(st.name)
-    return dot, hot, expired
+    return expired
+
+
+def tick(unit):
+    """Both halves, for callers outside a turn loop. -> (dot, hot, expired)."""
+    dot, hot = tick_damage(unit)
+    return dot, hot, tick_duration(unit)
 
 
 def remove_category(unit, category):

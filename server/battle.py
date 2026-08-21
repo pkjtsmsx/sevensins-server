@@ -1389,8 +1389,10 @@ class Battle:
         """A damage-reduction function the effect engine calls per target: the client's
         own defend-ratio curve applied to the target's post-status DEF."""
         return lambda u: defend_ratio(
-            u.defence * fx.stat_multiplier(u.statuses, "DEF")
-            + fx.flat_bonus(u.statuses, "DEF"))
+            u.defence * fx.stat_multiplier(_legacy_statuses(u), "DEF")
+            + fx.flat_bonus(_legacy_statuses(u), "DEF"))
+    # NOTE: only reached on the OLD path -- the engine reads DEF through
+    # engine.status.stat_multiplier inside formula.strike.
 
     def _forced_target(self, attacker):
         """Taunt/Charm/Confuse override the ATTACKER's own target choice -- enforced
@@ -1408,6 +1410,11 @@ class Battle:
                   if u.team == attacker.team and u is not attacker and u.alive]
             if own:
                 return own[0]
+            return None
+        # Taunt/forced targeting is legacy-only for now: the engine records the status
+        # but has no redirect rule yet, so on the new path nothing forces a target. That
+        # is a KNOWN gap rather than a silent one -- see the plan's phase list.
+        if NEW_ENGINE:
             return None
         for st in attacker.statuses:
             if st.taunt_source and "forced_target" in st.definition.get("flags", []):
@@ -1857,11 +1864,13 @@ class Battle:
                 acted.scv = max(0.0, min(float(SCV_FULL), acted.scv + pending))
                 acted.pending_scv = 0.0
             # Count down this unit's statuses on its own turn; drop the expired.
-            if acted.statuses:
-                # Actives are spent at the START of the unit's own turn instead (see
-                # _start_of_turn), so they are passed through untouched here.
-                acted.statuses = [s for s in acted.statuses
-                                  if isinstance(s, _engine_status.Active) or not s.tick()]
+            # On the NEW path the engine owns this and spends durations at the START of a
+            # unit's turn instead, so the legacy tick does not run at all.
+            if NEW_ENGINE:
+                # A resolved turn spends a turn of the actor's own statuses.
+                _engine_status.tick_duration(acted)
+            elif acted.statuses:
+                acted.statuses = [s for s in _legacy_statuses(acted) if not s.tick()]
         self._roll_turn_order()
         self.round += 1
         self.turn_open = False
@@ -1875,10 +1884,18 @@ class Battle:
         unit = self.acting_unit()
         if not unit or _depth > len(self.units):
             return
-        fx.tick_dot_hot(unit)
-        # The engine's own statuses tick here too: every DoT/HoT in the pack is worded
-        # "when a turn starts", and `status.tick` spends the duration at the same moment.
-        dot, hot, _expired = _engine_status.tick(unit)
+        # ONE engine owns battle content at a time. On the new path `battle_effects`
+        # does not run: it would tick its own DoTs and apply its own stat rules alongside
+        # the engine's, which is double-processing, not compatibility. Filtering the two
+        # representations apart was treating the symptom.
+        if NEW_ENGINE:
+            # DAMAGE only. The duration is spent after the can-it-act decision below --
+            # see the note in engine/status.py: ticking both here made a 1-turn stun
+            # expire on the very tick that should have skipped the turn.
+            dot, hot = _engine_status.tick_damage(unit)
+        else:
+            fx.tick_dot_hot(unit)
+            dot = hot = 0
         if dot:
             unit.hp = max(0, unit.hp - dot)
         if hot:
@@ -1887,12 +1904,14 @@ class Battle:
             self._roll_turn_order()
             self._start_of_turn(_depth + 1)
             return
-        if (fx.is_immobilized(_legacy_statuses(unit))
-                or _engine_status.is_immobilized(unit)):
+        if (_engine_status.is_immobilized(unit) if NEW_ENGINE
+                else fx.is_immobilized(unit.statuses)):
             unit.tick_cooldowns()
-            if unit.statuses:
-                unit.statuses = [s for s in unit.statuses
-                                 if isinstance(s, _engine_status.Active) or not s.tick()]
+            # The skipped turn still spends a turn of every status the acting engine owns.
+            if NEW_ENGINE:
+                _engine_status.tick_duration(unit)
+            elif unit.statuses:
+                unit.statuses = [s for s in unit.statuses if not s.tick()]
             # A skipped turn still costs the gauge, or the queue never moves on.
             unit.scv = 0.0
             self._roll_turn_order()

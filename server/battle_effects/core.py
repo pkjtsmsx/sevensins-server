@@ -312,26 +312,46 @@ def is_immobilized(statuses):
     return False
 
 
+
+def own(statuses):
+    """Only the statuses THIS engine owns.
+
+    A unit's `statuses` list holds two representations now: this module's `Status` and
+    the new engine's `status.Active`, because both engines share the unit object. Every
+    reader here reaches for `.definition` or `.tick()`, which an Active does not have, so
+    each one filters through this first.
+
+    Found by the new-path integration suite, not by review: `has_flag` and `tick_dot_hot`
+    take the UNIT and iterate its statuses internally, so filtering at the call sites in
+    battle.py missed them entirely and the first turn with an engine status present would
+    have raised `'Active' object has no attribute 'definition'`.
+
+    This whole helper disappears with the old engine.
+    """
+    return [s for s in statuses if isinstance(s, Status)]
+
+
 def has_flag(unit, flag):
     """True if any of the unit's active statuses carries this catalog flag (Phase 3
     enforcement points: heal_block, ability_seal, forced_target, confused_targeting,
     cd_reduction_block, ...). Statuses in `.statuses` are always live -- expired ones are
     dropped by Status.tick()'s caller -- so no remaining-turns check is needed here."""
-    return any(flag in st.definition.get("flags", []) for st in unit.statuses)
+    return any(flag in st.definition.get("flags", []) for st in own(unit.statuses))
 
 
 def effective_atk(unit):
     """The unit's ATK after its own stat_mod statuses (Keen+, Fracture-, flat bonuses).
     Shared by damage, DoT-tick snapshotting, and shield sizing so they agree on what
     'the caster's ATK' means at the moment of the effect."""
-    return unit.atk * stat_multiplier(unit.statuses, "ATK") + flat_bonus(unit.statuses, "ATK")
+    return (unit.atk * stat_multiplier(own(unit.statuses), "ATK")
+            + flat_bonus(own(unit.statuses), "ATK"))
 
 
 def absorb_shield(unit, dmg):
     """Drain the unit's Shield statuses (oldest first) against an incoming hit, ->
     the damage that gets through. Multiple stacked shields drain in application order;
     a shield with 0 capacity left (or no shield_hp at all) is simply skipped."""
-    for st in unit.statuses:
+    for st in own(unit.statuses):
         cap = st.shield_hp
         if cap <= 0:
             continue
@@ -352,14 +372,14 @@ def tick_dot_hot(unit):
     so a later HoT never revives it."""
     dot = hot = 0
     blocked = has_flag(unit, "heal_block")
-    for st in list(unit.statuses):
+    for st in own(list(unit.statuses)):
         if not unit.alive:
             break
         d = st.definition
         if d.get("tick_pct_atk"):
             src_atk = st.dot_atk if st.dot_atk is not None else unit.atk
             amt = max(1, int(src_atk * d["tick_pct_atk"] * st.stacks / 100.0))
-            amt = int(amt * damage_taken_multiplier(unit.statuses))
+            amt = int(amt * damage_taken_multiplier(own(unit.statuses)))
             unit.hp = max(0, unit.hp - amt)
             dot += amt
         if d.get("heal_pct_maxhp") and not blocked:
@@ -413,7 +433,7 @@ CC_STATUSES = {"Stun", "Freeze", "Daze", "Silence", "Seal", "Sleep", "Petrify",
 def _immune_to(unit, name):
     """True if an active immunity on the unit blocks the named status. `immune_to` may be
     a specific status, "all", or "CrowdControl" (blocks the CC_STATUSES class)."""
-    for st in unit.statuses:
+    for st in own(unit.statuses):
         imm = st.definition.get("immune_to")
         if not imm or not (st.remaining == "battle" or st.remaining > 0):
             continue
@@ -457,7 +477,7 @@ def apply_status(unit, name, duration_override=None, *, source=None, flat_shield
     elif definition.get("shield_pct_atk"):
         shield_hp = int(effective_atk(source) * definition["shield_pct_atk"] / 100.0) \
             if source is not None else 0
-    for st in unit.statuses:
+    for st in own(unit.statuses):
         if st.name == name:
             if "unstackable" in flags:
                 st.remaining = dur          # just refresh the timer
