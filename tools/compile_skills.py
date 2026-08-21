@@ -350,9 +350,12 @@ def effects(rows, r):
             continue
         aid = ids[i] if i < len(ids) else 0
         if op in (OP_APPLY, OP_APPLY_CHANCE) and aid in rows:
+            meta = status_meta(rows, aid)
             out.append({"op": "apply_status", "slot": i,
                         "chance": op == OP_APPLY_CHANCE,
-                        "status": status_meta(rows, aid),
+                        "conditional": is_conditional(r, meta.get("name")),
+                        "requires": condition_requires(r, meta.get("name")),
+                        "status": meta,
                         # Per-(skill, status): no column carries these, and they change
                         # with skill level while act_id does not. See contract doc 5.1.
                         "numbers": status_numbers(rows, r, aid)})
@@ -401,6 +404,68 @@ def effects(rows, r):
             unknown.append({"opcode": op, "slot": i,
                             **({"operand": aid} if aid else {})})
     return out, unknown
+
+
+# A status named inside an "if/when ..." sentence is applied CONDITIONALLY, and the
+# condition is nowhere in the opcode script -- `_action` carries no branch marker at all.
+# Eclipse Slash reads "if the caster is affected by The Divine, ... inflict freeze", and
+# its opcodes are a flat [115, 116, 112, 112].
+#
+# Applying those unconditionally is how a raid boss ended up permanently frozen AND
+# stunned: two conditional control effects landing on every single cast.
+#
+# Attributed per EFFECT, not per skill: the sentence that names the status is the one
+# that governs it. Per-skill would flag 73% of sites; per-sentence flags 25%.
+_CONDITIONAL = re.compile(r"\b(if|when|whenever|upon|while|should)\b", re.I)
+
+
+def _clause_for(note, name):
+    """-> the sentence naming this status, or None."""
+    if not note or not name:
+        return None
+    for sentence in re.split(r"(?<=[.!?])\s+", note):
+        if name.lower() in sentence.lower():
+            return sentence
+    return None
+
+
+# A condition of the form "if the caster is affected by The Divine" IS evaluatable -- it
+# names a status the engine already tracks. 956 of the 4,934 conditional sites are this
+# shape, and it is the shape behind the reported bug (Eclipse Slash gates its Freeze on
+# The Divine and its Stun on The Fallen).
+#
+# Extracting it turns a coin flip into a real check. The rest stay unevaluatable and fall
+# back to the policy in engine/core.
+_AFFECTED = re.compile(
+    r"(caster|self|target|enemy|ally|allies)\b[^.]{0,40}?affected by(?: the)? "
+    r"[\"\u201c]?([A-Za-z][A-Za-z0-9 '\-]{2,26}?)[\"\u201d]?\s*(?:,|\.|;|$| and | when | while )",
+    re.I)
+
+_SELF_WORDS = {"caster", "self"}
+
+
+def condition_requires(r, status_name):
+    """-> {"status": name, "on": "caster"|"target"} when the clause names one, else None."""
+    clause = _clause_for(r.get("_note1_en") or "", status_name)
+    if not clause:
+        return None
+    m = _AFFECTED.search(clause)
+    if not m:
+        return None
+    who = m.group(1).lower()
+    required = m.group(2).strip()
+    if not required or required.lower() == (status_name or "").lower():
+        return None                      # "if affected by X, X does more" -- not a gate
+    return {"status": required,
+            "on": "caster" if who in _SELF_WORDS else "target"}
+
+
+def is_conditional(r, status_name):
+    """Is this status applied only under a condition the opcodes do not encode?"""
+    clause = _clause_for(r.get("_note1_en") or "", status_name)
+    if clause is None:
+        return None                      # not mentioned -- cannot tell either way
+    return bool(_CONDITIONAL.search(clause))
 
 
 def _is_damage_coefficient(r, pct):

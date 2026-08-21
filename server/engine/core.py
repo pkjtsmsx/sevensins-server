@@ -195,10 +195,57 @@ def resolve_targets(caster, spec, units, rng=None, chosen=None):
 
 # --- execution --------------------------------------------------------------------
 
+# What to do with an apply_status whose prose gates it on a condition the opcodes do not
+# encode ("if the caster is affected by The Divine, ... inflict freeze"). 4,934 of the
+# 21,407 sites are like this, 875 of them control effects.
+#
+# Applying them unconditionally is not neutral: it permanently froze AND stunned a raid
+# boss, because two conditional control effects landed on every cast and the boss never
+# got a turn. Skipping them outright loses a quarter of all status gameplay.
+#
+# So the default is to roll: an unevaluatable condition is treated as "sometimes true",
+# through the same effect-accuracy path a chance-based application uses. That is a
+# MODELLING CHOICE, not a reading -- named here so it is visible and tunable rather than
+# buried. Set "skip" to drop them entirely, "always" for the old behaviour.
+CONDITIONAL_POLICY = "roll"
+CONDITIONAL_CHANCE = 0.5
+
+
+def _holds_status(unit, name):
+    """Does this unit hold a status by (loose) name?
+
+    Loose because the prose and the status row do not always spell it identically --
+    "The Divine" in a clause is `Divine` once the article is stripped, and the row may
+    carry a `(SP)` suffix. Substring either way, lowercased.
+    """
+    if not name:
+        return False
+    want = str(name).strip().lower()
+    for st in getattr(unit, "statuses", []):
+        got = str(getattr(st, "name", "") or "").lower()
+        if got and (want in got or got in want):
+            return True
+    return False
+
+
 def _status_event(caster, target, eff, rng):
-    """-> a StatusEvent, or None when a chance-based application misses."""
+    """-> a StatusEvent, or None when the application does not land."""
     st = eff.get("status") or {}
     numbers = eff.get("numbers") or {}
+    requires = eff.get("requires")
+    if requires:
+        # An evaluatable condition: "if the caster is affected by The Divine". Checked
+        # for real rather than rolled -- this is the shape behind Eclipse Slash gating
+        # its Freeze on The Divine and its Stun on The Fallen.
+        holder = caster if requires.get("on") == "caster" else target
+        if not _holds_status(holder, requires.get("status")):
+            return None
+    elif eff.get("conditional") and not eff.get("chance"):
+        if CONDITIONAL_POLICY == "skip":
+            return None
+        if CONDITIONAL_POLICY == "roll" and not formula.effect_lands(
+                caster, target, CONDITIONAL_CHANCE, rng):
+            return None
     if eff.get("chance"):
         # op 113 is the chance variant. The pack never states the probability, so the
         # engine uses the effect-accuracy path with a neutral base rather than inventing

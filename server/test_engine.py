@@ -248,6 +248,35 @@ def main():
     print("\nstatus state (phase 6):")
     check_status_state()
 
+    print("\nconditional application:")
+    # Eclipse Slash gates its Freeze on "the caster is affected by The Divine" and its
+    # Stun on The Fallen. The opcodes carry no branch marker at all -- `_action` is a flat
+    # [115, 116, 112, 112] -- so applying both unconditionally is how a raid boss ended up
+    # permanently frozen AND stunned, never getting a turn.
+    spec = specs.skill(2080103)
+    gated = [e for e in spec["effects"]
+             if e["op"] == "apply_status" and e.get("requires")]
+    check("Eclipse Slash's control effects carry their requirement",
+          len(gated) == 2, str([e.get("requires") for e in gated]))
+
+    caster, units = field(n_enemy=1)
+    foe = units[1]
+    foe.max_hp = foe.hp = 10 ** 9        # survive the casts, so the status is observable
+    for _ in range(12):
+        core.execute(caster, spec, units, random.Random(1), apply_damage=True)
+    check("without the required status, no control lands",
+          not [s for s in foe.statuses
+               if isinstance(s, status.Active) and s.kind == "control"],
+          str([s.name for s in foe.statuses]))
+
+    caster.statuses.append(status.Active(
+        status_id=1, name="The Divine", kind="immunity", category="misc", remaining=9))
+    core.execute(caster, spec, units, random.Random(1), apply_damage=True)
+    names = {s.name for s in foe.statuses if isinstance(s, status.Active)}
+    check("with it, the gated status lands", "Freeze" in names, str(names))
+    check("...and only that one -- Stun needs The Fallen", "Stun" not in names,
+          str(names))
+
     print("\nstatus rules:")
     caster, units = field(n_enemy=1)
     tgt = units[1]
