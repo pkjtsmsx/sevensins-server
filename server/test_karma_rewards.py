@@ -397,13 +397,53 @@ def check_avg_chapter_resolution():
           str(karma.karma_char_for(21601)))
 
 
+
+def check_decision_grades():
+    """Every decision pays one of each banner grade across its three options.
+
+    The reward tracks how CRUEL the choice is -- Lucifer is a demon king, so the meanest
+    option pays most and the kindest least -- and each scene has exactly three options,
+    so the three grades map one-to-one. Which option deserves which is not yet known, so
+    they are dealt arbitrarily; what must hold regardless is that a scene never pays one
+    grade twice, including the scenes where one option is a pinned retail observation.
+    """
+    from player_state import karma
+
+    scenes = sorted({avg for avg, _ in karma.KARMA_DECISION_TIER})
+    check("the decision table covers every scene", len(scenes) == 96, str(len(scenes)))
+
+    bad = []
+    for avg in scenes:
+        karmas = sorted(karma.karma_reward(avg, i)[3] for i in range(3))
+        if karmas != [10, 20, 100]:
+            bad.append((avg, karmas))
+    check("every scene pays one Up!, one Big Up! and one Ultimate Up!",
+          not bad, f"{len(bad)} wrong, e.g. {bad[:3]}")
+
+    # The grades straddle the client's own banner thresholds: OptionButton.SetReward
+    # picks "Up!" under 20, "Big Up!" from 20, "Ultimate Up!" from 100.
+    grades = sorted(f for _, _, f in karma.KARMA_TIERS.values())
+    check("the three grades land in the three banner bands",
+          grades[0] < 20 <= grades[1] < 100 <= grades[2], str(grades))
+
+    # A payout is recorded once and must survive reloads and replays.
+    a = [karma.karma_reward(21601, i) for i in range(3)]
+    b = [karma.karma_reward(21601, i) for i in range(3)]
+    check("a decision pays the same on every call", a == b)
+
+    # Retail observations still win outright.
+    check("an observed option keeps its retail amount",
+          karma.karma_reward(10107, 1)[1] == 15, str(karma.karma_reward(10107, 1)))
+
+
 def main():
     for fn in (check_table_matches_the_screenshot, check_a_single_rank_up_pays_once,
                check_multi_rank_pays_every_rank_crossed, check_no_rank_up_pays_nothing,
                check_the_payout_is_pushed, check_gifts_report_the_bonus,
                check_the_rank_up_splash_is_triggered,
                check_avg_choice_is_per_difficulty,
-               check_avg_chapter_character, check_avg_chapter_resolution):
+               check_avg_chapter_character, check_avg_chapter_resolution,
+               check_decision_grades):
         print(f"\n{fn.__name__}:")
         fn()
     print(f"\n{_fail} failure(s)")

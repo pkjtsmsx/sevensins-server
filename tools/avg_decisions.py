@@ -91,22 +91,20 @@ def decisions(scenes):
     return found
 
 
-# The player's own avatar. Lucifer narrates most scenes and is never the recipient --
-# excluding her is what makes the rule agree with the one confirmed observation
-# (21601 pays Matina, where Lucifer actually has the most lines).
+# Lucifer narrates most scenes; skipping her surfaces the other cast on screen.
 PROTAGONIST_ROLE = 101
 
 
-def payout_guess(info, role_map, chars):
-    """-> (charID, name, lines) for the cast a decision most likely pays.
+def featured_cast(info, role_map, chars):
+    """-> (charID, name, lines) for the most-spoken non-protagonist cast in the scene.
 
-    A GUESS, not a reading: the option -> reward mapping was server-side and is in no
-    shipped file, so nothing here is authoritative. The heuristic is "the featured
-    companion" -- the speaker with the most lines who is not the protagonist and who
-    resolves to a real playable cast.
+    **NOT the payout character.** That was the first guess and play disproved it: every
+    chapter-1 decision pays Jacqueline, yet she speaks in only one of the three -- 10103
+    has no Jacqueline lines at all and still pays her. The reward follows the CHAPTER's
+    antagonist (player_state.karma.KARMA_CHAPTER_CHAR), which is not in any shipped file.
 
-    Confirmed against 21601 (Matina) only. Treat every other row as a lead to verify in
-    play, not as fact.
+    Still useful as a shortlist: it is right for every confirmed chapter from 3 on, and
+    wrong only for the opening arc. Treat a row as a candidate to confirm, never a fact.
     """
     for sp in info["speakers"]:
         if sp["role"] == PROTAGONIST_ROLE:
@@ -138,11 +136,11 @@ def main():
         stage = index.get(avg)
         chapter = karma.avg_chapter(avg)
         row = stages.get(stage) or {}
-        cid, cname, lines = payout_guess(info, role_map, chars)
+        cid, cname, lines = featured_cast(info, role_map, chars)
         rows.append({
             "avg": avg, "chapter": chapter, "stage": stage,
             "title": row.get("_title_en"), "name": row.get("_stage_name_en"),
-            "payout_guess": cid, "payout_name": cname, "payout_lines": lines,
+            "featured": cid, "featured_name": cname, "featured_lines": lines,
             **info,
         })
 
@@ -151,9 +149,9 @@ def main():
 
     print(f"{len(found)} decision scenes in the pack"
           + (f"; {len(rows)} in chapter {a.chapter}" if a.chapter else "") + "\n")
-    print(f"{'avg':>7} {'ch':>3} {'stage':>6}  {'likely payout':16s} scene")
+    print(f"{'avg':>7} {'ch':>3} {'stage':>6}  {'featured cast':16s} scene")
     for r in rows:
-        who = r["payout_name"] or "-- unresolved --"
+        who = r["featured_name"] or "--"
         print(f"{r['avg']:>7} {str(r['chapter']):>3} {str(r['title'] or ''):>6}  "
               f"{who[:16]:16s} {str(r['name'] or '')[:30]}")
 
