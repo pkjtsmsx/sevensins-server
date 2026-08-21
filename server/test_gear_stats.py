@@ -261,10 +261,48 @@ def check_repair_of_existing_saves():
     check("running it again is a no-op", ps.repair_equipment_rolls(st) == 0)
 
 
+# --- sub-stat growth on upgrade (ported from a user-contributed patch) -----------
+#
+# The bug: `bpv_<j> = (be_<j> + 1) * _AttrInitV` has no `lv` term, and `be_<j>` was
+# written only at creation, so every sub-stat was frozen at its roll for the life of
+# the piece while the primary crept up.
+
+def check_substat_enhancement():
+    import random
+    from player_state import runes, gear
+
+    # One big click must equal many small ones, or batching quietly changes the payout.
+    batched = runes.enhance_steps(0, 15)
+    singles = sum(runes.enhance_steps(i, i + 1) for i in range(15))
+    check("a 0->15 click awards the same as fifteen 1-level clicks",
+          batched == singles, f"{batched} vs {singles}")
+    check("15 levels yield 5 enhances at the assumed cadence", batched == 5,
+          str(batched))
+
+    attr = {f"bid_{j}": j for j in range(1, 5)}
+    attr.update({f"be_{j}": 0 for j in range(1, 5)})
+    runes.apply_enhances(attr, 5, 4, random.Random(1))
+    got = sorted(attr[f"be_{j}"] for j in range(1, 5))
+    check("enhances spread evenly rather than stacking on bid_1",
+          got == [1, 1, 1, 2], str(got))
+    check("every enhance is accounted for", sum(got) == 5, str(sum(got)))
+
+    solo = {"bid_1": 7, "be_1": 0}
+    runes.apply_enhances(solo, runes.enhance_steps(0, 15),
+                         gear.SOULFRAG_BONUS_ATTRS, random.Random(1))
+    check("a Soulmirror's single sub-stat takes all five", solo["be_1"] == 5,
+          str(solo["be_1"]))
+
+    # A piece with no sub-stat rolls must not crash or invent one.
+    empty = {}
+    runes.apply_enhances(empty, 3, 4, random.Random(1))
+    check("a piece with no sub-stats is left alone", empty == {}, str(empty))
+
+
 def main():
     for fn in (check_the_999_row_exists, check_roll_pool_is_scoped,
                check_value_formulas, check_set_bonus, check_battle_applies_gear,
-               check_repair_of_existing_saves):
+               check_repair_of_existing_saves, check_substat_enhancement):
         print(f"\n{fn.__name__}:")
         fn()
     print(f"\n{_fail} failure(s)")

@@ -3,6 +3,7 @@
 Split out of the former monolithic core.py; depends only on .core.
 """
 
+import re
 
 from .core import (
     CUR_CASH,
@@ -124,8 +125,107 @@ def avg_chapter(avg_id):
     return int(avg_id) // 10000 or None
 
 
+# ---- portrait resolution by speaker ---------------------------------------------
+#
+# A finer source than the per-chapter mapping below, contributed by a server user and
+# re-verified here against our own pack (125 + 3 of 171, reproduced exactly).
+#
+# **It changes nothing on its own.** The chain needs scene -> role -> charID, and only
+# the SECOND hop is derivable: nothing in the pack links an avg id to the role whose
+# portrait its banner shows. `quest.json` has `_avg_id` and `_char_id` but only 2 rows
+# carry an `_avg_id`; `tutorial.json`'s ids are the 199xxx range; `stage.json` lists
+# scenes but names only mob groups; `avg_role.json` has no charID column; the `avg` form
+# is not shipped at all. So KARMA_SCENE_ROLE starts empty and is filled by observation
+# -- once a run shows "scene 10102 displays role N", one line here resolves the
+# portrait with no further data work.
+#
+# Until then every scene falls through to the per-chapter mapping, which is why that is
+# kept rather than replaced: it already pays chapter 2 to Caillen, and the contributed
+# version had no chapter step at all.
+KARMA_SCENE_ROLE = {
+    # avg_id: avg_role id whose portrait the banner shows. Empty until confirmed.
+}
+
+# avg_role id -> charID for speakers the name join cannot reach. Add a row ONLY on a
+# confirmed identification, never because an English translation looks like a unit's
+# name: role 3401 is ライエラ and role 4101 is レイラ, two different speakers in two
+# different sprite folders that both render as "Layla" in EN. ライエラ has no char row
+# at all, so pointing 3401 at Layla's 10701 would put the wrong face on the banner.
+#
+# Most story speakers legitimately have no unit -- of the roles the join misses, most
+# are `npc*` extras. A missing entry is the normal case, not a gap to fill by guessing.
+ROLE_CHAR_OVERRIDES = {
+    # Halsey & Ashley in unison (folder co009_01). The unit is filed under the FAMILY
+    # name -- char 10541 is ガルシア姉妹 / "Garcias" -- so no given-name join reaches it.
+    2501: 10541,
+}
+
+_role_char_cache = None
+_QUALIFIER = re.compile(r"[（(].*?[)）]")
+
+
+def _strip_qualifier(name):
+    return _QUALIFIER.sub("", str(name or "")).strip()
+
+
+def _role_char_map():
+    """{avg_role id: charID}, by name join. Lazy, cached, and never raises.
+
+    Two passes: `_roleName` == `char._name_jp`, then the same with a （qualifier）
+    stripped -- セシリア（学者）/（無頼）/（少女） are all roles for セシリア.
+
+    Keyed on `_group`, NOT `_id`: `_id` alone resolves Lucifer to 10000, her "Bunrei"
+    variant, instead of 10001. And one name can belong to several units (シャルル is both
+    10551 and 20551; each demon lord has alt-costume rows in the 20xxx range), so the
+    lowest id wins -- deterministically the base version rather than whichever row dict
+    iteration reached first. State an alt costume in ROLE_CHAR_OVERRIDES if a scene ever
+    needs one.
+
+    Best-effort by design: a karma payout must not fail because a design form is
+    missing, so any error degrades to whatever resolved before it.
+    """
+    global _role_char_cache
+    if _role_char_cache is not None:
+        return _role_char_cache
+    mapping = {}
+    try:
+        import battle as _bt          # lazy, as _avg_stage_index does
+        by_jp = {}
+        for cid, row in (_bt.dd.rows("char") or {}).items():
+            jp = row.get("_name_jp")
+            if not jp:
+                continue
+            g = int(row.get("_group") or cid)
+            if jp not in by_jp or g < by_jp[jp]:
+                by_jp[jp] = g
+        for rid, row in (_bt.dd.rows("avg_role") or {}).items():
+            nm = row.get("_roleName")
+            cid = by_jp.get(nm) or by_jp.get(_strip_qualifier(nm))
+            if cid:
+                mapping[int(rid)] = int(cid)
+    except Exception:                       # noqa: BLE001 -- never break a payout
+        pass
+    mapping.update(ROLE_CHAR_OVERRIDES)     # hand-confirmed rows always win
+    _role_char_cache = mapping
+    return mapping
+
+
+def role_char(role_id, default=None):
+    """charID for an avg_role id, or `default` when the name join finds nothing."""
+    if role_id is None:
+        return default
+    return _role_char_map().get(int(role_id), default)
+
+
 def karma_char_for(avg_id):
-    """Which cast a decision pays karma to."""
+    """Which cast a decision pays karma to.
+
+    The scene's confirmed speaker wins when there is one; otherwise the chapter
+    mapping, which is what actually resolves every scene today.
+    """
+    by_role = role_char(KARMA_SCENE_ROLE.get(int(avg_id)))
+    if by_role:
+        return by_role
     return KARMA_CHAPTER_CHAR.get(avg_chapter(avg_id), KARMA_TUTORIAL_CHAR)
 
 

@@ -4,6 +4,8 @@ Split out of the former monolithic core.py; depends only on .core.
 """
 
 
+import random
+
 import battle as bt
 
 from .core import (
@@ -18,6 +20,9 @@ from .core import (
     CHAR_EQUIP_SLOTS,
     CURRENCY_COIN,
     RUNE_ATTR_LEVEL,
+    RUNE_ATTR_SUB,
+    RUNE_ATTR_SUB_ENHANCE,
+    RUNE_BONUS_ATTRS,
     RUNE_MAX_LEVEL,
     char_equips,
     uid,
@@ -131,6 +136,67 @@ def find_rune(state, uid):
     return None, None
 
 
+# ---- sub-stat growth ------------------------------------------------------------
+#
+# THE BUG THIS FIXES. The client derives every displayed number in `GetEquipGrowValue`
+# (see the RUNE_ATTR_* block in core.py):
+#
+#     ppv_<i> = row._AttrInitV + row._AttrUpV * lv      <- primary, grows with lv
+#     bpv_<j> = (be_<j> + 1) * row._AttrInitV           <- sub-stat, grows with be_
+#
+# **The sub-stat term contains no `lv`.** Upgrading wrote only `lv`, and `be_<j>` was
+# written once at creation (core.py `_rune_attr`/`_soulfrag_attr`) and by nothing else,
+# so the primary crept up on every upgrade while all four sub-stats stayed frozen at
+# their roll value for the life of the piece.
+#
+# CADENCE IS AN ASSUMPTION, and the only invented part. How often an upgrade enhances a
+# sub-stat is not in the pack -- `rune_setting` carries cost tables only (`_type` 1..5,
+# `_para` = [rarity, ?, level]) and no other form has it. Every 3 levels divides
+# RUNE_MAX_LEVEL = 15 into 5 enhances. Retune this one constant when a real rate is
+# observed; the mechanism is right either way.
+#
+# Reported by a server user; the bug and the formula were both re-verified here against
+# the decompilation notes before porting.
+RUNE_LEVELS_PER_ENHANCE = 3
+
+
+def enhance_steps(before_lv, to_lv, per=RUNE_LEVELS_PER_ENHANCE):
+    """How many sub-stat enhances a climb from `before_lv` to `to_lv` earns.
+
+    Counts multiples of `per` CROSSED, so one 0->15 click awards exactly what fifteen
+    single-level clicks would. Level 0 is the unenhanced roll.
+    """
+    if per <= 0:
+        return 0
+    return max(0, int(to_lv) // per - int(before_lv) // per)
+
+
+def apply_enhances(attr, steps, count, rng=None):
+    """Spread `steps` enhances over the sub-stats present in `attr`.
+
+    -> {sub index: new be_ value}, for logging.
+
+    Each step lands on the least-enhanced sub-stat so no single stat runs away; ties
+    break randomly rather than always taking `bid_1`, which would make the first slot
+    grow twice as fast as the rest.
+    """
+    if steps <= 0 or count <= 0:
+        return {}
+    r = rng or random
+    slots = [j for j in range(1, int(count) + 1) if f"{RUNE_ATTR_SUB}{j}" in attr]
+    if not slots:
+        return {}
+    touched = {}
+    for _ in range(int(steps)):
+        low = min(int(attr.get(f"{RUNE_ATTR_SUB_ENHANCE}{j}", 0) or 0) for j in slots)
+        pick = r.choice([j for j in slots
+                         if int(attr.get(f"{RUNE_ATTR_SUB_ENHANCE}{j}", 0) or 0) == low])
+        key = f"{RUNE_ATTR_SUB_ENHANCE}{pick}"
+        attr[key] = int(attr.get(key, 0) or 0) + 1
+        touched[pick] = attr[key]
+    return touched
+
+
 def upgrade_rune(state, uid, levels):
     """Apply an EnchantGem request. -> (entry, gained levels, coins spent).
 
@@ -151,4 +217,6 @@ def upgrade_rune(state, uid, levels):
         raise ValueError(f"upgrade costs {cost} coins, holding {have}")
     state["currency"][str(CURRENCY_COIN)] = have - cost
     attr[RUNE_ATTR_LEVEL] = to_lv
+    # Sub-stats grow through `be_<j>`, not `lv` -- see the block above.
+    apply_enhances(attr, enhance_steps(before, to_lv), RUNE_BONUS_ATTRS)
     return entry, to_lv - before, cost

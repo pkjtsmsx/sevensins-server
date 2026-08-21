@@ -7,6 +7,13 @@ Split out of the former monolithic core.py; depends only on .core.
 import json, time
 import battle as bt
 
+from .runes import apply_enhances, enhance_steps
+
+# A Soulmirror carries ONE sub-stat -- `UISoulFragIcon.SetData` reads `bpt_1/bpv_1` and
+# nothing higher -- against a starshard's four. The enhance machinery is shared; only
+# the slot count differs.
+SOULFRAG_BONUS_ATTRS = 1
+
 from .core import (
     ATTR_ATK,
     QUEST_CASE_OBTAIN_RUNE,
@@ -421,6 +428,11 @@ def upgrade_soulmirror(state, uid, levels):
         if need:
             spend_item(state, iid, need)
     attr[RUNE_ATTR_LEVEL] = to_lv
+    # Same bug, same fix as starshards: the client's `bpv_1 = (be_1 + 1) * _AttrInitV`
+    # has no `lv` term, so writing only the level left the sub-stat frozen at its roll
+    # for the life of the mirror. A Soulmirror carries ONE sub-stat (`bid_1`), hence
+    # SOULFRAG_BONUS_ATTRS rather than runes' four. See runes.py for the cadence note.
+    apply_enhances(attr, enhance_steps(before, to_lv), SOULFRAG_BONUS_ATTRS)
     return entry, to_lv - before, coins, sum(mats.values())
 
 
