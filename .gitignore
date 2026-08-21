@@ -65,3 +65,9 @@ dist/
 
 # ---- Banner art extracted from the bundles (43MB, re-extractable) ----
 banner_art/
+
+# Compiled battle specs are build artifacts of tools/compile_skills.py -- regenerate
+# rather than diffing 12 MB of generated JSON. The per-cast split keeps individual
+# files readable when you do want to inspect one.
+server/battle_data/skills/
+server/battle_data/cinematic_swings.json

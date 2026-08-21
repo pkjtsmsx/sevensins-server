@@ -122,9 +122,15 @@ def status_meta(rows, sid):
 
 
 def effects(rows, r):
-    """-> the effect list, read straight off the opcode slots."""
+    """-> (effects, unknown) read straight off the opcode slots.
+
+    A repeated (op, operand) pair is emitted VERBATIM, one entry per slot, carrying its
+    slot index. It is ambiguous by nature -- sometimes stacks, sometimes the same effect
+    under two different triggers -- and folding repeats into a count is wrong about half
+    the time. See contract doc 6.4.1.
+    """
     acts, ids = r.get("_action") or [], r.get("_actID") or []
-    out = []
+    out, unknown = [], []
     for i, op in enumerate(acts):
         if not op:
             continue
@@ -148,11 +154,14 @@ def effects(rows, r):
         elif op == OP_MODIFY_CD:
             out.append({"op": "modify_cd", "slot": i})
         else:
-            # Trigger conditions and the rarer operandless effects. Kept verbatim rather
-            # than guessed at -- see contract doc 6.3/6.5.
-            out.append({"op": f"raw_{op}", "slot": i,
-                        **({"operand": aid} if aid else {})})
-    return out
+            # Not decoded. Kept OUT of `effects` on purpose: the engine executes
+            # `effects`, so an undecoded opcode sitting in that list would be silently
+            # skipped and a half-understood skill would look identical to a complete
+            # one. In its own list, "which skills do we only partly execute?" is a
+            # query the harness can answer. See contract doc 6.3/6.5.
+            unknown.append({"opcode": op, "slot": i,
+                            **({"operand": aid} if aid else {})})
+    return out, unknown
 
 
 def damage(r):
@@ -201,14 +210,36 @@ def compile_skill(rows, sid, swings_by_act):
     d = damage(r)
     if d:
         spec["effects"].append(d)
-    spec["effects"].extend(effects(rows, r))
+    eff, unknown = effects(rows, r)
+    spec["effects"].extend(eff)
+    if unknown:
+        spec["unknown"] = unknown
     return spec
+
+
+def cast_owners(rows):
+    """-> {skill group id: [cast name, ...]}.
+
+    Grouping by cast NAME rather than char id collapses the variants -- one cast spans
+    several char rows (skins, rarities), and there are only 65 distinct names that own
+    skills at all, 64 of them safe as filenames.
+    """
+    owners = {}
+    for cid, c in (bt.dd.rows("char") or {}).items():
+        name = (c.get("_name_en") or "").strip()
+        if not name or not re.fullmatch(r"[A-Za-z0-9 _.'-]+", name):
+            continue
+        for sk in (c.get("_skills") or []):
+            if sk:
+                owners.setdefault(int(sk), set()).add(name)
+    return {k: sorted(v) for k, v in owners.items()}
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--skill", type=int, action="append", help="compile just these ids")
-    ap.add_argument("--out", default=OUT_DEFAULT)
+    ap.add_argument("--out", default=os.path.join(SERVER, "battle_data/skills"),
+                    help="output DIRECTORY (split per cast)")
     ap.add_argument("--stats", action="store_true")
     args = ap.parse_args()
 
@@ -227,29 +258,58 @@ def main():
                              indent=2, ensure_ascii=False))
         return
 
-    out = {}
-    for sid in rows:
+    owners = cast_owners(rows)
+    # A skill is filed under every cast that can use it. Duplicating a shared skill keeps
+    # each cast file self-contained -- open BELIAL.json and everything Belial does is
+    # there -- which is the whole point of splitting.
+    buckets, index = {}, {}
+    for sid, r in rows.items():
         spec = compile_skill(rows, sid, swings_by_act)
-        if spec:
-            out[str(sid)] = spec
-    with open(args.out, "w") as f:
-        json.dump(out, f, indent=1, ensure_ascii=False, sort_keys=True)
-    print(f"wrote {args.out}: {len(out)} skills")
+        if not spec:
+            continue
+        names = owners.get(int(r.get("_group") or sid)) or []
+        if names:
+            targets = [f"cast/{n}" for n in names]
+        elif spec["type"] == "status":
+            targets = ["_status"]
+        elif spec["type"] == "sub_skill":
+            targets = ["_sub_skill"]
+        else:
+            targets = ["_other"]
+        for t in targets:
+            buckets.setdefault(t, {})[str(sid)] = spec
+        index[str(sid)] = targets[0]
+
+    out = args.out
+    os.makedirs(os.path.join(out, "cast"), exist_ok=True)
+    for name, data in buckets.items():
+        path = os.path.join(out, name + ".json")
+        with open(path, "w") as f:
+            json.dump(data, f, indent=1, ensure_ascii=False, sort_keys=True)
+    with open(os.path.join(out, "_index.json"), "w") as f:
+        json.dump(index, f, indent=1, sort_keys=True)
+    total = sum(len(v) for v in buckets.values())
+    print(f"wrote {out}/: {len(buckets)} files, {len(index)} skills "
+          f"({total} rows incl. shared duplicates)")
 
     if args.stats:
         import collections
-        ops = collections.Counter()
-        unknown = collections.Counter()
-        dmg = 0
-        for s in out.values():
-            for e in s["effects"]:
+        ops, unk = collections.Counter(), collections.Counter()
+        partial = full = 0
+        for sid in index:
+            spec = buckets[index[sid]][sid]
+            for e in spec["effects"]:
                 ops[e["op"]] += 1
-                if e["op"].startswith("raw_"):
-                    unknown[e["op"]] += 1
-            dmg += any(e["op"] == "damage" for e in s["effects"])
-        print("  effect ops:", dict(ops.most_common(8)))
-        print("  skills with a damage entry:", dmg)
-        print("  still-raw opcodes:", dict(unknown.most_common(8)))
+            if spec.get("unknown"):
+                partial += 1
+                for u in spec["unknown"]:
+                    unk[u["opcode"]] += 1
+            elif spec["effects"]:
+                full += 1
+        print("  effect ops        :", dict(ops.most_common(8)))
+        print("  fully decoded     :", full)
+        print("  partially decoded :", partial)
+        print("  unknown opcodes   :", dict(unk.most_common(8)))
 
 
 if __name__ == "__main__":
