@@ -110,35 +110,18 @@ KARMA_DEFAULT = (CUR_CASH, 5, KARMA_TUTORIAL_CHAR, 10)
 KARMA_TIERS = {
     1: (CUR_CASH, 5, 10),      # "Up!"
     2: (CUR_CASH, 10, 20),     # "Big Up!"
-    3: (CUR_CASH, 20, 100),    # "Ultimate Up!"
+    3: (CUR_CASH, 15, 100),    # "Ultimate Up!"
 }
 
-# --- the one balance knob --------------------------------------------------------
+# **`KARMA_TIERS` IS the balance knob.** Change a gem amount here and every decision in
+# the game follows, the observed ones included -- `karma_reward` uses an observation only
+# to learn which GRADE an option is, then pays the amount above. The retail record in
+# `KARMA_OBSERVED` / `KARMA_REWARDS` is preserved as evidence rather than as the live
+# number. Setting 25/50/100 here is the rescale a server user proposed.
 #
-# Multiplies the GEMS every decision pays, and nothing else. Applied at payout time so
-# it covers the dealt grades AND the retail observations alike -- scaling only
-# `KARMA_TIERS` would leave chapter 1's three observed options at their retail amounts
-# while every other scene scaled, which reads as a bug rather than a setting.
-#
-# **Karma (fexp) is deliberately NOT scaled.** `OptionButton.SetReward` picks the banner
-# by karma amount alone, with the bands hardcoded client-side at 20 and 100. Scaling it
-# would collapse the three grades into one band and the banner would stop distinguishing
-# them -- the numbers 10/20/100 are chosen to sit one per band and are not a free
-# parameter.
-#
-# `KARMA_OBSERVED` and the amounts in `KARMA_REWARDS` stay at retail values regardless:
-# they are the record of what the real server paid, and scaling them in place would
-# destroy the only evidence we have. The scale is applied on top, never baked in.
-#
-# 5 reproduces the 25/50/100 a server user proposed.
-KARMA_GEM_SCALE = 1
-
-
-def scaled_gems(amount):
-    """Apply KARMA_GEM_SCALE. Never rounds a real reward down to nothing."""
-    if KARMA_GEM_SCALE == 1:
-        return int(amount)
-    return max(1 if amount else 0, int(round(int(amount) * KARMA_GEM_SCALE)))
+# **Only the gems are free.** `OptionButton.SetReward` picks the banner from the karma
+# amount alone, with the bands hardcoded client-side at 20 and 100, so 10/20/100 are
+# chosen to sit one per band. Changing those collapses the grades into a single banner.
 
 # Which grade each OPTION pays. Every one of the 96 decision scenes has exactly three
 # options, so they map one-to-one onto the three grades.
@@ -497,14 +480,17 @@ def karma_reward(avg_id, option):
     right cast.
     """
     key = (int(avg_id), int(option))
-    if key in KARMA_REWARDS:
-        cur, amount, _char, fexp = KARMA_REWARDS[key]
-    else:
-        tier = KARMA_DECISION_TIER.get(key)
-        cur, amount, fexp = KARMA_TIERS.get(tier) or (
-            KARMA_DEFAULT[0], KARMA_DEFAULT[1], KARMA_DEFAULT[3])
-    # Scaled here, after both branches, so the knob reaches observations too.
-    return cur, scaled_gems(amount), karma_char_for(avg_id), fexp
+    grade = KARMA_DECISION_TIER.get(key)
+    observed = KARMA_REWARDS.get(key)
+    if observed is not None:
+        # An observation settles which GRADE this option is -- its karma amount names the
+        # band outright -- but the payout still comes from KARMA_TIERS, so editing that
+        # table moves every decision including this one.
+        grade = next((g for g, (_c, _a, f) in KARMA_TIERS.items()
+                      if f == observed[3]), grade)
+    cur, amount, fexp = KARMA_TIERS.get(grade) or (
+        KARMA_DEFAULT[0], KARMA_DEFAULT[1], KARMA_DEFAULT[3])
+    return cur, amount, karma_char_for(avg_id), fexp
 
 
 # The identity unlock mask: digit at position i has the value i+1, so option N sits at

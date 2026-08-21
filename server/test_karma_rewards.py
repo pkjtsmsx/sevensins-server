@@ -431,28 +431,28 @@ def check_decision_grades():
     b = [karma.karma_reward(21601, i) for i in range(3)]
     check("a decision pays the same on every call", a == b)
 
-    # Retail observations still win outright.
-    check("an observed option keeps its retail amount",
+    # Default amounts are the retail ones read off the tutorial footage: 5 / 10 / 15.
+    check("an observed option pays its retail amount",
           karma.karma_reward(10107, 1)[1] == 15, str(karma.karma_reward(10107, 1)))
 
-    # KARMA_GEM_SCALE is the one balance knob. It must reach BOTH the dealt grades and
-    # the retail observations -- scaling only the tier table would leave chapter 1
-    # unscaled while every other chapter moved, which reads as a bug, not a setting.
-    old = karma.KARMA_GEM_SCALE
+    # KARMA_TIERS is the balance knob, and it must move EVERY decision -- including the
+    # three with retail observations. Those observations name the grade, not the payout;
+    # if they set the amount too, chapter 1 would stay unscaled while the rest moved.
+    old = dict(karma.KARMA_TIERS)
     try:
-        karma.KARMA_GEM_SCALE = 5
-        check("the gem scale reaches a dealt grade",
-              karma.karma_reward(21601, 0)[1] == 100,
-              str(karma.karma_reward(21601, 0)))
+        karma.KARMA_TIERS = {1: (karma.CUR_CASH, 25, 10),
+                             2: (karma.CUR_CASH, 50, 20),
+                             3: (karma.CUR_CASH, 100, 100)}
+        check("the knob moves a dealt grade",
+              karma.karma_reward(21601, 0)[1] == 100, str(karma.karma_reward(21601, 0)))
         check("...and an observed one too",
-              karma.karma_reward(10107, 1)[1] == 75,
-              str(karma.karma_reward(10107, 1)))
-        # The banner bands are client-side at 20 and 100, so karma must NOT move with it.
-        check("karma is not scaled -- the banner bands depend on it",
+              karma.karma_reward(10107, 1)[1] == 100, str(karma.karma_reward(10107, 1)))
+        # The banner bands are client-side at 20 and 100, so karma must not move.
+        check("karma still lands one per banner band",
               sorted(karma.karma_reward(21601, i)[3] for i in range(3)) == [10, 20, 100])
     finally:
-        karma.KARMA_GEM_SCALE = old
-    check("the knob defaults to retail amounts", karma.karma_reward(21601, 0)[1] == 20)
+        karma.KARMA_TIERS = old
+    check("the knob defaults to retail amounts", karma.karma_reward(21601, 0)[1] == 15)
 
 
 def main():
