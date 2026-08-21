@@ -393,7 +393,7 @@ def check_avg_chapter_resolution():
     check("21601 (stage 3-6) is chapter 3", karma.avg_chapter(21601) == 3,
           str(karma.avg_chapter(21601)))
     check("...and pays Matina, not Caillen",
-          karma.karma_char_for(21601) == karma.KARMA_CHAPTER3_CHAR,
+          karma.karma_char_for(21601) == karma.KARMA_CHAPTER_CHAR[3],
           str(karma.karma_char_for(21601)))
 
 

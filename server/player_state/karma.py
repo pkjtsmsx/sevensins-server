@@ -45,31 +45,35 @@ from .core import (
 # difficulty lets you pick again. That is what `avg_choices` records, and it is fed back
 # to the client as intargs[0] of the AVG sync reply (see titan_server). It also settles
 # the payout question: a scene pays the FIRST time it is decided and never again.
-KARMA_TUTORIAL_CHAR = 11001            # Jacqueline; the portrait matches her, unconfirmed
-KARMA_CHAPTER2_CHAR = 10981            # Caillen
+KARMA_TUTORIAL_CHAR = 11001            # Jacqueline -- also the fallback for any chapter
+                                       # not yet listed below
 
 # Which cast a chapter's decisions pay karma to, keyed by the stage BOOK the scene
 # belongs to. The chapter is resolved from the design data rather than from the avg id's
-# digits: `_avg_stage_index` maps every avg id back to the stage that plays it, so this
-# keeps working if the numbering is not as regular as it looks.
+# digits: `_avg_stage_index` maps every avg id back to the stage that plays it, and the
+# `avg_id // 10000` shortcut is WRONG from chapter 3 on (see avg_chapter).
 #
-# Chapter 1 is Jacqueline (the tutorial portrait). Chapter 2 is Caillen -- she is the
-# cast the chapter is actually about, and paying its karma to Jacqueline was just the
-# fallback showing through.
-KARMA_CHAPTER3_CHAR = 10821            # Matina, "Conflagration"
-KARMA_CHAPTER5_CHAR = 20811            # Leviathan, "Milky Way"
-
+# **Every chapter pays ONE cast -- its antagonist -- for all of its decisions**, which is
+# why this is keyed by chapter and not by scene. Confirmed in play: all three chapter-1
+# decisions pay Jacqueline even though she speaks in only one of them (10103 has no
+# Jacqueline lines at all).
+#
+# **This is not derivable and must be observed.** Two derivations were tried and both are
+# disproven; do not retry them:
+#   * "the most-spoken non-protagonist cast in the scene" -- fails chapter 1 outright,
+#     per the 10103 case above.
+#   * "the chapter's boss" -- chapter 1's last stage does field Jacqueline, but chapter
+#     3's fields Noach while its decisions pay Matina, and chapter 3's decision stages
+#     carry only generic mobs.
+# `tools/avg_decisions.py` lists all 96 decision scenes so a run can confirm a chapter
+# quickly; ~3 per chapter, and chapters 7, 23 and 33 have none.
 KARMA_CHAPTER_CHAR = {
-    1: KARMA_TUTORIAL_CHAR,
-    2: KARMA_CHAPTER2_CHAR,
-    # Chapter 3's decision at 3-6 "It's Punishment Time!" (avg 21601) was observed in
-    # play paying Matina. Note this is the chapter that exposed the avg_chapter bug: the
-    # old `avg_id // 10000` rule read 21601 as chapter 2 and would have paid Caillen.
-    3: KARMA_CHAPTER3_CHAR,
-    # Chapter 5 is Leviathan's -- "Head to Sea Grotto" through "Sea Demon I/II/III", and
-    # its decisions sit at 5-7 and 5-10. Inferred from the stage names, NOT observed on
-    # the banner; correct it if a run shows otherwise.
-    5: KARMA_CHAPTER5_CHAR,
+    1: 11001,      # Jacqueline, "Eccentric Inventor"  -- confirmed in play
+    2: 10981,      # Caillen,    "Knight of Sincerity" -- confirmed in play
+    3: 10821,      # Matina,     "Conflagration"       -- confirmed in play
+    5: 10971,      # Aura,       "Calamity"            -- confirmed in play
+    # Chapters 4, 6 and 8..34 still fall back to Jacqueline and are therefore WRONG.
+    # Each needs one observed decision (or the chapter's antagonist named) to fill in.
 }
 
 # Observed in the tutorial, as (decision, option picked, gems, fexp). These become
