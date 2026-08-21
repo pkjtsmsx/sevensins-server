@@ -25,6 +25,10 @@ import re
 import design_data as dd
 import battle_effects as fx
 
+# Phase-5 cutover switch. Defaults to the old engine: the new one is opt-in until it
+# owns battle state as well as resolution (see engine/bridge.py for exactly what moves).
+NEW_ENGINE = os.environ.get("SEVENSINS_BATTLE_ENGINE", "old").strip().lower() == "new"
+
 # CALIBRATION HOOK (temporary, pairs with patch_design.py's lattice): the served
 # formation table is a 10x10 lattice of candidate positions rather than 5 real slots,
 # so a unit's field position is whichever lattice index we hand it. Sweep positions
@@ -1488,6 +1492,20 @@ class Battle:
         target = self.units.get(defender_order)
         if attacker and target:
             target = self._forced_target(attacker) or target
+
+        if NEW_ENGINE:
+            # The new engine returns None for anything it has no spec for, so an
+            # unsupported skill falls through to the path below rather than failing the
+            # turn. See engine/bridge.py.
+            from engine import bridge
+            combo = bridge.attack_combo(
+                self, attacker_order,
+                target.order if target else defender_order, skill_id)
+            if combo is not None:
+                cmd = json.loads(self.battle_cmd_json(
+                    cur_team=attacker.team if attacker else TEAM_PLAYER))
+                cmd["combo"] = [combo]
+                return json.dumps(cmd, separators=(",", ":"))
 
         # DamageInfo shape (from HandleAttack): a hit is mode 1 with a NEGATIVE amount --
         # IsDamage is `Mode == 1 && Damage < 0`, HasHP is `Mode in (1,2) && Damage != 0`.

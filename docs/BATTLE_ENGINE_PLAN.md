@@ -285,6 +285,63 @@ Measured: **14,410 skills execute and 9,296 serialise with zero `WireError`.**
 
 ---
 
+## Phase 5 — the cutover, and what the differential actually showed
+
+`SEVENSINS_BATTLE_ENGINE=new` routes skill resolution through the new engine while the
+old `Battle` keeps waves, turn order, cooldowns, rewards and the socket.
+`engine/bridge.py` mirrors the live field into `core.Unit`s, resolves, and writes back
+**only HP** plus the damage tallies the clear-rating stars read. Anything more would be
+the new engine reaching into a model it does not own. Default is `old`.
+
+Scope, stated plainly: the new engine does not yet own persistent status state, so the
+flag is for A/B work, not a finished replacement.
+
+### Comparing shape, not numbers
+
+`tools/diff_engines.py` runs both engines over the same field and compares only what the
+client consumes: group count, rows per group, which units are struck, which statuses
+land. Damage amounts are ignored by design — the formula is invented, so identical
+numbers were never the goal.
+
+Two measurement traps had to be removed before the report meant anything:
+
+* **A rider heal is also mode 1.** Counting every mode-1 row as "struck" made Ice Slash
+  (*"Deals 70% ATK as damage and recovers the caster's HP"*) look like a 1-enemy skill
+  hitting two. Struck = mode 1 with `dmg < 0`.
+* **A level-100 party one-shots stage-1101 mobs.** Targets died on the first swing, so
+  both engines legitimately stopped emitting groups — the old one filters empties, the
+  new one trims trailing ones — and two different truncations of a shape *neither* got
+  wrong were reported as swing divergence. The bench now makes everything unkillable for
+  the duration of one skill use. Deaths are excluded from the diff entirely: they follow
+  damage magnitude.
+
+### Result over 560 comparable skill uses
+
+| | count |
+|---|---|
+| shape identical | 171 |
+| status ids differ | 349 |
+| targeting differs | 55 |
+| swing count differs | 54 |
+
+**Every divergence checked resolves in the new engine's favour:**
+
+* **swings — 53 of 54 are the old engine collapsing a multi-hit skill** (old 1 → new 2:
+  38, → 3: 13, → 4: 2). This is the reported bug, quantified: ~9% of sampled skills.
+  The single opposite case is a `hit`-vs-cinematic disagreement of the kind already
+  catalogued in the contract doc (mob and team-skill cinematics), where the cinematic is
+  what the client actually consumes.
+* **statuses — 283 cases where the old engine applied NONE and the new applies some**,
+  against 1 the other way.
+* **targeting — checked against the client's own label table.** `Abyssal Prime` is
+  `Player`, a self-buff: the old engine struck an enemy. `Land Crusher` is `2 enemies`:
+  the old engine struck nobody.
+
+The existing suites still pass on the default path (`test_battle_effects`,
+`test_battle_resume`, `test_battle_auto`), so the flag is additive.
+
+---
+
 ## Risks
 
 * **Trigger timing is the weakest link.** The no-operand opcodes are prose inference, not
