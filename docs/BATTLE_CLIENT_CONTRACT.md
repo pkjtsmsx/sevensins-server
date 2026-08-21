@@ -127,23 +127,43 @@ Corpus distribution of `hit`:
 
 **3,310 skills are multi-hit.**
 
-### Where the cinematics live, and the validator blocker
+### The cinematics: measured, not assumed
 
-Skill cinematics are GameObjects named after `_actName` (`bch016a_s01`), and they live in
-**`data_battle_<hash>.ab`** — not in the per-character `art_character_*` bundles, which
-hold only models, animation clips and face textures.
+Skill cinematics are `BscDataRes` ScriptableObjects named after `_actName`, and they live
+in **`data_battle_<hash>.ab`** — not the per-character `art_character_*` bundles, which
+hold only models, animation clips and face textures. Structure:
 
-That bundle contains **680 cinematics** (`BscDataRes` / `BscRuntimeData`) and **1,125
-`BscHitTimelineData`** objects. `BscHitTimelineData` is the swing: it carries `finalHit`,
-`TargetHitter`/`TargetHittee` and collider sizes. So the per-skill swing count IS
-recoverable from the shipped assets.
+```
+BscDataRes  ->  _runtime : BscRuntimeData
+                  ->  _tracks[] : BscTrackData
+                        ->  _timelines[] : BscTimelineData
+```
 
-**Blocked for now:** associating each `BscHitTimelineData` with its parent cinematic needs
-the GameObject hierarchy, and reading names/fields off these MonoBehaviours requires type
-trees. `TypeTreeGeneratorAPI` is not installed here — the same blocker as repacking the
-design pack; UnityPy's in-house wrapper still needs the dotnet-backed native package.
-Raw-byte parsing returns `None` for the owner names. Until that is installed, a per-skill
-tags-vs-`hit` validator cannot be built.
+**Count `BscTagTimelineData` with `_tag == BscTagKind.Damage (5)`.** Not
+`BscHitTimelineData` — that is a collision record (hitter/hittee colliders, `finalHit`)
+and does not correspond 1:1 with a damage number. Counting hits gave swing counts up to 12
+against a `hit` column that maxes at 5; counting tags gives a distribution that maxes at
+exactly 5.
+
+`tools/skill_cinematics.py` does this. Over the 680 cinematics, joined to 8,705 skills:
+
+| bucket | n |
+|---|---|
+| tagless — `DoAllDamage` path | 2,277 |
+| tagged, `hit` == swings | 6,235 |
+| tagged, disagree | **193** (97.0% agreement) |
+
+**A tagless cinematic is not a mismatch — it selects the other rendering path.**
+`AttackBehavior.DoAllDamage` iterates every group and every row inside it, so a cinematic
+with no Damage tags consumes the whole list at once and the group count need not match
+anything.
+
+So the complete rule for how many groups to send:
+
+* **cinematic has N Damage tags** → send exactly **N** groups; the tag count is the
+  authority and `hit` agrees with it 97% of the time
+* **cinematic has none** → `DoAllDamage` flattens everything; `hit` is the intended swing
+  count and the grouping is free
 
 ### The failure mode when you send too FEW groups
 
