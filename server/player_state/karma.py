@@ -113,6 +113,33 @@ KARMA_TIERS = {
     3: (CUR_CASH, 20, 100),    # "Ultimate Up!"
 }
 
+# --- the one balance knob --------------------------------------------------------
+#
+# Multiplies the GEMS every decision pays, and nothing else. Applied at payout time so
+# it covers the dealt grades AND the retail observations alike -- scaling only
+# `KARMA_TIERS` would leave chapter 1's three observed options at their retail amounts
+# while every other scene scaled, which reads as a bug rather than a setting.
+#
+# **Karma (fexp) is deliberately NOT scaled.** `OptionButton.SetReward` picks the banner
+# by karma amount alone, with the bands hardcoded client-side at 20 and 100. Scaling it
+# would collapse the three grades into one band and the banner would stop distinguishing
+# them -- the numbers 10/20/100 are chosen to sit one per band and are not a free
+# parameter.
+#
+# `KARMA_OBSERVED` and the amounts in `KARMA_REWARDS` stay at retail values regardless:
+# they are the record of what the real server paid, and scaling them in place would
+# destroy the only evidence we have. The scale is applied on top, never baked in.
+#
+# 5 reproduces the 25/50/100 a server user proposed.
+KARMA_GEM_SCALE = 1
+
+
+def scaled_gems(amount):
+    """Apply KARMA_GEM_SCALE. Never rounds a real reward down to nothing."""
+    if KARMA_GEM_SCALE == 1:
+        return int(amount)
+    return max(1 if amount else 0, int(round(int(amount) * KARMA_GEM_SCALE)))
+
 # Which grade each OPTION pays. Every one of the 96 decision scenes has exactly three
 # options, so they map one-to-one onto the three grades.
 #
@@ -476,7 +503,8 @@ def karma_reward(avg_id, option):
         tier = KARMA_DECISION_TIER.get(key)
         cur, amount, fexp = KARMA_TIERS.get(tier) or (
             KARMA_DEFAULT[0], KARMA_DEFAULT[1], KARMA_DEFAULT[3])
-    return cur, amount, karma_char_for(avg_id), fexp
+    # Scaled here, after both branches, so the knob reaches observations too.
+    return cur, scaled_gems(amount), karma_char_for(avg_id), fexp
 
 
 # The identity unlock mask: digit at position i has the value i+1, so option N sits at

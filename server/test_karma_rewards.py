@@ -435,6 +435,25 @@ def check_decision_grades():
     check("an observed option keeps its retail amount",
           karma.karma_reward(10107, 1)[1] == 15, str(karma.karma_reward(10107, 1)))
 
+    # KARMA_GEM_SCALE is the one balance knob. It must reach BOTH the dealt grades and
+    # the retail observations -- scaling only the tier table would leave chapter 1
+    # unscaled while every other chapter moved, which reads as a bug, not a setting.
+    old = karma.KARMA_GEM_SCALE
+    try:
+        karma.KARMA_GEM_SCALE = 5
+        check("the gem scale reaches a dealt grade",
+              karma.karma_reward(21601, 0)[1] == 100,
+              str(karma.karma_reward(21601, 0)))
+        check("...and an observed one too",
+              karma.karma_reward(10107, 1)[1] == 75,
+              str(karma.karma_reward(10107, 1)))
+        # The banner bands are client-side at 20 and 100, so karma must NOT move with it.
+        check("karma is not scaled -- the banner bands depend on it",
+              sorted(karma.karma_reward(21601, i)[3] for i in range(3)) == [10, 20, 100])
+    finally:
+        karma.KARMA_GEM_SCALE = old
+    check("the knob defaults to retail amounts", karma.karma_reward(21601, 0)[1] == 20)
+
 
 def main():
     for fn in (check_table_matches_the_screenshot, check_a_single_rank_up_pays_once,
