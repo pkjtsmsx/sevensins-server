@@ -125,9 +125,44 @@ Corpus distribution of `hit`:
 | 4 | 101 | |
 | 5 | 12 | |
 
-**3,310 skills are multi-hit.** `_actName` prefabs are in the shipped bundles, so the tag
-count is independently checkable per skill — a validator can compare tags vs `hit` and
-give ground truth for the whole corpus.
+**3,310 skills are multi-hit.**
+
+### Where the cinematics live, and the validator blocker
+
+Skill cinematics are GameObjects named after `_actName` (`bch016a_s01`), and they live in
+**`data_battle_<hash>.ab`** — not in the per-character `art_character_*` bundles, which
+hold only models, animation clips and face textures.
+
+That bundle contains **680 cinematics** (`BscDataRes` / `BscRuntimeData`) and **1,125
+`BscHitTimelineData`** objects. `BscHitTimelineData` is the swing: it carries `finalHit`,
+`TargetHitter`/`TargetHittee` and collider sizes. So the per-skill swing count IS
+recoverable from the shipped assets.
+
+**Blocked for now:** associating each `BscHitTimelineData` with its parent cinematic needs
+the GameObject hierarchy, and reading names/fields off these MonoBehaviours requires type
+trees. `TypeTreeGeneratorAPI` is not installed here — the same blocker as repacking the
+design pack; UnityPy's in-house wrapper still needs the dotnet-backed native package.
+Raw-byte parsing returns `None` for the owner names. Until that is installed, a per-skill
+tags-vs-`hit` validator cannot be built.
+
+### The failure mode when you send too FEW groups
+
+`AttackBehavior.BscTag`, `case 5` (Damage), decompiled:
+
+```
+DmgInfo = Args[0].DmgInfo
+if (DmgInfo.Count >= 1) {          <-- guarded
+    OnDamageAndNumber(DmgInfo[0])
+    DmgInfo.RemoveAt(0)
+}
+return
+```
+
+The read is **guarded**, so running out of groups does not throw. The swing simply
+animates with **no damage number** and the fight carries on. That is the exact symptom of
+undersupplying `data`: "the animation plays but no number comes up on some hits". Note
+how different this is from the too-many-rows-per-group case below, which throws and stalls
+the fight -- one bug is silent-and-cosmetic, the other is silent-and-fatal.
 
 ### The other hard constraint on `data`
 
@@ -177,8 +212,25 @@ status is defined identically across every skill that applies it — so definiti
 cross-validated against each other rather than trusted from one row.
 
 `note2_en` is the per-level bonus list (`Skill Damage +32%`, `Skill CD -1`,
-`All DMG Reduction Target +1 Cast(s)`) — i.e. how the numbers, cooldown and **breadth**
-change up the `group`/`lv` chain.
+`All DMG Reduction Target +1 Cast(s)`).
+
+**But note2 is redundant for an engine, and should not be parsed.** Each level is already
+its own fully self-describing row, reached via `group`/`lv` and `GetSkillByLV(orgID, lv)`:
+
+```
+2087111 lv1 coef= 92%  target=7  cd=4  hit=4
+2087112 lv2 coef=100%  target=7  cd=4  hit=4
+2087113 lv3 coef=108%  target=7  cd=4  hit=4
+2087114 lv4 coef=116%  target=8  cd=3  hit=4     <- breadth AND cd change here
+2087115 lv5 coef=124%  target=8  cd=3  hit=4
+2087116 lv6 coef=132%  target=8  cd=3  hit=4
+```
+
+So `note2` only *displays* the delta the next row already encodes. Just as well: of its
+17,638 bonus lines across 7,342 skills, only **68.6% match a `+N`/`-N` shape** — the rest
+are source typos (`Skilll Damage`, `Skill DMG` and `Skill Damage` all coexist),
+untranslated Chinese, and internal dev notes (`追加普攻判定用`, `月明慈光專用`). Reading the
+per-level row avoids that entire mess.
 
 ---
 
