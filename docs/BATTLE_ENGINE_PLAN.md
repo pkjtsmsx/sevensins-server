@@ -408,7 +408,53 @@ formula from an overlevelled fight is how this was first misread. Always calibra
 
 ---
 
-## Phase 6 — status STATE (the next piece, and the largest remaining gap)
+## The endgame: retiring `battle.py`
+
+The destination is deleting the old engine, and that changes how phase 6 should be built.
+The bridge exists so the two can coexist; every seam added to it is scaffolding to be
+deleted later. So the ordering principle is: **prefer a move that lets old code be
+deleted over one that adds bridge code.**
+
+### `Battle` is not one thing
+
+42 methods, 880 lines, 29 of them public. `titan_server` touches 37 distinct names on it.
+Grouped by what they actually are:
+
+| concern | rough size | status |
+|---|---|---|
+| combat resolution (`attack_cmd_json`, `damage`) | ~190 lines | **already replaced** |
+| rewards & results (ratings, drops, collector) | ~160 lines | progression, NOT engine |
+| story hooks (`avg`, the three AVG lists) | small | progression, NOT engine |
+| turn & wave flow (`end_turn`, `advance_wave`, `action_order`) | ~45 lines | to move |
+| skills (`spend_skill`, `usable_slots`, `judge_args`) | ~45 lines | to move |
+| party & AI (`swap_units`, `auto_move`) | ~40 lines | to move |
+| wire payloads (`battle_datas_json`, `battle_cmd_json`) | ~65 lines | to move |
+| persistence (`to_state`) | small | to move |
+
+**Roughly half of `battle.py` is progression bookkeeping, not a battle engine.** Ratings,
+drops and AVG hooks work, are well covered by tests, and would gain nothing from a
+rewrite. "Delete the old system" really means "delete the old COMBAT system", which is a
+much smaller target than the line count suggests.
+
+### The pivot: one unit model
+
+The cheapest move that turns every later step into a deletion is to stop having two Unit
+classes. `core.Unit` already carries the combat stats; the old `bt.Unit` adds 19 fields,
+almost all identity or progression (`char_id`, `lv`, `star`, `uid`, `skills`, `index`,
+`job`, the pact and gear fields) plus a little battle state (`scv`, `cooldowns`,
+`charge`, the damage tallies).
+
+Blast radius, measured: **2 places construct a Unit and 4 references spell it
+`.defense`**, all inside `battle.py`.
+
+Once `Battle.units` holds `core.Unit`, both engines read and write the same object, and
+the bridge stops needing to mirror anything. After that each responsibility moves by
+deleting the old implementation rather than by adding a sync for it — including status
+state, which is why this belongs BEFORE phase 6 rather than after.
+
+---
+
+## Phase 6 — status STATE (the largest remaining gap)
 
 The engine applies statuses; nothing tracks them. They are written to the wire, the
 client shows the icon and counts the duration down itself, but no server-side record
