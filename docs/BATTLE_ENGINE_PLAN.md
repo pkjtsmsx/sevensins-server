@@ -232,6 +232,59 @@ is `null`, never `0`.
 
 ---
 
+## Phase 3 / 4 as built
+
+`server/engine/` — a package, not more modules beside `battle.py`, so the boundary with
+the old engine is visible. Nothing in it imports the old engine and nothing in it knows
+what JSON looks like except `wire`.
+
+| module | owns |
+|---|---|
+| `specs` | loading the compiled skill/status artifacts |
+| `formula` | damage arithmetic, the attribute triangle — every tunable named, in one file |
+| `core` | target resolution, execution, recursive follow-ups with a depth guard |
+| `wire` | the ONLY place `data` is built, and where the invariants are asserted |
+
+### The wire contract, decompiled
+
+`AttackJsonData` carries only two `[JsonProperty]` fields — `passiveID` → `pskill_id` and
+`DmgInfo` → `data`. `caster` and `skill` arrive through `.ctor(string caster, int skill)`,
+which Newtonsoft matches to JSON keys by **parameter name**, so they are real wire keys
+with no attribute to find.
+
+`DamageInfo`: `Order c, Mode md, ChargeType cg, Damage dmg, nCri cri, nDie die,
+status status, Extra extra, passiveIconList picons, passiveID pskill_id`.
+
+`Mode`, from `AttackBehavior.OnDamage` (0x1BE2A18):
+
+| mode | meaning |
+|---|---|
+| 1 | HP change. `Damage < 0` plays the hurt voice, records `CurInjures`, calls `PlayInjured` — so **damage rides NEGATIVE, healing positive** |
+| 2 | revive — calls `doRebornUnit` then returns **early**, so a mode-2 row's `status`/`extra` are never read |
+| 4 | move gauge — `ShowScvBar` |
+| 5 | special-cased in `OnDamageAndNumber`: the unit lookup is skipped entirely |
+
+### The three asserted invariants, and why each is silent without the assert
+
+* **one group per cinematic swing.** `BscTag` case 5 reads `DmgInfo[0]` behind a
+  `Count >= 1` guard, so too few groups does not throw — the swing animates with no
+  damage number. Silent and cosmetic.
+* **at most one row per (unit, mode) per group.** The client reads each group into a
+  `Dictionary<string,bool>` keyed by target order; a duplicate throws "same key has
+  already been added", the generic handler swallows it, and the attacker never yields its
+  turn. Silent and **fatal**. Natural duplicates are folded by summing — one number per
+  target per swing is all the shape can express, and the total is unchanged.
+* **`die` on exactly one row per unit.** Rows carry final state, so a unit killed on
+  swing 1 reads as dead on every later row and replays its death animation.
+
+A fourth falls out of the tag contract: a **trailing** empty group is legitimate (every
+target died before the later swings landed), an **interior** one is not — it would shift
+every subsequent group onto the wrong tag.
+
+Measured: **14,410 skills execute and 9,296 serialise with zero `WireError`.**
+
+---
+
 ## Risks
 
 * **Trigger timing is the weakest link.** The no-operand opcodes are prose inference, not

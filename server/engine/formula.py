@@ -91,8 +91,10 @@ ATTRIBUTE_NAME = {NONE: None, ABYSS: "ABYSS", STR: "STR", AGI: "AGI",
 #
 # so red->yellow->blue->red is STR -> TEC -> AGI -> STR.
 #
-# SOLAR / ABYSS are NOT in the triangle -- only ten characters have them. They are
-# treated as mutually advantaged, which is the one genuinely unverified entry here;
+# SOLAR / ABYSS are NOT in the triangle -- only ten characters have them, and they are
+# neutral against STR/AGI/TEC. Against each other they are MUTUALLY advantaged: both
+# sides get the advantage package, neither is ever disadvantaged. Player-confirmed rather
+# than extracted, like the magnitudes below; the pack says nothing about it either way.
 # `advantage()` derives both directions from this dict, so changing it cannot leave the
 # two halves inconsistent.
 BEATS = {STR: TEC, TEC: AGI, AGI: STR, SOLAR: ABYSS, ABYSS: SOLAR}

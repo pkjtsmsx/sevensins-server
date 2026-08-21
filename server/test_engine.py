@@ -10,7 +10,7 @@ that looked healthy in the log while the client drew the wrong thing.
 import random
 import sys
 
-from engine import core, formula, specs
+from engine import core, formula, specs, wire
 
 _fail = 0
 
@@ -175,6 +175,10 @@ def main():
     check("SOLAR/ABYSS sit outside the triangle",
           formula.advantage(formula.SOLAR, formula.STR) == 0
           and formula.advantage(formula.ABYSS, formula.TEC) == 0)
+    # Mutual, not a one-way counter: both sides get the advantage package.
+    check("SOLAR and ABYSS are mutually advantaged",
+          formula.advantage(formula.SOLAR, formula.ABYSS) == 1
+          and formula.advantage(formula.ABYSS, formula.SOLAR) == 1)
     check("job 0 (hidden badge) is neutral",
           formula.advantage(formula.NONE, formula.STR) == 0)
 
@@ -211,12 +215,61 @@ def main():
     print(f"        (mean damage: advantage {up:.0f}, neutral {neutral:.0f}, "
           f"disadvantage {down:.0f})")
 
+    print("\nserialiser (phase 4):")
+    caster, units = field()
+    out = core.execute(caster, specs.skill(2087111), units, random.Random(7))
+    js = wire.attack_json(out)
+    check("one group per cinematic swing", len(js["data"]) == out.swings,
+          f"{len(js['data'])} vs {out.swings}")
+    check("damage rides NEGATIVE (IsDamage is Mode==1 && Damage<0)",
+          all(r["dmg"] < 0 for g in js["data"] for r in g
+              if r["md"] == wire.MODE_HP))
+    check("caster and skill are on the payload",
+          js["caster"] == "101" and js["skill"] == 2087111)
+    check("statuses hang off the lead row",
+          bool(js["data"][0][0]["status"])
+          and all(len(e) == 3 for e in js["data"][0][0]["status"]))
+
+    # The fatal one: a duplicate throws inside the client's dictionary insert, the
+    # exception is swallowed, and the attacker never yields its turn.
+    dup = [[wire._row("200", wire.MODE_HP, -5), wire._row("200", wire.MODE_HP, -7)]]
+    try:
+        wire._assert_invariants(dup, 1)
+        check("a duplicate unit in one group is rejected", False, "no WireError")
+    except wire.WireError:
+        check("a duplicate unit in one group is rejected", True)
+
+    # And the same case must be FOLDED, not emitted, when it arises naturally.
+    folded = wire.attack_json(_two_hits_one_target())
+    rows = [r for g in folded["data"] for r in g if r["md"] == wire.MODE_HP]
+    check("two strikes on one target in one swing fold into one row",
+          len(rows) == 1 and rows[0]["dmg"] == -30, f"{rows}")
+
+    dead = [[wire._row("200", wire.MODE_HP, -5, died=True)],
+            [wire._row("200", wire.MODE_HP, -5, died=True)]]
+    try:
+        wire._assert_invariants(dead, 2)
+        check("die on two rows for one unit is rejected", False, "no WireError")
+    except wire.WireError:
+        check("die on two rows for one unit is rejected", True)
+    wire.clear_die_except_last(dead)
+    check("clear_die_except_last keeps exactly the last",
+          dead[0][0]["die"] == 0 and dead[1][0]["die"] == 1)
+
+    try:
+        wire.attack_json(_interior_gap())
+        check("an interior empty group is rejected", False, "no WireError")
+    except wire.WireError:
+        check("an interior empty group is rejected", True)
+
     print("\nwhole-corpus smoke -- nothing may raise:")
     crashed, ran = [], 0
     for sid, spec in specs.skills().items():
         c, u = field()
         try:
-            core.execute(c, spec, u, random.Random(sid % 1000), apply_damage=False)
+            o = core.execute(c, spec, u, random.Random(sid % 1000), apply_damage=False)
+            if o.strikes or o.heals or o.gauge or o.revives:
+                wire.attack_json(o)          # serialising must not raise either
             ran += 1
         except Exception as exc:                              # noqa: BLE001
             crashed.append((sid, f"{type(exc).__name__}: {exc}"))
@@ -226,6 +279,21 @@ def main():
 
     print(f"\n{_fail} failure(s)")
     return 1 if _fail else 0
+
+
+def _two_hits_one_target():
+    """An outcome with two strikes on the same unit in the same swing."""
+    o = core.Outcome(caster="101", skill_id=0, swings=1, targets=["200"])
+    o.strikes = [core.Strike(swing=0, target="200", amount=10),
+                 core.Strike(swing=0, target="200", amount=20)]
+    return o
+
+
+def _interior_gap():
+    """Swing 0 lands nothing, swing 1 lands -- which would pair damage with swing 0."""
+    o = core.Outcome(caster="101", skill_id=0, swings=2, targets=["200"])
+    o.strikes = [core.Strike(swing=1, target="200", amount=10)]
+    return o
 
 
 def _fresh(spec):
