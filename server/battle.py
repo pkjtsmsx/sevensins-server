@@ -24,6 +24,7 @@ import re
 
 import design_data as dd
 import battle_effects as fx
+from engine import core as _engine_core
 
 # Phase-5 cutover switch. Defaults to the old engine: the new one is opt-in until it
 # owns battle state as well as resolution (see engine/bridge.py for exactly what moves).
@@ -865,10 +866,22 @@ def skill_ratio(skill_id):
     return ratio
 
 
-class Unit:
+class Unit(_engine_core.Unit):
     """One combatant. `order` is the dictionary key the client uses everywhere --
     BattleUnitManager stores units by it and every later message (damage targets,
-    turn order, HP sync) refers to units by this string."""
+    turn order, HP sync) refers to units by this string.
+
+    Subclasses the ENGINE's unit rather than duplicating it, so the server has exactly
+    one combatant model. The base carries the combat stats the new engine reads;
+    everything added here is identity, progression or wire serialisation that the old
+    engine still owns. Because it is ONE object there is nothing to mirror -- a status
+    the engine applies lands on the same list this class serialises.
+
+    The base is a dataclass but this defines its own `__init__` and never calls
+    `super().__init__`: the base's scalar fields (`cri`, `ddi`, ...) are plain class
+    attributes and read correctly unset, while `statuses` uses a default_factory and so
+    is assigned explicitly below.
+    """
 
     def __init__(self, order, char_id, team, index, lv=1, star=None, super_star=0,
                  book_bonus=None, uid="", skill_limit=0, pact_iid=0, pact_lv=0,
@@ -890,7 +903,11 @@ class Unit:
         self.row = row
         # STR/AGI/TEC class, for "if the target is a STR Type cast" gates: _job 2/3/4
         # (CommonUtil.GetJobUseText renders job names via GetText(job + 12099)).
-        self.job = row.get("_job") or 0
+        # `_job` IS the attribute (STR/AGI/TEC/ABYSS/SOLAR); see engine.formula for how
+        # that was established. Kept under both names: `job` because the class-aura code
+        # reads it that way, `attribute` because that is the base class field the
+        # engine's advantage triangle reads.
+        self.job = self.attribute = row.get("_job") or 0
         self.lv = lv
         self.star = star or _default_star(row)
         # LightBattleChar carries only Star, so super_star never crosses the wire --
@@ -914,7 +931,7 @@ class Unit:
         self.max_hp = stats["hp"] + bonus.get("hp", 0) + gear.get("hp", 0)
         self.hp = self.max_hp
         self.atk = stats["atk"] + bonus.get("atk", 0) + gear.get("atk", 0)
-        self.defense = stats["def"] + bonus.get("def", 0) + gear.get("def", 0)
+        self.defence = stats["def"] + bonus.get("def", 0) + gear.get("def", 0)
         self.spd = stats["spd"] + gear.get("spd", 0)
         # The blue bar under each character's HP: the 0..100 MOVE GAUGE. It fills at
         # the unit's own SPD (Battle._roll_turn_order) and empties when the unit takes
@@ -1061,7 +1078,7 @@ class Unit:
         them as zeros rather than omitting them."""
         return {
             "hp": self.hp if current else self.max_hp,
-            "atk": self.atk, "def": self.defense, "spd": self.spd,
+            "atk": self.atk, "def": self.defence, "spd": self.spd,
             "scv": int(self.scv) if current else SCV_FULL,
             "cri": 0, "tgn": 0, "cdi": 0, "cdr": 0, "prc": 0,
             "ehit": 0, "eanti": 0, "ddi": 0, "ddr": 0,
@@ -1345,7 +1362,7 @@ class Battle:
         """A damage-reduction function the effect engine calls per target: the client's
         own defend-ratio curve applied to the target's post-status DEF."""
         return lambda u: defend_ratio(
-            u.defense * fx.stat_multiplier(u.statuses, "DEF")
+            u.defence * fx.stat_multiplier(u.statuses, "DEF")
             + fx.flat_bonus(u.statuses, "DEF"))
 
     def _forced_target(self, attacker):
@@ -1736,7 +1753,7 @@ class Battle:
     def damage(attacker, target, skill_id):
         """atk * the skill's coefficient, reduced by the target's defence."""
         raw = attacker.atk * skill_ratio(skill_id)
-        return max(1, int(raw * (1.0 - defend_ratio(target.defense))))
+        return max(1, int(raw * (1.0 - defend_ratio(target.defence))))
 
     # -- flow -------------------------------------------------------------
     def acting_unit(self):

@@ -43,9 +43,9 @@ def check(name, cond, detail=""):
 
 
 class MockUnit:
-    def __init__(self, team, order, atk=1000, hp=5000, spd=300, defense=200):
+    def __init__(self, team, order, atk=1000, hp=5000, spd=300, defence=200):
         self.atk = atk; self.hp = hp; self.max_hp = hp; self.team = team
-        self.spd = spd; self.defense = defense; self.statuses = []; self.order = order
+        self.spd = spd; self.defence = defence; self.statuses = []; self.order = order
 
     @property
     def alive(self):

@@ -15,7 +15,7 @@ this file -- see docs/BATTLE_SKILL_PLAN.md.
 
 Design goals:
   * DECOUPLED from battle.py's Unit/Battle -- the engine talks through a tiny protocol
-    (a unit exposes .atk/.defense/.hp/.max_hp/.team/.spd/.statuses/.alive/.order), so it
+    (a unit exposes .atk/.defence/.hp/.max_hp/.team/.spd/.statuses/.alive/.order), so it
     unit-tests against mocks and wires into battle.py without a circular import.
   * SAFE-BY-DEFAULT -- only skills flagged `complete` are trusted; anything else falls
     back to the caller's simple-damage path.
@@ -113,7 +113,7 @@ RANGE_FIXED = {1: 1, 6: 2, 7: 3, 8: 4}
 RANGE_RANDOM = {9: 1, 10: 2, 11: 3, 12: 4}
 # range -> (unit attribute, take the biggest?)
 RANGE_PICK = {13: ("hp", True), 14: ("hp", False),
-              15: ("defense", True), 16: ("defense", False),
+              15: ("defence", True), 16: ("defence", False),
               17: ("atk", True), 18: ("atk", False), 19: ("spd", True)}
 
 
@@ -390,7 +390,7 @@ def resolve_targets(token, attacker, primary, allies, enemies):
         if not pool:
             return []
         key = {"hp": lambda u: u.hp, "atk": lambda u: u.atk,
-               "spd": lambda u: u.spd, "def": lambda u: u.defense}.get(stat)
+               "spd": lambda u: u.spd, "def": lambda u: u.defence}.get(stat)
         return [max(pool, key=key)] if key else [pool[0]]
     # "enemy_target" / default: the unit the caster chose. EVERY op of the skill stays on
     # that same unit -- even if an earlier hit in the same combo killed it (the follow-on

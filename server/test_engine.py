@@ -38,6 +38,36 @@ def field(n_enemy=5, **kw):
                                for i in range(n_enemy)]
 
 
+
+def check_shared_unit_model():
+    """One combatant model: battle.Unit IS an engine Unit.
+
+    The pivot toward retiring the old engine. While there were two Unit classes the
+    bridge had to copy state between them, and every later move would have needed its own
+    sync; sharing the object means each move is a deletion instead.
+    """
+    import battle as bt
+
+    check("battle.Unit subclasses the engine's Unit",
+          issubclass(bt.Unit, core.Unit))
+
+    # A unit is an entity, not a value. With the dataclass's generated __eq__ two
+    # combatants rolled with identical stats would compare equal, and `unit in targets`
+    # would match the wrong one.
+    a = unit("101", core.TEAM_PLAYER)
+    b = unit("102", core.TEAM_PLAYER)
+    a.hp = b.hp = a.atk = b.atk = 1
+    check("units compare by identity, not by field values", a != b)
+    check("...and a unit still equals itself", a == a)
+
+    # The engine reads `defence`; the old spelling is gone rather than aliased, so a
+    # stale reader fails loudly. That matters because battle_effects looked its stat
+    # names up with `getattr(u, stat, 0)` -- a DEFAULT -- so a missed rename would have
+    # silently made every unit's DEF read as 0 for "highest DEF" targeting.
+    check("there is one spelling of defence", hasattr(a, "defence"))
+    check("...and the old one is not silently aliased", not hasattr(a, "defense"))
+
+
 def main():
     print("\ntargeting:")
     caster, units = field()
@@ -224,6 +254,9 @@ def main():
           f"{up:.0f} / {neutral:.0f} / {down:.0f}")
     print(f"        (mean damage: advantage {up:.0f}, neutral {neutral:.0f}, "
           f"disadvantage {down:.0f})")
+
+    print("\nshared unit model:")
+    check_shared_unit_model()
 
     print("\nserialiser (phase 4):")
     caster, units = field()

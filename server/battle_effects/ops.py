@@ -21,7 +21,7 @@ def _damage(eff, ctx):
     # Effective attacker ATK/DEF: base scaled by the attacker's own statuses (Keen +,
     # Fracture -) plus any flat mod.
     eff_atk = effective_atk(a)
-    eff_def = a.defense * stat_multiplier(a.statuses, "DEF") + flat_bonus(a.statuses, "DEF")
+    eff_def = a.defence * stat_multiplier(a.statuses, "DEF") + flat_bonus(a.statuses, "DEF")
     for u in ctx.targets(eff.get("target")):
         for i in range(times):
             mitigable = (eff_atk * pct + eff_def * pct_def) / 100.0

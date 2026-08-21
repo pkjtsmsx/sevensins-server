@@ -6,22 +6,23 @@ rewards and the socket; only the *resolution of one skill use* moves across.
 
     SEVENSINS_BATTLE_ENGINE=new
 
-**Scope, stated plainly.** The new engine owns damage, targeting, swing structure and the
-**Statuses this path applies are COSMETIC.** They are written to the wire -- the client
-shows the icon and counts the duration down itself -- but nothing writes them into the
-old `Battle`'s own status list, so the server holds no record and they have no mechanical
-effect. A Freeze lands, the icon appears, and the target acts on its next turn anyway.
+The new engine owns damage, targeting, swing structure and the `data` payload.
 
-That is the largest remaining gap and the reason this flag is A/B work rather than a
-replacement: on the new path the engine applies statuses to ~21,400 sites that the old
-one largely ignored, and today every one of them is decoration. Fixing it means moving
-status STATE across (apply, tick, expire, and the stat/turn effects that read it), which
-is a bigger change than the resolution move was -- the old engine ticks statuses inside
-`end_turn` and reads them in damage, targeting and turn skipping.
+**There is nothing to mirror.** `battle.Unit` subclasses `engine.core.Unit`, so both
+engines operate on the same objects: `execute` mutates the battle's own units directly
+and this module only records the old engine's separate bookkeeping (the damage tallies
+the clear-rating stars read, and the move gauge, which travels in `sync` rather than in
+`data`).
 
-The mirror is deliberately one-way per call: build `core.Unit` mirrors, resolve, then
-write back only HP. Anything else written back would be the new engine quietly reaching
-into a model it does not own.
+**Statuses this path applies are still COSMETIC.** They reach the wire -- the client
+shows the icon and counts the duration down itself -- and now they also land on the
+unit's own `statuses` list, since it is one shared object. But nothing ticks or reads
+them on the new path: expiry, the stat and damage modifiers, and turn skipping all live
+in the old engine's `battle_effects`, which is keyed to its own status representation.
+So a Freeze shows, and the target still acts.
+
+That is the largest remaining gap, and the shared unit model is what makes closing it a
+deletion rather than another sync: the state is already in the right place.
 """
 import random
 
@@ -30,29 +31,13 @@ from . import core, specs, wire
 SCV_FULL = 100.0
 
 
-def _mirror(battle):
-    """-> {order: core.Unit} reflecting the old battle's live field."""
-    out = {}
-    for order, u in battle.units.items():
-        out[order] = core.Unit(
-            order=order, team=u.team, max_hp=u.max_hp, hp=u.hp,
-            atk=u.atk, defence=u.defense, spd=u.spd,
-            attribute=core.attribute_of(u.char_id))
-    return out
+def _write_back(battle, outcome):
+    """Record what the turn did on the battle's own bookkeeping.
 
-
-def _write_back(battle, mirrors, outcome):
-    """Push HP back onto the old units, and nothing else.
-
-    Damage totals are also fed to the old battle's tallies because the clear-rating
-    stars read them; skipping that would silently change star awards on the new path.
+    HP no longer needs copying -- `execute` already mutated these exact objects. What
+    still has to happen here is the OLD engine's own accounting: the clear-rating stars
+    read the damage tallies, so skipping them would silently change star awards.
     """
-    for order, m in mirrors.items():
-        u = battle.units.get(order)
-        if u is None:
-            continue
-        u.hp = max(0, int(m.hp))
-
     # The move gauge travels in `sync`, NOT as a mode-4 DamageInfo row (see wire.py).
     # Applied here so the next BattleCmd carries the new Scv.
     for g in _flat_gauge(outcome):
@@ -101,16 +86,18 @@ def attack_combo(battle, attacker_order, defender_order, skill_id, rng=None):
     spec = specs.skill(skill_id)
     if spec is None:
         return None
-    mirrors = _mirror(battle)
-    caster = mirrors.get(attacker_order)
+    # The battle's OWN units go straight in: `battle.Unit` subclasses `core.Unit`, so
+    # there is one model and nothing to copy. Damage, heals and statuses land on the
+    # objects the old engine also reads -- which is the whole point of the shared model.
+    caster = battle.units.get(attacker_order)
     if caster is None:
         return None
 
-    outcome = core.execute(caster, spec, list(mirrors.values()),
+    outcome = core.execute(caster, spec, list(battle.units.values()),
                            rng or random.Random(), chosen=defender_order)
     if not (outcome.strikes or outcome.heals or outcome.gauge or outcome.revives):
         return None
 
     payload = wire.attack_json(outcome, caster_order=attacker_order, skill_id=skill_id)
-    _write_back(battle, mirrors, outcome)
+    _write_back(battle, outcome)
     return payload

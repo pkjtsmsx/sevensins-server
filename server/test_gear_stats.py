@@ -200,9 +200,9 @@ def check_battle_applies_gear():
     u0 = next(u for u in b0.units.values()
               if u.team == bt.TEAM_PLAYER and u.uid == uid0)
     check("an ungeared cast still fights at exactly its base stats",
-          (u0.atk, u0.defense, u0.max_hp, u0.spd)
+          (u0.atk, u0.defence, u0.max_hp, u0.spd)
           == (base["atk"], base["def"], base["hp"], base["spd"]),
-          f"{u0.atk}/{u0.defense}/{u0.max_hp}/{u0.spd} vs {base}")
+          f"{u0.atk}/{u0.defence}/{u0.max_hp}/{u0.spd} vs {base}")
 
     rng = random.Random(3)
     entry["equips_list"] = [
@@ -220,7 +220,7 @@ def check_battle_applies_gear():
               if u.team == bt.TEAM_PLAYER and u.uid == uid0)
     check("the fight uses the geared ATK", u1.atk == base["atk"] + bonus["atk"],
           f"{u1.atk} vs {base['atk']}+{bonus['atk']}")
-    check("  ...DEF", u1.defense == base["def"] + bonus["def"])
+    check("  ...DEF", u1.defence == base["def"] + bonus["def"])
     check("  ...HP", u1.max_hp == base["hp"] + bonus["hp"])
     # SPD is CharAttribute 5, not 4 -- an earlier draft used 4 and dropped every roll.
     check("  ...and SPD, which is attribute 5 not 4",

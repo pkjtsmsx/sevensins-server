@@ -36,9 +36,19 @@ def attribute_of(char_id):
 MAX_FOLLOW_DEPTH = 4
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(eq=False)
 class Unit:
     """The engine's view of a combatant. Whatever the caller stores is its own business.
+
+    **This is the shared unit model.** `battle.Unit` subclasses it and adds the identity,
+    progression and wire-serialisation the old engine still owns, so both engines read
+    and write ONE object -- the bridge does not mirror state between two models, and a
+    status applied here is a status the old code sees. Keep this class lean: anything
+    that knows about JSON, the design pack or the roster belongs in the subclass.
+
+    `eq=False` on purpose. A unit is an entity, not a value: two combatants with
+    identical stats are different units, and the generated field-wise `__eq__` would make
+    `unit in targets` match the wrong one.
 
     `attribute` is the char row's `_job` -- see `formula` for the mapping and how it was
     established. Use `attribute_of(char_id)` rather than passing a literal. 0/None is
