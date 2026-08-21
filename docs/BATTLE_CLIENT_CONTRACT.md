@@ -384,6 +384,32 @@ attack) rows whose leftovers show up in `note2`.
 
 So op 117 = *pursue / counter / follow-up*, and the sub-skill is itself a full skill spec.
 
+### 6.4.1 A repeated (op, operand) slot is AMBIGUOUS
+
+The same `(112, status)` pair often appears in two slots. It means one of two different
+things, and the opcodes do not say which:
+
+* **stacks** — Gabriel's Pure Flash is `[117, 115, 112, 112]` / `[2016181, 0, 3001, 3001]`
+  and reads "grants the caster **2 stacks** of Spirit". Two slots, one trigger, two stacks.
+* **the same effect under two different TRIGGERS** — `Krampus of The Undead World`
+  (2002131) is `[112, 112, 112, 117, 112]` / `[3015, 3015, 2524, 2002151, 728]` and reads
+  "**Before dealing any attack or while taking damage**, grants the caster **1 stack** of
+  Wrath". Two slots, two triggers, one stack each. `Watergun Reload` (234) is the same
+  shape: "grants the caster 1 stack of Reload **before … turn or taking damage**".
+
+Measured over skills where a `(112/113, status)` pair repeats and the prose names a stack
+count: **192 agree with the repeat count, 181 disagree.** So repeats must NOT be folded
+into a stack count automatically.
+
+Nor does slot index appear to encode the trigger: Gabriel has its follow-up in slot 0
+while Belial's four statuses occupy slots 0-3, so the positions are not phase-aligned.
+The trigger genuinely looks absent from the script — the original server likely carried
+per-skill logic keyed by skill id, with `action[]` as the effect summary rather than a
+complete program.
+
+**Practical consequence:** compile repeats verbatim (one effect per slot, with its slot
+index) and let the prose disambiguate stacks vs triggers per skill. Do not guess.
+
 ### 6.5 What is still open
 
 * the precise semantics of the rarer no-operand opcodes (111, 119, 120, 121, 2, 3, 6, 8,
