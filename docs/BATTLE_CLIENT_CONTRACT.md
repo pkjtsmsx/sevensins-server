@@ -285,34 +285,103 @@ per-level row avoids that entire mess.
 
 ---
 
-## 6. `action[]` / `act_id[]` — the undecoded effect script
+## 6. `action[]` / `act_id[]` — the effect script, substantially decoded
 
-Two 5-slot parallel int arrays on every skill row. **`DesignSkillRow` has no getter for
-either**, and nothing in the client reads them — so they are almost certainly the original
-SERVER's effect script, shipped in the pack and inert client-side.
+Two 5-slot parallel int arrays on every skill row. **`DesignSkillRow` exposes no getter
+for either** and nothing in the client reads them, so they are the original SERVER's
+effect script, shipped inert in the pack. 21 distinct opcodes over 14,410 rows.
 
-Across 14,410 skills there are only **21 distinct opcodes**, in two clusters:
+The slots are **(verb, operand) pairs**. Only four opcodes take an operand, and when they
+do the operand is a **skill row id**:
 
-```
-1xx: 112 (20719), 114 (4523), 116 (2775), 117 (1357), 115 (1012), 113 (688),
-     111 (269), 118 (146), 122 (50), 119 (50), 120 (30)
- 1x:   1 (1195),   5 (1039),   7 (320),    3 (248),    6 (125),  11 (103),
-       8 (17),    12 (9),      2 (7)
-```
+| op | n | operand | meaning |
+|---|---|---|---|
+| **112** | 20,719 | STATUS row — 100% | **apply status** (guaranteed) |
+| **113** | 688 | STATUS row — 100% | **apply status with a CHANCE** (resistible) |
+| **114** | 4,523 | STATUS row, or a category code | **remove status** |
+| **117** | 1,357 | type-7 row (1,257), else a real skill | **trigger a follow-up skill** |
 
-Some opcodes always pair with `act_id == 0` (116, 115, 111, 118, 119, 120, 122, 5, 7, 3,
-6, 11); others carry ids spanning wide ranges (112: 101..122000902, 114: 133..100001655,
-117: 11002..153006146) that look like references to skill/fx/status ids.
+Everything else carries no operand and is a trigger/timing condition (§6.3).
 
-**Status: undecoded, and there is no client-side ground truth for it** — the client never
-interprets these. The only validation signals are the `note1` prose and original-game
-footage. A first pass at correlating opcodes with prose keywords gave weak signal, because
-prose describes the whole skill rather than one slot.
+### 6.1 The status id space is organised in category blocks
 
-Worth returning to: 21 opcodes over 14,410 rows with per-row prose is a strong alignment
-problem, and success would give an exact effect system for the entire corpus.
+This falls out of op 114's non-id operands, which are ten round numbers. They are
+**thousands-block prefixes of the status id space**:
 
----
+| block | rows | category |
+|---|---|---|
+| 0 | 474 | misc / named one-offs |
+| 1000 | 11 | heal-over-time (Heal, Regen, Rest) |
+| 2000 | 195 | buffs (Might, Iron Wrist, Harden, Gash) |
+| 3000 | 72 | **stackable** buffs — `Spirit(5)`, `Rigidity(5)`, `Critical(5)` |
+| 4000 | 114 | shields (Shield, Power Shield, Life Shield) |
+| 5000 | 57 | damage-over-time (Wound, Poison, Shock, Bleed) |
+| 6000 | 83 | debuffs (Weaken, Fracture, DEF Break, Slow) |
+| 7000 | 38 | **stackable** debuffs — `Withering(5)`, `Fatigue(5)` |
+| 8000 | 273 | passive stat grants (Body Strike I–IV) |
+| 9000 | 18 | flat stat ups |
+
+The trailing `(5)` in the 3000/7000 names is the **stack cap**.
+
+The prose confirms each block independently:
+
+* `114 + 4000` → "removes the caster's **Shield**"
+* `114 + 5000` → "removes **DoT** from all allies"
+* `114 + 2000` → "removes the caster's removable **buffs**"
+* `114 + 3000` → "removes the caster's **stackable buffs**"
+* `114 + 6000` → "**unstackable debuffs**"
+
+### 6.2 A worked row
+
+Skill **207** carries `ops = [(114, 2005), (114, 3000), (113, 619)]` and reads:
+
+> "When affected by this status, **removes the caster's stackable buffs** with a certain
+> chance **and Gash** as well. …"
+
+| op | operand | resolves to | prose fragment |
+|---|---|---|---|
+| 114 | 2005 | `Gash` (buff block) | "and Gash as well" |
+| 114 | 3000 | *stackable-buff block* | "removes the caster's stackable buffs" |
+| 113 | 619 | `Charm` | "with a certain chance" |
+
+Skill **100301/100302** are the cleanest proof of the 112/114 pair: identical operand
+`3002` (`Rigidity`), prose `反擊後附加BUFF` ("after counter, **attach** buff") vs
+`反擊後消除BUFF` ("after counter, **remove** buff").
+
+### 6.3 The no-operand opcodes are trigger conditions
+
+Isolated by looking at skills with exactly ONE non-zero action slot, which gives a clean
+1:1 with the prose. **Suggestive, not proven** — unlike the four above:
+
+| op | n | prose pattern of single-op skills |
+|---|---|---|
+| 116 | 2,775 | "**When affected by this status**, …" |
+| 1 | 1,195 | "**While taking damage** …" / "**While dealing attack** …" |
+| 5 | 1,039 | "**When taking damage**, recovers …" |
+| 115 | 1,012 | "at the **beginning of each turn**" / "if total turns reaches N" |
+| 118 | 146 | "**After action**, there is a N% chance …" |
+| 122 | 50 | "**造成傷害後** (after dealing damage), if the target has …" |
+
+So the script reads as *trigger* + *(verb, operand)* effects, which is exactly the shape a
+status/passive system needs.
+
+### 6.4 SkillType **7** — undocumented sub-skills
+
+The client's `SkillType` enum defines 1,2,3,4,5,6,10,101,102,103 — there is no 7. Yet 557
+rows carry type 7 and op 117 points at them 1,257 times. They are **follow-up attacks**
+with their own `_target`, `hit`, `_actName` cinematic and their own opcodes: "Stars
+Below", "Xmas Shooting Star", `反擊後附加BUFF`. These are the "追加普攻" (additional normal
+attack) rows whose leftovers show up in `note2`.
+
+So op 117 = *pursue / counter / follow-up*, and the sub-skill is itself a full skill spec.
+
+### 6.5 What is still open
+
+* the precise semantics of the rarer no-operand opcodes (111, 119, 120, 121, 2, 3, 6, 8,
+  11, 12) — low volume, and §6.3 is inference from prose rather than proof;
+* whether slot ORDER encodes sequencing (before/after action) or is just a list;
+* where the *chance* for op 113 comes from — presumably Effect Hit vs Effect Res, which
+  the client's own help text mentions but never quantifies.
 
 ## 7. Where this leaves a rewrite
 
