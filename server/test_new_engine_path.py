@@ -45,9 +45,16 @@ def check(name, cond, detail=""):
         _fail += 1
 
 
-def a_battle(stage=STAGE):
+# The casts whose passives are hand-written. A test that needs to exercise those rules
+# has to field them -- the throwaway account's default party is two low-level units.
+PASSIVE_PARTY = [20961, 20941, 11001, 20801, 20901]
+
+
+def a_battle(stage=STAGE, party=None):
     state = ps.load("newpath_test")
-    return bt.Battle(stage, ps.battle_team(state), PARTY_LEVEL, None, 0, 0), state
+    team = ([{"id": c, "lv": PARTY_LEVEL} for c in party] if party
+            else ps.battle_team(state))
+    return bt.Battle(stage, team, PARTY_LEVEL, None, 0, 0), state
 
 
 def validate_payload(raw, where):
@@ -342,6 +349,91 @@ def check_damage_and_after_action_hooks():
           all(battle2.units[o].scv == v for o, v in none_moved.items()))
 
 
+
+def check_passive_rule_machinery():
+    """The general capabilities the rule table is built from.
+
+    Each of these exists because a real clause needed it, and each will be needed again
+    -- they are the reusable half of hand-writing passives.
+    """
+    import random
+    from engine import passives, status as est2
+
+    battle, _ = a_battle(stage=1000005, party=PASSIVE_PARTY)
+    field = list(battle.units.values())
+    boss = next(u for u in field if u.team == bt.TEAM_ENEMY)
+    gab = next((u for u in field if u.char_id == 20961), None)
+    if gab is None:
+        check("Gabriel is in the test party", False, "cannot exercise the chain")
+        return
+
+    # 1. SYNTHESIS -- a clause with real numbers and no status row to point at.
+    gab.hp = gab.max_hp
+    passives.fire_all(passives.TURN_START, [gab], field)
+    synth = [s for s in gab.statuses
+             if isinstance(s, est2.Active) and "Hold On" in (s.name or "")]
+    check("a rule can synthesise a status the pack has no row for",
+          len(synth) == 2 and {x.stat for x in synth} == {"SPD", "ATK"}, str(synth))
+
+    # 2. CROSS-SKILL LOOKUP -- Gabriel's passive inflicts a Major Demerit, but only her
+    # basic attack carries that row. A cast's kit is one set.
+    gab.hp = int(gab.max_hp * 0.2)
+    passives.fire_all(passives.ON_DAMAGE_TAKEN, [gab], field,
+                      ctx={"attacker": boss, "rng": random.Random(1)})
+    check("a rule can reference a status from another skill of the same cast",
+          any(isinstance(s, est2.Active) and s.name == "Major Demerit"
+              for s in boss.statuses), str([s.name for s in boss.statuses]))
+
+    # 3. SIMULTANEOUS RESOLUTION -- conditions read the state the trigger STARTED in.
+    # Without it Gabriel's chain applies a Minor Demerit and the next rule, whose
+    # condition is "the target has a Minor Demerit", promotes it in the same hit.
+    battle2, _ = a_battle(stage=1000005, party=PASSIVE_PARTY)
+    field2 = list(battle2.units.values())
+    boss2 = next(u for u in field2 if u.team == bt.TEAM_ENEMY)
+    gab2 = next(u for u in field2 if u.char_id == 20961)
+    for st in boss2.statuses:
+        if isinstance(st, est2.Active) and "Admonition" in (st.name or ""):
+            st.stacks = 2
+    passives.fire_all(passives.ON_DAMAGE_DEALT, [gab2], field2,
+                      ctx={"victim": boss2, "rng": random.Random(1)})
+    names = {s.name for s in boss2.statuses if isinstance(s, est2.Active)}
+    check("one hit promotes one step, not the whole chain",
+          "Minor Demerit" in names and "Major Demerit" not in names, str(sorted(names)))
+    passives.fire_all(passives.ON_DAMAGE_DEALT, [gab2], field2,
+                      ctx={"victim": boss2, "rng": random.Random(2)})
+    names = {s.name for s in boss2.statuses if isinstance(s, est2.Active)}
+    check("  ...and the next hit promotes the next step",
+          "Major Demerit" in names, str(sorted(names)))
+
+    # 4. STAT COMPARISON -- Michael's Swift Blade needs holder vs target.
+    mic = next((u for u in field if u.char_id == 20901), None)
+    if mic is not None:
+        gauge = boss.scv
+        passives.fire_all(passives.ON_DAMAGE_DEALT, [mic], field,
+                          ctx={"victim": boss, "rng": random.Random(1)})
+        moved = boss.scv != gauge
+        check("a stat-comparison condition gates Swift Blade",
+              moved == (mic.spd - boss.spd > 750),
+              f"spd diff {mic.spd - boss.spd}, gauge moved {moved}")
+
+    # 5. ON_DEATH -- fired for EVERY unit's passive, since Metatron revives on an ALLY's
+    # death and may not be the unit that acted.
+    met = next((u for u in field if u.char_id == 20941), None)
+    if met is not None:
+        others = [u for u in field if u.team == met.team and u is not met]
+        fallen, dying = others[0], others[1]
+        fallen.hp = 0
+        dying.statuses.append(est2.Active(
+            status_id=3212, name="Serum Injection(ATK)", kind="stat_mod",
+            category="buff", remaining=3, stacks=2))
+        dying.hp = 0
+        passives.fire_all(passives.ON_DEATH, field, field,
+                          ctx={"victim": dying, "rng": random.Random(3)})
+        check("a death-triggered revive brings an ally back at half HP",
+              fallen.hp > 0 and abs(fallen.hp - fallen.max_hp // 2) <= 1,
+              f"{fallen.hp}/{fallen.max_hp}")
+
+
 def main():
     was = bt.NEW_ENGINE
     bt.NEW_ENGINE = True                     # the whole point of this file
@@ -351,6 +443,7 @@ def main():
                    check_passives_fire_at_battle_start,
                    check_raid_boss_is_cc_immune,
                    check_damage_and_after_action_hooks,
+                   check_passive_rule_machinery,
                    check_statuses_reach_the_unit,
                    check_control_actually_skips_a_turn,
                    check_legacy_and_engine_statuses_coexist):

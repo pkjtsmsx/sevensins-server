@@ -30,9 +30,10 @@ TURN_START = "turn_start"          # the holder's own turn, before it acts
 AFTER_ACTION = "after_action"      # the holder has just acted
 ON_DAMAGE_DEALT = "on_damage_dealt"
 ON_DAMAGE_TAKEN = "on_damage_taken"
+ON_DEATH = "on_death"              # a unit died; ctx carries "victim"
 
 ALL_TRIGGERS = (BATTLE_START, TURN_START, AFTER_ACTION,
-                ON_DAMAGE_DEALT, ON_DAMAGE_TAKEN)
+                ON_DAMAGE_DEALT, ON_DAMAGE_TAKEN, ON_DEATH)
 
 
 # --- selections --------------------------------------------------------------------
@@ -50,6 +51,19 @@ def ALLIES(holder, units, ctx=None):
 
 def ENEMIES(holder, units, ctx=None):
     return [u for u in units if u.team != holder.team and u.alive]
+
+
+def DEAD_ALLIES(holder, units, ctx=None):
+    """Fallen allies of the holder -- the pool a revive draws from."""
+    return [u for u in units if u.team == holder.team and not u.alive]
+
+
+def RANDOM_DEAD_ALLY(holder, units, ctx=None):
+    pool = DEAD_ALLIES(holder, units, ctx)
+    rng = (ctx or {}).get("rng")
+    if not pool:
+        return []
+    return [rng.choice(pool) if rng is not None else pool[0]]
 
 
 def ATTACKER(holder, units, ctx=None):
@@ -92,13 +106,67 @@ def hp_at_most(frac):
     return lambda h, u, c=None: h.max_hp and h.hp / h.max_hp <= frac
 
 
-def holds(name):
-    """The holder has a status whose name contains `name` (loose, as elsewhere)."""
+def holds(name, on="holder"):
+    """`on` has a status whose name contains `name` (loose, as elsewhere).
+
+    `on` selects whose statuses to read: the passive's holder, or the other party to
+    the event (the attacker on ON_DAMAGE_TAKEN, the victim on ON_DAMAGE_DEALT).
+    """
     def _f(h, u, c=None):
+        who = h if on == "holder" else _other(h, c)
         want = name.lower()
-        return any(want in str(getattr(s, "name", "") or "").lower()
-                   for s in h.statuses)
+        return who is not None and any(
+            want in str(getattr(s, "name", "") or "").lower() for s in who.statuses)
     return _f
+
+
+def stacks_at_least(name, n, on="other"):
+    """`on` holds at least `n` stacks of a status.
+
+    The shape behind every promotion chain in the game -- Gabriel's "if the target has
+    three stacks of Admonition, additionally give a Minor Demerit". Counts a status's
+    `stacks` field, and also counts separate rows sharing the name, since a pack often
+    splits one displayed status across several rows (Admonition is two: CRT and SPD).
+    """
+    def _f(h, u, c=None):
+        who = h if on == "holder" else _other(h, c)
+        if who is None:
+            return False
+        want = name.lower()
+        total = 0
+        for st in who.statuses:
+            if want in str(getattr(st, "name", "") or "").lower():
+                total += max(1, int(getattr(st, "stacks", 1) or 1))
+        return total >= n
+    return _f
+
+
+def stat_exceeds(stat, margin, on="other"):
+    """The holder's `stat` exceeds `on`'s by at least `margin`.
+
+    Michael's Swift Blade: "if the caster's SPD is more than 750 higher than the
+    target's".
+    """
+    def _f(h, u, c=None):
+        who = h if on == "holder" else _other(h, c)
+        if who is None:
+            return False
+        return getattr(h, stat, 0) - getattr(who, stat, 0) > margin
+    return _f
+
+
+def _other(holder, ctx):
+    """The other party to the current event, whichever side the holder is on."""
+    ctx = ctx or {}
+    for key in ("attacker", "victim", "target"):
+        who = ctx.get(key)
+        if who is not None and who is not holder:
+            return who
+    return None
+
+
+def all_of(*conds):
+    return lambda h, u, c=None: all(f(h, u, c) for f in conds)
 
 
 # What a rule DOES. Most clauses apply a status, but not all -- Raphael cuts a gauge,
@@ -107,6 +175,7 @@ APPLY_STATUS = "status"
 HEAL = "heal"
 DAMAGE = "damage"
 GAUGE = "gauge"
+REVIVE = "revive"
 
 # What a magnitude is a percentage OF.
 OF_SELF_ATK = "self_atk"
@@ -134,6 +203,11 @@ class Rule:
     effect: str = APPLY_STATUS
     basis: str = OF_SELF_ATK           # what `magnitude` is a percentage of
     chance: Optional[float] = None      # None = certain
+    # Synthesise a status the pack has no row for. Gabriel's "when HP >= 70%, SPD +10%
+    # and ATK +35% before action" is a real, numbered effect with nothing to point at,
+    # and refusing to model it would lose the clause entirely.
+    kind: Optional[str] = None
+    stat: Optional[str] = None
     note: str = ""
 
 
@@ -154,6 +228,26 @@ PASSIVES = {
         Rule(TURN_START, "Incarnation of Order I", SELF, when=holds("Commendation"),
              note="1. Maintain Order: at the start of the turn, if you have a "
                   "Commendation, you gain CC Immunity"),
+        Rule(TURN_START, "Hold On Classmates (SPD)", SELF, when=hp_at_least(0.70),
+             kind="stat_mod", stat="SPD", magnitude=10.0, duration=1,
+             note="2. Hold On, Classmates: when HP >= 70%, SPD +10% before action. "
+                  "SYNTHESISED -- the pack has no status row for this clause"),
+        Rule(TURN_START, "Hold On Classmates (ATK)", SELF, when=hp_at_least(0.70),
+             kind="stat_mod", stat="ATK", magnitude=35.0, duration=1,
+             note="...and ATK +35%"),
+        Rule(ON_DAMAGE_TAKEN, "Major Merit", SELF, when=hp_at_most(0.30),
+             note="3. Disciplinary Privilege: when HP <= 30%, after taking damage, "
+                  "forcibly gain a Major Merit... (the row lives on Mandatory Penalty "
+                  "and Reward, reached through the cast tier)"),
+        Rule(ON_DAMAGE_TAKEN, "Major Demerit", ATTACKER, when=hp_at_most(0.30),
+             note="...and inflict a Major Demerit on the attacker"),
+        Rule(ON_DAMAGE_DEALT, "Minor Demerit", ENEMIES,
+             when=stacks_at_least("Admonition", 3),
+             note="the promotion chain: three stacks of Admonition on a struck target "
+                  "promote to a Minor Demerit"),
+        Rule(ON_DAMAGE_DEALT, "Major Demerit", ENEMIES,
+             when=holds("Minor Demerit", on="other"),
+             note="...and a Minor Demerit promotes to a Major Demerit"),
     ],
 
     # METATRON -- Field Hospital
@@ -170,6 +264,10 @@ PASSIVES = {
         Rule(BATTLE_START, "Serum Injection assessment I", ALLIES_TOP_ATK(1), once=True,
              note="4. Initial Syringe: the first acting ally casts Serum Injection on "
                   "1 ally with the highest ATK, limited to once"),
+        Rule(ON_DEATH, effect=REVIVE, to=RANDOM_DEAD_ALLY, magnitude=50.0,
+             when=stacks_at_least("Serum Injection", 2, on="other"),
+             note="...if an ally with 2 stacks of Serum Injection dies from direct "
+                  "damage, a random dead ally is revived at 50% of their maximum HP"),
     ],
 
     # JACQUELINE -- Bike Lady
@@ -191,6 +289,13 @@ PASSIVES = {
         Rule(TURN_START, "CC Immunity", SELF, when=holds("Divine"), duration=1,
              note="Throughout Heaven and Earth: if affected by The Divine, grants CC "
                   "Immunity for one turn at start of a turn"),
+        Rule(TURN_START, "Keen", SELF, when=holds("Fallen"), duration=2,
+             kind="stat_mod", stat="CRI", magnitude=35.0,
+             note="I alone am honored: if affected by The Fallen, grants Keen "
+                  "(CRT+35%) for two turns at each start of a turn. SYNTHESISED"),
+        Rule(TURN_START, "Teardown", SELF, when=holds("Fallen"), duration=2,
+             kind="damage_mod", magnitude=75.0,
+             note="...and Teardown (Crit. DMG +75%)"),
     ],
 
     # MICHAEL -- Solar Prime
@@ -203,6 +308,10 @@ PASSIVES = {
         Rule(BATTLE_START, "Restraint", ENEMIES_TOP_SPD(2), duration=3,
              note="Shadowless Judgment: the two enemies with the highest SPD, SPD-600 "
                   "for three turns"),
+        Rule(ON_DAMAGE_DEALT, effect=GAUGE, to=ENEMIES, magnitude=-15.0,
+             when=all_of(holds("Swift Blade"), stat_exceeds("spd", 750)),
+             note="Swift Blade: while dealing damage, if the caster's SPD is more than "
+                  "750 higher than the target's, the target's Move Gauge is cut 15%"),
         Rule(BATTLE_START, "Swift Blade", SELF, permanent=True,
              note="Swift Blade: while dealing damage, if SPD exceeds the target's by "
                   "750, the target's Move Gauge is reduced by 15%"),
@@ -228,30 +337,58 @@ PASSIVES = {
 # Clauses the rule shape cannot express yet. Listed per passive so the gap is visible
 # instead of quietly absent.
 UNMODELLED = {
-    2096131: ["2. HP>=70% -> SPD+10%/ATK+35% before action (no status row to apply)",
-              "3. HP<=30% -> Major Merit to self and Major Demerit to the attacker",
-              "the Admonition -> Minor Demerit -> Major Demerit promotion chain",
-              "the second-tier Holy Arbiter / Shadow Ruler classes (Fetish unlocks)"],
-    2094131: ["the Serum Injection death-triggered revive"],
+    2096131: ["the second-tier Holy Arbiter / Shadow Ruler classes -- they are Fetish "
+              "unlocks, i.e. account progression we do not model at all"],
+    2094131: [],
     1100131: [],
-    2080131: ["The Fallen branches (Keen/Teardown, and stripping the target's buffs)"],
-    2090131: ["Swift Blade's gauge cut (needs the attacker's SPD vs the target's)",
-              "Return's reflect lives in status.REFLECT -- it is a status the ENEMY "
+    2080131: ["Stay Low: if affected by The Fallen, strip the target's unstackable "
+              "buffs BEFORE dealing damage -- needs a pre-damage hook"],
+    2090131: ["Return's reflect lives in status.REFLECT -- it is a status the ENEMY "
               "holds, so it cannot be a rule in MICHAEL's table: fire_all runs a "
               "passive for its own holder"],
     100001431: [],
 }
 
 
-def _status_ids(spec):
-    """{name: (id, compiled numbers)} from the passive's own effect list."""
-    out = {}
-    for e in spec.get("effects") or []:
+_CAST_STATUS_CACHE = {}
+
+
+def _from_effects(spec, out):
+    for e in (spec or {}).get("effects") or []:
         if e["op"] != "apply_status":
             continue
         st = e.get("status") or {}
         if st.get("name"):
-            out[st["name"]] = (st["id"], e.get("numbers") or {})
+            out.setdefault(st["name"], (st["id"], e.get("numbers") or {}))
+    return out
+
+
+def _status_ids(spec, holder=None):
+    """{name: (id, numbers)} a rule may reference, widest useful scope.
+
+    Three tiers, and the widening is deliberate rather than convenient:
+
+      1. the passive's OWN effect list -- always correct;
+      2. any OTHER skill of the same CAST. Gabriel's passive inflicts a Major Demerit
+         but only her basic attack carries that status row, and a cast's kit is written
+         as one set. Without this the clause simply cannot be expressed.
+      3. nothing wider. A rule may still SYNTHESISE a status by giving `kind`/`stat`
+         explicitly, which is honest about inventing one; silently borrowing a row from
+         an unrelated cast would not be.
+    """
+    out = _from_effects(spec, {})
+    skills = list(getattr(holder, "skills", None) or [])
+    if not skills:
+        return out
+    key = tuple(skills)
+    if key not in _CAST_STATUS_CACHE:
+        merged = {}
+        for sid in skills:
+            if sid:
+                _from_effects(specs.skill(sid), merged)
+        _CAST_STATUS_CACHE[key] = merged
+    for name, val in _CAST_STATUS_CACHE[key].items():
+        out.setdefault(name, val)
     return out
 
 
@@ -270,6 +407,9 @@ def _amount(rule, holder, target, ctx):
     mag = float(rule.magnitude or 0)
     if rule.effect == GAUGE:
         return mag
+    if rule.effect == REVIVE:
+        # A revive's percentage is of the REVIVED unit's own pool, not the holder's.
+        return int(target.max_hp * mag / 100.0)
     if rule.basis == OF_SELF_MAX_HP:
         base = holder.max_hp
     elif rule.basis == OF_OTHER_ATK:
@@ -288,8 +428,16 @@ def fire(trigger, holder, passive_skill_id, units, ctx=None, fired=None):
     spec = specs.skill(passive_skill_id)
     if not spec:
         return []
-    ids = _status_ids(spec)
+    ids = _status_ids(spec, holder)
     applied = []
+
+    # Conditions are evaluated against the state at the START of the trigger, then all
+    # the effects are applied. Otherwise rules see each other's work and order decides
+    # the outcome: Gabriel's chain applies a Minor Demerit and the very next rule, whose
+    # condition is "the target has a Minor Demerit", promotes it to Major in the same
+    # hit. The prose means the state the hit LANDED on, and simultaneous resolution is
+    # the general answer rather than hand-ordering every table.
+    pending = []
     for i, rule in enumerate(rules_for(passive_skill_id)):
         if rule.trigger != trigger:
             continue
@@ -304,8 +452,12 @@ def fire(trigger, holder, passive_skill_id, units, ctx=None, fired=None):
             if (ctx or {}).get("rng").random() >= rule.chance:
                 continue
 
+        pending.append((i, rule, list(rule.to(holder, units, ctx))))
+
+    for i, rule, chosen in pending:
+        key = (passive_skill_id, i)
         if rule.effect != APPLY_STATUS:
-            for target in rule.to(holder, units, ctx):
+            for target in chosen:
                 amount = _amount(rule, holder, target, ctx)
                 if rule.effect == HEAL:
                     target.hp = min(target.max_hp, target.hp + amount)
@@ -314,27 +466,33 @@ def fire(trigger, holder, passive_skill_id, units, ctx=None, fired=None):
                 elif rule.effect == GAUGE:
                     target.scv = max(0.0, min(
                         100.0, float(getattr(target, "scv", 0.0)) + amount))
+                elif rule.effect == REVIVE:
+                    if target.alive:
+                        continue
+                    target.hp = max(1, amount)
                 applied.append((target, rule.effect, amount))
             if rule.once and fired is not None:
                 fired.add(key)
             continue
 
         found = ids.get(rule.status)
-        if not found:
-            continue                       # the skill does not carry that status
-        sid, numbers = found
-        row = specs.status(sid) or {}
+        if not found and not rule.kind:
+            continue          # not in the cast's kit, and the rule does not synthesise
+        sid, numbers = found if found else (None, {})
+        row = (specs.status(sid) or {}) if sid else {}
         duration = rule.duration if rule.duration is not None else numbers.get("duration")
         if rule.permanent:
             duration = None
         elif duration is None and not numbers.get("permanent"):
             # Same rule as status.apply_event: unstated is NOT permanent.
             duration = _status.DEFAULT_DURATION
-        for target in rule.to(holder, units, ctx):
+        for target in chosen:
             active = _status.Active(
-                status_id=sid, name=row.get("name") or rule.status,
-                kind=row.get("kind"), category=row.get("category"),
-                stat=row.get("stat"), remaining=duration,
+                status_id=sid if sid is not None else -abs(hash(rule.status or "") % 10**6),
+                name=row.get("name") or rule.status,
+                kind=rule.kind or row.get("kind"),
+                category=row.get("category") or ("buff" if rule.kind else None),
+                stat=rule.stat or row.get("stat"), remaining=duration,
                 magnitude=(rule.magnitude if rule.magnitude is not None
                            else numbers.get("magnitude")),
                 stack_cap=row.get("stack_cap"),

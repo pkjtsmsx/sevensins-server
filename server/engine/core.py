@@ -457,6 +457,14 @@ def _damage_hooks(caster, targets, out, units, rng):
     _passives.fire_all(_passives.ON_DAMAGE_DEALT, [caster], units, ctx=ctx,
                        fired=getattr(caster, "_passives_fired", None))
 
+    # Deaths this skill caused. Fired for every unit's passive, not just the killer's:
+    # Metatron revives on an ALLY's death, and she may not be the one who acted.
+    for tgt in targets:
+        if not tgt.alive:
+            _passives.fire_all(_passives.ON_DEATH, list(units), units,
+                               ctx={"victim": tgt, "attacker": caster, "rng": rng},
+                               fired=getattr(caster, "_passives_fired", None))
+
 
 def _flag_deaths(out, targets):
     """Mark `died` on the LAST strike naming each unit that ended the skill dead.
