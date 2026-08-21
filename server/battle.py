@@ -17,6 +17,7 @@ Every JSON key below is the [JsonProperty] wire name pulled from the attribute
 thunks in libil2cpp.so -- they are nothing like the C# field names ("stage_id",
 "l_units", "mob_group_ids", ...), so do not "fix" them to match the class.
 """
+import dataclasses
 import json
 from typing import NamedTuple
 import os
@@ -1154,6 +1155,16 @@ def _status_to_state(st):
     SYNTHESIZED status (the `stat_mod` op's ad-hoc ATK/DEF/SPD buffs, built inline as
     `Status(tag, ..., synth)` with no catalog entry under that exact tag) carries its
     own definition, since there is nothing to re-link to."""
+    # The engine's own statuses are a different class and round-trip as a whole: they
+    # carry their meaning in plain fields rather than a catalog link, so `asdict` is
+    # lossless. Tagged so `_status_from_state` can tell the two apart.
+    #
+    # Missing this cost a live drop: an in-progress fight is persisted on every message
+    # (battle resume), so the FIRST turn after an engine status landed raised
+    # `'Active' object has no attribute 'dot_atk'` and killed the connection.
+    if isinstance(st, _engine_status.Active):
+        return {"_engine": True, **dataclasses.asdict(st)}
+
     d = {"name": st.name, "remaining": st.remaining, "stacks": st.stacks,
         "shield_hp": st.shield_hp, "dot_atk": st.dot_atk,
         "taunt_source": st.taunt_source}
@@ -1163,6 +1174,8 @@ def _status_to_state(st):
 
 
 def _status_from_state(d):
+    if d.get("_engine"):
+        return _engine_status.Active(**{k: v for k, v in d.items() if k != "_engine"})
     definition = d.get("definition")
     if definition is None:
         definition = fx.catalog().get(d["name"], {})

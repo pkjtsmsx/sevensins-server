@@ -200,6 +200,7 @@ def main():
     test_malformed_save_fails_loudly()
     shutil.rmtree(_TMP, ignore_errors=True)
     test_finished_battle_is_not_resaved()
+    test_new_engine_statuses_survive_a_restart()
     print(f"\n{'ALL PASSED' if not _fail else f'{_fail} CHECK(S) FAILED'}")
     sys.exit(1 if _fail else 0)
 
@@ -238,6 +239,55 @@ def test_finished_battle_is_not_resaved():
         ps.save_battle(st, b)             # the branch that used to fire
     check("a later RPC does not resurrect it", not ps.saved_battle(st))
     check("and the fight is still marked finished", b.finished)
+
+
+def test_new_engine_statuses_survive_a_restart():
+    """The resume path must handle the ENGINE's statuses too.
+
+    This is a regression test for a live server drop. Every message persists the
+    in-progress fight, so the first turn after an engine status landed hit
+    `_status_to_state`, which reads `.dot_atk` off the old Status class, and raised
+    `'Active' object has no attribute 'dot_atk'` -- killing the connection the moment a
+    battle started.
+
+    The whole suite runs on the OLD path by default, so no Active is ever constructed and
+    the bug was invisible to all of it. Anything touching the shared unit needs a check
+    that actually runs with the flag on.
+    """
+    import battle as bt
+    from engine import status as est
+
+    was = bt.NEW_ENGINE
+    bt.NEW_ENGINE = True
+    try:
+        state = fresh_state("resume_test_engine")
+        b = bt.Battle(1101, ps.battle_team(state), 10, None, 0, 0)
+        foes = [u for u in b.units.values() if u.team == bt.TEAM_ENEMY and u.alive]
+        # Land one of each shape: a control with a duration and a DoT carrying a
+        # snapshotted ATK, since those exercise different fields.
+        foes[0].statuses.append(est.Active(
+            status_id=602, name="Freeze", kind="control", category="misc",
+            remaining=2, source_atk=1234))
+        foes[0].statuses.append(est.Active(
+            status_id=5011, name="Tinder", kind="dot", category="damage_over_time",
+            remaining=3, magnitude=30.0, stacks=2, source_atk=999))
+
+        # Through JSON, as the real save does -- a dataclass that only round-trips
+        # in memory would still break on disk.
+        restored = bt.restore_battle(json.loads(json.dumps(b.to_state())))
+        got = [s for s in restored.units[foes[0].order].statuses
+               if isinstance(s, est.Active)]
+        check("engine statuses survive a save/restore", len(got) == 2, str(len(got)))
+        by_name = {s.name: s for s in got}
+        check("  ...with their duration", by_name["Freeze"].remaining == 2)
+        check("  ...their stack count", by_name["Tinder"].stacks == 2)
+        check("  ...and the inflicter's snapshotted ATK",
+              by_name["Tinder"].source_atk == 999)
+        check("  ...and still tick after the restart",
+              est.tick(restored.units[foes[0].order])[0] > 0)
+    finally:
+        bt.NEW_ENGINE = was
+
 
 if __name__ == "__main__":
     main()
