@@ -20,6 +20,7 @@ Body is a protobuf-net `titan.Client`:
 import socket, threading, time, os, sys, json
 import player_state as ps
 import battle as bt
+import battle_inspector as binspect
 # The pure transport layer -- RC4, framing, protobuf and RPC packing -- lives in
 # wire.py. `import *` is scoped by wire's __all__, so this pulls exactly the named
 # primitives (make_rpc, rpc_pack, pb_field_bytes, RC4, ...) and nothing else, which
@@ -696,10 +697,24 @@ def karma_reward_msgs(state, karma):
     return out
 
 
+class _BattleMsg(bytes):
+    """A battle push that remembers what it was built from.
+
+    Same trick as _BpMsg. It lets battle_inspector show the outgoing payload without
+    reverse-parsing the encrypted wire, and lets it REBUILD a message after the payload
+    is edited.
+    """
+    cmd = None
+    intargs = ()
+    strargs = ()
+
+
 def battle_msg(cmd, intargs=(), strargs=()):
     """PlayerBattleClientCmdRT.build is shape B: uint32[0][0]=cmd, sint32[0]=args,
     string[0]=strargs."""
-    return sint_msg(bt.BATTLE_CLIENT_INDEX, cmd, intargs, strargs)
+    msg = _BattleMsg(sint_msg(bt.BATTLE_CLIENT_INDEX, cmd, intargs, strargs))
+    msg.cmd, msg.intargs, msg.strargs = cmd, list(intargs), list(strargs)
+    return msg
 
 
 def start_battle_msg(battle):
@@ -1519,6 +1534,11 @@ def handle(conn, addr):
         _sessions[id(session)] = session
         _publish_sessions_locked()
 
+    # The inspector releases held messages from its HTTP thread, so `send` can be
+    # called from two threads. RC4 is a stateful keystream per direction: concurrent
+    # writes would interleave keystream bytes and corrupt the connection irrecoverably.
+    send_lock = threading.Lock()
+
     def send(mtype, body):
         # A backpack push whose cmd replays or carries the info rows goes out behind a
         # fresh cmd 83, or SyncdBackpackDatas later restores the login-era counts --
@@ -1527,7 +1547,8 @@ def handle(conn, addr):
                 and getattr(_bp_ctx, "state", None) is not None):
             send(mtype, backpack_info_msg(_bp_ctx.state))
         frame = make_header(mtype, len(body)) + body
-        conn.sendall(s2c.crypt(frame))
+        with send_lock:
+            conn.sendall(s2c.crypt(frame))
         log(f"[>] type={mtype} size={len(body)} body={body.hex()}")
 
     try:
@@ -3430,9 +3451,22 @@ def handle(conn, addr):
                         send(MSG_RPC, start_battle_msg(cur_battle))
                     elif (index == bt.BATTLE_SERVER_INDEX and cur_battle
                           and cmd != bt.REQ_BATTLE_SYNC):
-                        for body in battle_replies(cur_battle, cmd, intargs, strargs,
-                                                   state, ps.uid(state)):
-                            send(MSG_RPC, body)
+                        bodies = list(battle_replies(cur_battle, cmd, intargs,
+                                                     strargs, state, ps.uid(state)))
+                        # The inspector, when ARMED, takes ownership of the reply and
+                        # releases it on a step. It never blocks this thread -- the
+                        # heartbeat shares this socket and the client times out on its
+                        # own if we stop reading. Disarmed, this is a no-op and the
+                        # battle path is byte-for-byte unchanged.
+                        if binspect.intercept(bodies, send, cur_battle,
+                                              {"cmd": cmd, "intargs": list(intargs),
+                                               "strargs": list(strargs),
+                                               "player": ps.uid(state)}):
+                            log(f"    -> battle reply HELD by inspector "
+                                f"({len(bodies)} msg)")
+                        else:
+                            for body in bodies:
+                                send(MSG_RPC, body)
                         # Persist after EVERY battle RPC (attacks, wave transitions,
                         # auto-toggle, ...) so a killed/restarted server always has
                         # something to resume -- except the cmds that mean the fight
@@ -3554,6 +3588,15 @@ def main(port=None):
     srv.listen(8)
     _listener = srv
     log(f"[*] TitanStack server listening on 0.0.0.0:{port or PORT}")
+    # The inspector starts DISARMED: intercept() returns immediately and the battle path
+    # is unchanged until someone arms it from the UI. Loopback only -- it can rewrite
+    # live battle traffic.
+    binspect.set_rebuilder(battle_msg)
+    try:
+        binspect.serve_background()
+        log("[*] battle inspector on http://127.0.0.1:8098 (disarmed)")
+    except OSError as exc:
+        log(f"[*] battle inspector not started: {exc}")
     try:
         while True:
             conn, addr = srv.accept()

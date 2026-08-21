@@ -1,0 +1,131 @@
+<title>Battle inspector</title>
+<style>
+  :root { --bg:#14151a; --fg:#e6e6ea; --dim:#8d8fa0; --line:#2a2c36;
+          --accent:#5ac8fa; --warn:#ffb454; --ok:#7ddc7d; --held:#ff6b8a; }
+  * { box-sizing:border-box }
+  body { margin:0; font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
+         background:var(--bg); color:var(--fg) }
+  header { position:sticky; top:0; background:var(--bg); border-bottom:1px solid var(--line);
+           padding:10px 14px; display:flex; gap:10px; align-items:center; flex-wrap:wrap }
+  h1 { font-size:14px; margin:0 12px 0 0; font-weight:600 }
+  button { font:inherit; background:#22242e; color:var(--fg); border:1px solid var(--line);
+           padding:5px 12px; border-radius:5px; cursor:pointer }
+  button:hover:not(:disabled) { border-color:var(--accent) }
+  button:disabled { opacity:.35; cursor:default }
+  .pill { padding:3px 9px; border-radius:99px; font-size:11px; border:1px solid var(--line) }
+  .on { background:#3a1420; color:var(--held); border-color:var(--held) }
+  .off { color:var(--dim) }
+  main { padding:14px; display:grid; gap:14px; grid-template-columns:1fr 1fr }
+  @media (max-width:900px){ main { grid-template-columns:1fr } }
+  section { border:1px solid var(--line); border-radius:7px; overflow:hidden }
+  h2 { font-size:12px; margin:0; padding:7px 11px; background:#1b1d25; color:var(--dim);
+       border-bottom:1px solid var(--line); font-weight:600; letter-spacing:.04em }
+  .body { padding:11px; overflow-x:auto }
+  table { border-collapse:collapse; width:100%; font-size:12px }
+  th,td { text-align:left; padding:3px 8px 3px 0; white-space:nowrap }
+  th { color:var(--dim); font-weight:500 }
+  tr.dead td { opacity:.4 }
+  tr.acting td { color:var(--accent) }
+  .enemy td:first-child::before { content:"▼ "; color:var(--held) }
+  .ally  td:first-child::before { content:"▲ "; color:var(--ok) }
+  pre { margin:0; white-space:pre-wrap; word-break:break-word; font-size:12px; color:#cfd2e0 }
+  .msg { border-top:1px solid var(--line); padding-top:8px; margin-top:8px }
+  .msg:first-child { border-top:0; padding-top:0; margin-top:0 }
+  .cmd { color:var(--warn) }
+  .muted { color:var(--dim) }
+  .empty { color:var(--dim); padding:16px; text-align:center }
+</style>
+
+<header>
+  <h1>Battle inspector</h1>
+  <span id="state" class="pill off">disarmed</span>
+  <button id="arm">Arm</button>
+  <button id="step" disabled>Step 1 turn</button>
+  <button id="resume" disabled>Release all</button>
+  <span id="count" class="muted"></span>
+</header>
+
+<main>
+  <section>
+    <h2>HELD — about to be sent</h2>
+    <div class="body" id="held"><div class="empty">nothing held</div></div>
+  </section>
+  <section>
+    <h2>BATTLE STATE</h2>
+    <div class="body" id="battle"><div class="empty">no battle</div></div>
+  </section>
+  <section style="grid-column:1/-1">
+    <h2>RELEASED — recent turns</h2>
+    <div class="body" id="history"><div class="empty">nothing yet</div></div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+
+async function post(path, body) {
+  await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'},
+                     body: JSON.stringify(body||{})});
+  refresh();
+}
+
+function messages(msgs) {
+  return msgs.map(m => `<div class="msg"><div><span class="cmd">cmd ${m.cmd}</span>
+    <span class="muted">· ${m.bytes} bytes · intargs ${esc(JSON.stringify(m.intargs))}</span></div>
+    <pre>${esc(JSON.stringify(m.strargs, null, 1))}</pre></div>`).join('');
+}
+
+function units(b) {
+  if (!b) return '<div class="empty">no battle</div>';
+  if (b.error) return `<pre>${esc(b.error)}</pre>`;
+  const rows = Object.entries(b.units).map(([o,u]) => {
+    const cls = [u.team === 2 ? 'enemy' : 'ally',
+                 u.alive ? '' : 'dead', o === b.acting ? 'acting' : ''].join(' ');
+    const pct = u.max_hp ? Math.round(100*u.hp/u.max_hp) : 0;
+    return `<tr class="${cls}"><td>${o}</td><td>${u.char}</td>
+      <td>${u.hp}/${u.max_hp} <span class="muted">${pct}%</span></td>
+      <td>${u.atk}</td><td>${u.spd}</td><td>${u.gauge ?? ''}</td>
+      <td class="muted">${esc((u.cooldowns||[]).join(','))}</td>
+      <td class="muted">${esc((u.statuses||[]).join(' '))}</td></tr>`;
+  }).join('');
+  return `<div class="muted">stage ${b.stage} · wave ${b.wave} · turn ${b.round}
+      · auto ${b.auto} · acting <b>${b.acting ?? '-'}</b></div>
+    <div class="muted">timeline: ${esc((b.timeline||[]).join(' → '))}</div>
+    <table><tr><th>ord</th><th>char</th><th>hp</th><th>atk</th><th>spd</th>
+      <th>gauge</th><th>cd</th><th>statuses</th></tr>${rows}</table>`;
+}
+
+async function refresh() {
+  let s;
+  try { s = await (await fetch('/api/status')).json(); }
+  catch { $('state').textContent = 'server down'; return; }
+
+  $('state').textContent = s.armed ? 'ARMED' : 'disarmed';
+  $('state').className = 'pill ' + (s.armed ? 'on' : 'off');
+  $('arm').textContent = s.armed ? 'Disarm' : 'Arm';
+  $('step').disabled = !s.held.length;
+  $('resume').disabled = !s.held.length;
+  $('count').textContent = s.held.length ? `${s.held.length} turn(s) held` : '';
+
+  const h = s.held[0];
+  $('held').innerHTML = h
+    ? `<div class="muted">request cmd ${h.ctx.cmd} · intargs ${esc(JSON.stringify(h.ctx.intargs))}
+         ${h.ctx.strargs.length ? '· strargs ' + esc(JSON.stringify(h.ctx.strargs)) : ''}</div>
+       ${messages(h.messages)}`
+    : '<div class="empty">nothing held' + (s.armed ? ' — waiting for the next turn' : '') + '</div>';
+  $('battle').innerHTML = units(h && h.battle);
+
+  $('history').innerHTML = s.history.length
+    ? s.history.map(e => `<div class="msg"><div class="muted">
+        #${e.id} · req cmd ${e.ctx.cmd} · sent ${e.sent}${e.error ? ' · ERROR ' + esc(e.error) : ''}</div>
+        ${messages(e.messages)}</div>`).join('')
+    : '<div class="empty">nothing yet</div>';
+}
+
+$('arm').onclick = () => post('/api/arm', {on: $('state').textContent === 'disarmed'});
+$('step').onclick = () => post('/api/step');
+$('resume').onclick = () => post('/api/resume');
+refresh();
+setInterval(refresh, 1000);
+</script>
