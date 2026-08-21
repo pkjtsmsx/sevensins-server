@@ -342,6 +342,49 @@ The existing suites still pass on the default path (`test_battle_effects`,
 
 ---
 
+## Damage calibration — measured, not guessed
+
+`tools/calibrate_damage.py`. The formula is invented, so the only honest check is the
+designers' own intent, and they wrote it down: `_rating_datas` rows are
+`[type, item_id, count, threshold]` with **type 3 = "clear within `threshold` turns"**.
+
+`_stagelv` is the **mob level** for the stage — confirmed against the live game, where
+6-4 (stage 6104, `_stagelv` 43) fields level-43 mobs. It is NOT a party level: the same
+stage exists at difficulty 1/2/3 as 6104/6204/6304 with `_stagelv` 43/113/221, and the
+column runs past 600, far beyond the character cap. Only the difficulty-1 band under the
+cap is sampled — outside it the harness was building level-609 characters and measuring
+nothing.
+
+Running a level-appropriate party on auto to a clear, over 24 sampled stages:
+
+| result | n |
+|---|---|
+| 3-star | 11 |
+| cleared, missed 3-star | 5 |
+| cleared, slow | 2 |
+| wipe | 6 |
+
+**Median 0.65× the 3-star turn limit — within the intended band.**
+
+All six wipes are side content, not campaign: Kizuna "Bond of STR/TEC", the arena
+"Round of 8", and the "Time House of the Souls" challenge tower. Those are designed to be
+hard and to want specific team comps, so a wipe there is not evidence about the curve.
+The tool prints stage names for exactly this reason.
+
+Worked example, stage 6104 (3-star limit 20 turns):
+
+| party | turns |
+|---|---|
+| level-appropriate (43) | 22 — just misses 3-star |
+| level 100 | 12 — comfortable 3-star |
+
+**Caution against a false signal:** a level-100 party on level-43 content overkills every
+mob ~27x per hit, which looks like a runaway damage curve and is not one. Judging the
+formula from an overlevelled fight is how this was first misread. Always calibrate at
+`_stagelv`.
+
+---
+
 ## Risks
 
 * **Trigger timing is the weakest link.** The no-operand opcodes are prose inference, not
