@@ -119,10 +119,25 @@ def avg_chapter(avg_id):
     For those, fall back to the id's own layout: avg ids are
     <chapter><stage-in-chapter><seq>, i.e. 10103 -> chapter 1 and 20901 -> chapter 2.
     """
-    stage = _avg_stage_index().get(int(avg_id))
+    idx = _avg_stage_index()
+    stage = idx.get(int(avg_id))
     if stage is not None:
         return int(stage) // 1000
-    return int(avg_id) // 10000 or None
+
+    # The old fallback was `avg_id // 10000`, and it is WRONG from chapter 3 onward:
+    # avg ids are allocated CONTINUOUSLY, not restarted per chapter. Chapter 2 runs
+    # 20101..21001 and chapter 3 carries straight on at 21101..22003, so the leading
+    # digits say "2" for both. Measured across the campaign it disagreed with the stage
+    # on 1,297 of 1,680 scenes -- it happened to be right only for chapters 1 and 2,
+    # which is exactly the range anyone would have spot-checked.
+    #
+    # Interpolate instead: ids ascend with the story, so the nearest indexed scene at or
+    # below this one is in the same chapter. That needs no numbering assumption beyond
+    # "ids increase", which the data does support.
+    below = [a for a in idx if a <= int(avg_id)]
+    if below:
+        return int(idx[max(below)]) // 1000
+    return None
 
 
 # ---- portrait resolution by speaker ---------------------------------------------

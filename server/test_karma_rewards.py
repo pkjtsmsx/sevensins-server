@@ -359,13 +359,42 @@ def check_avg_chapter_character():
         check(f"char {cid} is a real cast", bool(bt.dd.row("char", cid)))
 
 
+
+def check_avg_chapter_resolution():
+    """avg ids are allocated CONTINUOUSLY, not restarted per chapter.
+
+    Chapter 2 runs 20101..21001 and chapter 3 carries straight on at 21101, so the old
+    `avg_id // 10000` fallback read "2" for both. It agreed with the stage on only 383 of
+    1,680 scenes -- right for chapters 1 and 2, which is exactly the range a spot-check
+    would have covered, and wrong for everything after.
+    """
+    from player_state import karma
+    import design_data as dd
+
+    stages = dd.rows("stage") or {}
+    idx = karma._avg_stage_index()
+    wrong = [(a, s) for a, s in idx.items()
+             if int((stages.get(s) or {}).get("_difficulty") or 0) == 1
+             and karma.avg_chapter(a) != int(s) // 1000]
+    check("every indexed scene resolves to its stage's chapter",
+          not wrong, f"{len(wrong)} wrong, e.g. {wrong[:3]}")
+
+    # The exact boundary: 21001 is the last chapter-2 scene, 21101 the first of ch3.
+    check("21001 (stage 2-10) is chapter 2", karma.avg_chapter(21001) == 2,
+          str(karma.avg_chapter(21001)))
+    check("21101 (stage 3-1) is chapter 3, not 2", karma.avg_chapter(21101) == 3,
+          str(karma.avg_chapter(21101)))
+    check("a mid-chain id interpolates to its neighbour's chapter",
+          karma.avg_chapter(10102) == 1, str(karma.avg_chapter(10102)))
+
+
 def main():
     for fn in (check_table_matches_the_screenshot, check_a_single_rank_up_pays_once,
                check_multi_rank_pays_every_rank_crossed, check_no_rank_up_pays_nothing,
                check_the_payout_is_pushed, check_gifts_report_the_bonus,
                check_the_rank_up_splash_is_triggered,
                check_avg_choice_is_per_difficulty,
-               check_avg_chapter_character):
+               check_avg_chapter_character, check_avg_chapter_resolution):
         print(f"\n{fn.__name__}:")
         fn()
     print(f"\n{_fail} failure(s)")
