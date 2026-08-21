@@ -138,6 +138,12 @@ def advantage(attacker_attr, defender_attr):
     return 0
 
 
+def effective_atk(unit):
+    """ATK after the unit's active statuses. The engine's single reading of it."""
+    from . import status as _status
+    return float(unit.atk) * _status.stat_multiplier(unit, "ATK")
+
+
 def _basis_value(basis, caster, target):
     """The stat a coefficient multiplies.
 
@@ -148,7 +154,7 @@ def _basis_value(basis, caster, target):
         return float(target.max_hp)
     if basis == "DEF":
         return float(caster.defence)
-    return float(caster.atk)
+    return effective_atk(caster)
 
 
 def mitigation(defence, pierce=0.0):
@@ -200,7 +206,16 @@ def strike(caster, target, coefficient, basis="ATK", rng=None, extra_mult=1.0):
             detail["attribute_miss"] = True
 
     mult *= (1.0 + getattr(caster, "ddi", 0.0)) * (1.0 - getattr(target, "ddr", 0.0))
-    mit = mitigation(target.defence, getattr(caster, "prc", 0.0))
+    # Active statuses: the attacker's own damage-dealt modifiers and the target's
+    # damage-taken ones. Imported here rather than at module scope because `status`
+    # imports `specs`, and keeping formula free of that lets it be exercised on bare
+    # units with no compiled data present.
+    from . import status as _status
+    mult *= _status.damage_dealt_multiplier(caster)
+    mult *= _status.damage_taken_multiplier(target)
+    # DEF is itself modified by statuses -- a DEF Break is only meaningful here.
+    eff_def = target.defence * _status.stat_multiplier(target, "DEF")
+    mit = mitigation(eff_def, getattr(caster, "prc", 0.0))
     amount = raw * mult * mit
     amount *= 1.0 + r.uniform(-VARIANCE, VARIANCE)
 

@@ -9,7 +9,7 @@ import dataclasses
 import random
 from typing import Any, Dict, List, Optional
 
-from . import formula, specs
+from . import formula, specs, status as _status
 
 TEAM_PLAYER, TEAM_ENEMY = 1, 2
 
@@ -267,6 +267,11 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
                                         "skill": skill_id})
                     continue
                 if apply_damage:
+                    # Shields eat damage before HP does, and report what they took so the
+                    # number the client shows is the damage that actually landed.
+                    amount, absorbed = _status.absorb(tgt, amount)
+                    if absorbed:
+                        detail["absorbed"] = absorbed
                     tgt.hp = max(0, tgt.hp - amount)
                 out.strikes.append(Strike(swing=sw, target=tgt.order, amount=amount,
                                           detail=detail, died=False))
@@ -279,18 +284,20 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
         if op == "apply_status":
             for tgt in targets:
                 ev = _status_event(caster, tgt, e, r)
-                if ev:
-                    out.statuses.append(ev)
+                if ev is None:
+                    continue
+                # Land it on the unit as STATE, not just on the wire. The unit is shared
+                # with the old engine (battle.Unit subclasses Unit), so this is the same
+                # list everything else reads.
+                if apply_damage and _status.apply_event(tgt, ev, caster) is None:
+                    continue          # blocked by an immunity -- do not report it either
+                out.statuses.append(ev)
         elif op == "remove_status":
             cat = e.get("category") or (e.get("status") or {}).get("category")
             for tgt in targets:
-                for held in list(tgt.statuses):
-                    row = specs.status(held.get("id")) if held.get("id") else None
-                    if _removable(row, cat):
-                        tgt.statuses.remove(held)
-                        out.statuses.append(StatusEvent(
-                            target=tgt.order, status_id=held.get("id"),
-                            name=(row or {}).get("name"), applied=False))
+                for name in _status.remove_category(tgt, cat):
+                    out.statuses.append(StatusEvent(
+                        target=tgt.order, status_id=None, name=name, applied=False))
         elif op == "heal":
             pct = e.get("percent")
             if pct is None:

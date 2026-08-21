@@ -25,6 +25,7 @@ import re
 import design_data as dd
 import battle_effects as fx
 from engine import core as _engine_core
+from engine import status as _engine_status
 
 # Phase-5 cutover switch. Defaults to the old engine: the new one is opt-in until it
 # owns battle state as well as resolution (see engine/bridge.py for exactly what moves).
@@ -864,6 +865,19 @@ def skill_ratio(skill_id):
     ratio = int(m.group(1)) / 100.0 if m else 1.0
     _ratio_cache[skill_id] = ratio
     return ratio
+
+
+
+def _legacy_statuses(unit):
+    """The OLD engine's Status objects only.
+
+    A unit's `statuses` list now holds both kinds: `battle_effects.Status` from the old
+    path and `engine.status.Active` from the new one, because the two engines share the
+    unit. The old readers reach for `.definition` and `.tick()`, which an Active does not
+    have, so every legacy call site filters through this. The list shrinks to nothing as
+    the old engine is retired -- which is the point.
+    """
+    return [s for s in unit.statuses if not isinstance(s, _engine_status.Active)]
 
 
 class Unit(_engine_core.Unit):
@@ -1831,7 +1845,10 @@ class Battle:
                 acted.pending_scv = 0.0
             # Count down this unit's statuses on its own turn; drop the expired.
             if acted.statuses:
-                acted.statuses = [s for s in acted.statuses if not s.tick()]
+                # Actives are spent at the START of the unit's own turn instead (see
+                # _start_of_turn), so they are passed through untouched here.
+                acted.statuses = [s for s in acted.statuses
+                                  if isinstance(s, _engine_status.Active) or not s.tick()]
         self._roll_turn_order()
         self.round += 1
         self.turn_open = False
@@ -1846,14 +1863,23 @@ class Battle:
         if not unit or _depth > len(self.units):
             return
         fx.tick_dot_hot(unit)
+        # The engine's own statuses tick here too: every DoT/HoT in the pack is worded
+        # "when a turn starts", and `status.tick` spends the duration at the same moment.
+        dot, hot, _expired = _engine_status.tick(unit)
+        if dot:
+            unit.hp = max(0, unit.hp - dot)
+        if hot:
+            unit.hp = min(unit.max_hp, unit.hp + hot)
         if not unit.alive:
             self._roll_turn_order()
             self._start_of_turn(_depth + 1)
             return
-        if fx.is_immobilized(unit.statuses):
+        if (fx.is_immobilized(_legacy_statuses(unit))
+                or _engine_status.is_immobilized(unit)):
             unit.tick_cooldowns()
             if unit.statuses:
-                unit.statuses = [s for s in unit.statuses if not s.tick()]
+                unit.statuses = [s for s in unit.statuses
+                                 if isinstance(s, _engine_status.Active) or not s.tick()]
             # A skipped turn still costs the gauge, or the queue never moves on.
             unit.scv = 0.0
             self._roll_turn_order()

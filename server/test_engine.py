@@ -10,7 +10,7 @@ that looked healthy in the log while the client drew the wrong thing.
 import random
 import sys
 
-from engine import core, formula, specs, wire
+from engine import core, formula, specs, status, wire
 
 _fail = 0
 
@@ -66,6 +66,86 @@ def check_shared_unit_model():
     # silently made every unit's DEF read as 0 for "highest DEF" targeting.
     check("there is one spelling of defence", hasattr(a, "defence"))
     check("...and the old one is not silently aliased", not hasattr(a, "defense"))
+
+
+
+def check_status_state():
+    """Phase 6: statuses are STATE, not decoration.
+
+    Until this landed the engine wrote statuses to the wire and nothing tracked them --
+    the icon appeared, the client counted the duration down, and a Freeze did not stop
+    anyone acting.
+    """
+    def act(**kw):
+        kw.setdefault("status_id", 1)
+        kw.setdefault("name", "X")
+        kw.setdefault("kind", "stat_mod")
+        kw.setdefault("category", "buff")
+        return status.Active(**kw)
+
+    # --- the sign rule. A magnitude's sign is the direction of the QUANTITY, not
+    # whether the status is good: `Aging` is a debuff reading "Damage taken +4%".
+    explicit = act(kind="damage_mod", category="debuff", magnitude=4.0, sign=1)
+    check("an explicit prose sign wins over the category",
+          explicit.signed_magnitude() == 4.0, str(explicit.signed_magnitude()))
+    inferred = act(category="debuff", stat="ATK", magnitude=35.0)
+    check("a stat debuff with no sign is inferred negative",
+          inferred.signed_magnitude() == -35.0, str(inferred.signed_magnitude()))
+    inferred_up = act(category="buff", stat="ATK", magnitude=35.0)
+    check("...and a stat buff positive", inferred_up.signed_magnitude() == 35.0)
+    undecidable = act(kind="damage_mod", category="misc", magnitude=40.0)
+    check("an undecidable direction yields None, never a guess",
+          undecidable.signed_magnitude() is None)
+
+    # --- stacking is additive, which is what "stacks up to N times" reads as.
+    u = unit("101", core.TEAM_PLAYER)
+    u.statuses = [act(status_id=1, category="debuff", stat="ATK", magnitude=35.0),
+                  act(status_id=2, category="debuff", stat="ATK", magnitude=35.0)]
+    check("two ATK-35% give x0.30, not x0.42",
+          abs(status.stat_multiplier(u, "ATK") - 0.30) < 1e-9,
+          str(status.stat_multiplier(u, "ATK")))
+    u.statuses = [act(category="debuff", stat="ATK", magnitude=250.0)]
+    check("a stack of debuffs cannot invert a stat",
+          status.stat_multiplier(u, "ATK") == 0.0)
+
+    # --- control skips a turn, but only the ones that actually stop you.
+    u.statuses = [act(kind="control", category="debuff", name="Stun")]
+    check("Stun immobilises", status.is_immobilized(u))
+    u.statuses = [act(kind="control", category="debuff", name="Taunt")]
+    check("Taunt does NOT -- it redirects a turn, it does not delete one",
+          not status.is_immobilized(u))
+
+    # --- a DoT ticks for the INFLICTER's ATK, snapshotted at apply time, so it keeps
+    # hurting for the caster's power after the caster's buffs expire or it dies.
+    v = unit("202", core.TEAM_ENEMY, atk=1)
+    v.statuses = [act(kind="dot", category="damage_over_time", magnitude=30.0,
+                      remaining=2, source_atk=1000)]
+    dot, hot, expired = status.tick(v)
+    check("a DoT uses the inflicter's snapshotted ATK", dot == 300, str(dot))
+    check("...and spends a turn of its duration", v.statuses[0].remaining == 1)
+    status.tick(v)
+    check("...and expires at zero", not v.statuses)
+
+    # --- shields eat damage before HP.
+    w = unit("303", core.TEAM_ENEMY)
+    sh = act(kind="shield", category="shield", shield_hp=250)
+    w.statuses = [sh]
+    landed, absorbed = status.absorb(w, 400)
+    check("a shield absorbs up to its capacity", (landed, absorbed) == (150, 250),
+          f"{landed}/{absorbed}")
+    check("...and is spent by what it took", sh.shield_hp == 0)
+
+    # --- statuses reach the damage formula.
+    a = unit("1", core.TEAM_PLAYER, atk=1000)
+    t = unit("2", core.TEAM_ENEMY, defence=500)
+    base, _ = formula.strike(a, t, 1.0, "ATK", random.Random(1))
+    a.statuses = [act(category="buff", stat="ATK", magnitude=50.0)]
+    buffed, _ = formula.strike(a, t, 1.0, "ATK", random.Random(1))
+    check("an ATK buff raises damage", buffed > base, f"{base} -> {buffed}")
+    a.statuses = []
+    t.statuses = [act(category="debuff", stat="DEF", magnitude=50.0)]
+    broken, _ = formula.strike(a, t, 1.0, "ATK", random.Random(1))
+    check("a DEF break raises damage taken", broken > base, f"{base} -> {broken}")
 
 
 def main():
@@ -165,6 +245,9 @@ def main():
         else:
             specs.skills()[-1] = saved
 
+    print("\nstatus state (phase 6):")
+    check_status_state()
+
     print("\nstatus rules:")
     caster, units = field(n_enemy=1)
     tgt = units[1]
@@ -175,12 +258,17 @@ def main():
     check("the pack has both removable and unremovable buffs",
           unrem is not None and plain is not None)
     if unrem and plain:
-        tgt.statuses = [{"id": unrem}, {"id": plain}]
+        for sid in (unrem, plain):
+            row = specs.status(sid)
+            tgt.statuses.append(status.Active(
+                status_id=sid, name=row["name"], kind=row["kind"],
+                category=row["category"], remaining=3,
+                unremovable=row["unremovable"]))
         spec = {"id": 0, "swings": 1,
                 "target": {"group": "enemy", "select": "all"},
                 "effects": [{"op": "remove_status", "slot": 0, "category": "buff"}]}
         core.execute(caster, spec, units, random.Random(1))
-        left = {s["id"] for s in tgt.statuses}
+        left = {s.status_id for s in tgt.statuses}
         check("a cleanse strips the removable buff", plain not in left)
         check("a cleanse does NOT strip the unremovable one", unrem in left)
 

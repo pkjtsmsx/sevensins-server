@@ -454,12 +454,50 @@ state, which is why this belongs BEFORE phase 6 rather than after.
 
 ---
 
-## Phase 6 — status STATE (the largest remaining gap)
+## Phase 6 — status STATE (built)
 
-The engine applies statuses; nothing tracks them. They are written to the wire, the
-client shows the icon and counts the duration down itself, but no server-side record
-exists, so **every status the new path applies is decoration**. A Freeze lands, the icon
-appears, and the target acts on its next turn regardless.
+`engine/status.py`. Statuses are now server-side state: they land on the unit, tick at
+the start of its turn, expire, and are read by the damage formula and the turn loop. A
+Freeze now actually stops the target acting.
+
+### The sign rule, which is not what it looks like
+
+The one genuinely subtle part. A magnitude's sign is **not** "buff or debuff". Over the
+3,849 sites that state a sign explicitly it agrees with the id-block category 3,508 times
+and disagrees 341 — and every disagreement is real: `Aging` is a debuff whose magnitude
+reads "Damage taken **+4%**". A positive number that is bad for you.
+
+So the sign describes the direction of the QUANTITY:
+
+1. an explicit prose sign always wins;
+2. otherwise the category decides **for a named stat** — a debuff lowers ATK/DEF/SPD/HP,
+   a buff raises it, which is unambiguous;
+3. otherwise the direction is UNKNOWN and the modifier is not applied.
+
+Rule 3 matters because "damage taken" and "damage dealt" are the same `kind` with
+opposite subjects; guessing there would silently invert an effect.
+
+### Other decisions worth keeping
+
+* **Percentages stack additively.** Two ATK-35% give ×0.30, not ×0.42 — that is what
+  "stacks up to N times" reads as, and what the old engine did. Floored at 0 so a stack
+  of debuffs cannot invert a stat.
+* **`control` is not all turn-skipping.** The registry files Taunt and Charm as control
+  too, but those REDIRECT a turn rather than deleting one, so `is_immobilized` matches by
+  name (Stun/Freeze/Daze/…) rather than by kind.
+* **A DoT snapshots the inflicter's ATK** at apply time, so it keeps hurting for the
+  caster's power after the caster's buffs expire or the caster dies.
+* **Immunity is narrow by design** — only a status whose own kind is `immunity` and whose
+  name names the incoming category blocks it. A broad "any immunity blocks anything" rule
+  would have CC Immunity blocking buffs.
+
+### Coexistence
+
+A unit's `statuses` list now holds both kinds — `battle_effects.Status` from the old path
+and `status.Active` from the new one — because the two engines share the unit. The legacy
+readers reach for `.definition` and `.tick()`, which an Active does not have, so every
+legacy call site filters through `battle._legacy_statuses`. That list shrinks to nothing
+as the old engine is retired, which is the point.
 
 Scale: **84% of playable cast attack skills (1,993 of 2,364) apply at least one status**,
 across 21,407 apply sites. This is also where the new engine's biggest measured advantage
