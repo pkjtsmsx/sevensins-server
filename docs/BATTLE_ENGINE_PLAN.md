@@ -364,7 +364,30 @@ Running a level-appropriate party on auto to a clear, over 24 sampled stages:
 | cleared, slow | 2 |
 | wipe | 6 |
 
-**Median 0.65× the 3-star turn limit — within the intended band.**
+**Median 0.83× the 3-star turn limit for a BARE party — within the intended band.**
+
+Two corrections were needed before that number meant anything, both from live play:
+
+* **Count `Battle.round`, not loop iterations.** `end_turn` increments `round` once per
+  unit ACTION, and it is what feeds `coll_f[0]` -> `CollectorData.TotalRound`, the value
+  the star condition is actually compared against. Counting loop passes inflated it,
+  because a wave advance costs an iteration and no action.
+* **The harness party is BARE** — level only, no gear, runes, soulmirrors, transcendence
+  or karma rank. Against a real level-100 account on the same characters:
+
+  | Lucifer | sim | real | ratio |
+  |---|---|---|---|
+  | ATK | 1719 | 2861 | **1.66×** |
+  | HP | 14064 | 25351 | 1.80× |
+  | DEF | 685 | 1000 | 1.46× |
+
+  and that gap lands directly on clear time: stage 6-4 took **10 rounds** in the harness
+  against **6 in the live game**. Every figure here is therefore a conservative lower
+  bound; a geared account sits near **0.50×** the limit.
+
+That is the right shape for progression — a bare party scrapes the 3-star pace, a geared
+one clears comfortably inside it. It also means the curve must NOT be tuned until the
+harness reads 1.0, which would make the game far too slow for anyone with equipment.
 
 All six wipes are side content, not campaign: Kizuna "Bond of STR/TEC", the arena
 "Round of 8", and the "Time House of the Souls" challenge tower. Those are designed to be

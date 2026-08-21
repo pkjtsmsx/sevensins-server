@@ -44,7 +44,25 @@ RATING_CLEAR_WITHIN_TURNS = 3
 # A level-appropriate party of five. Real accounts vary wildly; what matters for
 # calibration is that the same party is used at every stage's own level, so the only
 # thing changing is the content.
+#
+# IMPORTANT: this party is BARE -- level only, no gear, runes, soulmirrors, transcendence
+# or karma rank. Measured against a real level-100 account on the same characters:
+#
+#     Lucifer      sim      real     ratio
+#     ATK         1719      2861     1.66x
+#     HP         14064     25351     1.80x
+#     DEF          685      1000     1.46x
+#
+# and that gap shows up directly in clear times -- stage 6-4 took 10 rounds here against
+# 6 in the live game. So every number this tool prints is a CONSERVATIVE LOWER BOUND on
+# how fast a real account clears, and the true ratio-to-limit is roughly 0.6x whatever is
+# reported. Read the verdict with that in mind rather than tightening the curve to hit
+# 1.0 here, which would make the game far too slow for anyone with equipment.
 PARTY = [20961, 20941, 20801, 11001, 10981]
+
+# Divide the reported ratio by this to estimate a geared account. Measured, not guessed
+# (the ATK ratio above); update it if a better sample turns up.
+GEARED_SPEEDUP = 1.66
 
 # Characters cap here, so a stage whose `_stagelv` exceeds it is not asking for levels.
 LEVEL_CAP = 100
@@ -63,6 +81,11 @@ def turn_limits(stage_row):
 def simulate(stage_id, level, max_turns):
     """Run a whole fight on auto. -> (turns, outcome).
 
+    `turns` is `Battle.round`, NOT a loop counter. `end_turn` increments `round` once per
+    unit ACTION and it is what feeds `coll_f[0]` -> `CollectorData.TotalRound`, which is
+    the number the star condition is compared against. Counting loop iterations instead
+    inflated the figure, because a wave advance costs an iteration and no action.
+
     Uses the old `Battle` for wave/turn flow -- it owns that, and phase 5 only moved
     skill resolution -- with SEVENSINS_BATTLE_ENGINE=new doing the resolving.
     """
@@ -76,11 +99,11 @@ def simulate(stage_id, level, max_turns):
     for turn in range(1, max_turns + 1):
         if not [u for u in b.units.values()
                 if u.team == bt.TEAM_PLAYER and u.alive]:
-            return turn, "wipe"
+            return b.round, "wipe"
         if not [u for u in b.units.values()
                 if u.team == bt.TEAM_ENEMY and u.alive]:
             if b.wave >= b.wave_max:
-                return turn, "clear"
+                return b.round, "clear"
             b.advance_wave()
             continue
         actor = b.acting_unit()
@@ -96,10 +119,10 @@ def simulate(stage_id, level, max_turns):
         try:
             b.attack_cmd_json(attacker, defender, skill)
         except Exception as exc:                              # noqa: BLE001
-            return turn, f"raised: {type(exc).__name__}: {exc}"[:70]
+            return b.round, f"raised: {type(exc).__name__}: {exc}"[:70]
         b.spend_skill(attacker, slot)
         b.end_turn()
-    return max_turns, "timeout"
+    return b.round, "timeout"
 
 
 def main():
@@ -164,12 +187,17 @@ def main():
         print(f"\nturns / 3-star limit -- median {med:.2f}, "
               f"min {min(ratios):.2f}, max {max(ratios):.2f}")
         print("  (1.0 = exactly on the 3-star pace)")
+        geared = med / GEARED_SPEEDUP
+        print(f"  bare party {med:.2f}  ->  estimated geared account {geared:.2f} "
+              f"(/{GEARED_SPEEDUP})")
         if med < 0.35:
-            print("  VERDICT: damage is HOT -- clears far inside the intended pace.")
+            print("  VERDICT: damage is HOT even for a bare party.")
         elif med > 1.1:
-            print("  VERDICT: damage is COLD -- misses the intended pace.")
+            print("  VERDICT: damage is COLD -- a bare party misses the intended pace.")
         else:
-            print("  VERDICT: within the intended band.")
+            print("  VERDICT: a bare party is within the intended band; a geared one "
+                  "clears comfortably inside it, which is what progression should feel "
+                  "like.")
     return 0
 
 
