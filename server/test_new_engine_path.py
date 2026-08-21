@@ -434,6 +434,56 @@ def check_passive_rule_machinery():
               f"{fallen.hp}/{fallen.max_hp}")
 
 
+
+def check_headwind_stops_the_gauge():
+    """Headwind: "Move Gauge will not increase" -- on either team.
+
+    Reported from device: it was not preventing the gauge from filling at all, so a
+    headwinded unit kept taking turns. The block lives in `Unit.fill_time`/`fill_gauge`
+    and the ATB roll, none of which is team-aware -- the boss applying it to the party
+    has to work exactly as the party applying it to the boss.
+    """
+    from engine import status as est2
+
+    battle, _ = a_battle(stage=1000005, party=PASSIVE_PARTY)
+    allies = [u for u in battle.units.values() if u.team == bt.TEAM_PLAYER]
+    boss = next(u for u in battle.units.values() if u.team == bt.TEAM_ENEMY)
+
+    # The sets are derived from the registry's own wording, not a hand list -- both
+    # Headwind and Steady are kind `gauge`, so the kind cannot tell them apart.
+    gain, loss = est2._gauge_block_ids()
+    check("Headwind is derived as a gain-blocker", 4105 in gain, str(sorted(gain)[:4]))
+    check("Steady is derived as a loss-blocker", 4106 in loss, str(sorted(loss)[:4]))
+    check("  ...and neither is mistaken for the other",
+          4105 not in loss and 4106 not in gain)
+
+    # Pick allies whose bar is NOT already full: Headwind stops the gauge rising, it
+    # does not empty a bar already earned, so an already-full unit still takes its turn.
+    hit = [u for u in allies if u.scv < 99][:2]
+    check("there are allies with a partial bar to test", len(hit) == 2)
+    for u in hit:
+        u.statuses.append(est2.Active(status_id=4105, name="Headwind", kind="gauge",
+                                      category="shield", remaining=99))
+    before = {u.order: u.scv for u in battle.units.values()}
+    acted = []
+    for _ in range(14):
+        a = battle.acting_unit()
+        if a:
+            acted.append(a.order)
+        battle.end_turn()
+
+    for u in hit:
+        # The invariant is "does not RISE", not "does not change" -- the boss's
+        # after-action rule cuts the highest-HP ally's gauge by 30 a turn, and Headwind
+        # has nothing to say about a reduction. Asserting no change at all failed on
+        # exactly that, which is correct behaviour, not a bug.
+        check(f"headwinded ally {u.order} never gains gauge",
+              u.scv <= before[u.order] + 0.01, f"{before[u.order]} -> {u.scv}")
+        check(f"  ...and never acts", u.order not in acted, str(acted))
+    check("the fight still progresses for everyone else", bool(acted), str(acted))
+    check("  ...including the boss", boss.order in acted, str(acted))
+
+
 def main():
     was = bt.NEW_ENGINE
     bt.NEW_ENGINE = True                     # the whole point of this file
@@ -444,6 +494,7 @@ def main():
                    check_raid_boss_is_cc_immune,
                    check_damage_and_after_action_hooks,
                    check_passive_rule_machinery,
+                   check_headwind_stops_the_gauge,
                    check_statuses_reach_the_unit,
                    check_control_actually_skips_a_turn,
                    check_legacy_and_engine_statuses_coexist):

@@ -34,6 +34,7 @@ So the sign describes the direction of the QUANTITY, not whether the status is g
 Rule 3 is why `signed_magnitude` returns None rather than a number it cannot justify.
 """
 import dataclasses
+import re
 from typing import List, Optional
 
 from . import specs
@@ -272,6 +273,52 @@ REFLECT = {
 # "triggers once while dealing multiple attacks" -- a multi-hit skill reflects ONE time,
 # not once per swing, or a 4-hit skill would pay four times.
 REFLECT_ONCE_PER_SKILL = True
+
+
+# Statuses that stop the move gauge moving, derived from the registry's own wording
+# rather than a hand list: `Headwind` says "Move Gauge will not increase" and `Steady`
+# "will not decrease". Both are kind `gauge`, so the KIND cannot tell them apart -- and
+# there are 36 gauge statuses, most of which do neither.
+_GAUGE_STOP_GAIN = re.compile(
+    r"move gauge[^.]{0,40}?(will not|cannot|can\'t)\s*(increase|rise|fill)"
+    r"|(cannot|can\'t|unable to)\s*increase[^.]{0,20}move gauge"
+    r"|disables? (the )?move gauge", re.I)
+_GAUGE_STOP_LOSS = re.compile(
+    r"move gauge[^.]{0,40}?(will not|cannot|can\'t)\s*(decrease|drop|reduce)"
+    r"|immun\w*[^.]{0,40}move gauge (reduction|decrease)", re.I)
+
+_gauge_block_cache = None
+
+
+def _gauge_block_ids():
+    """-> (ids that stop the gauge RISING, ids that stop it FALLING)."""
+    global _gauge_block_cache
+    if _gauge_block_cache is not None:
+        return _gauge_block_cache
+    gain, loss = set(), set()
+    try:
+        for sid, row in (specs.statuses() or {}).items():
+            text = " ".join(str(row.get(k) or "") for k in ("description", "name"))
+            if _GAUGE_STOP_GAIN.search(text):
+                gain.add(int(sid))
+            if _GAUGE_STOP_LOSS.search(text):
+                loss.add(int(sid))
+    except Exception:                                        # noqa: BLE001
+        pass
+    _gauge_block_cache = (gain, loss)
+    return _gauge_block_cache
+
+
+def blocks_gauge_gain(unit):
+    """Headwind and friends: this unit's move gauge does not fill."""
+    ids, _ = _gauge_block_ids()
+    return any(st.status_id in ids for st in _actives(unit))
+
+
+def blocks_gauge_loss(unit):
+    """Steady and friends: this unit's move gauge cannot be reduced."""
+    _, ids = _gauge_block_ids()
+    return any(st.status_id in ids for st in _actives(unit))
 
 
 def reflect_amount(victim, attacker):

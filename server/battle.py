@@ -1015,10 +1015,19 @@ class Unit(_engine_core.Unit):
 
     def fill_time(self):
         """How long this unit still needs to fill its move gauge, in SPD-units. Used
-        only to compare units against each other, so the absolute scale is arbitrary."""
+        only to compare units against each other, so the absolute scale is arbitrary.
+
+        A unit whose gauge cannot rise never becomes ready, so it reports infinity --
+        `Headwind` says "Move Gauge will not increase", and without this it kept its
+        place in the queue and took turns anyway.
+        """
+        if _engine_status.blocks_gauge_gain(self):
+            return float("inf")
         return max(0.0, SCV_FULL - self.scv) / max(1, self.spd)
 
     def fill_gauge(self, seconds):
+        if _engine_status.blocks_gauge_gain(self):
+            return
         self.scv = min(float(SCV_FULL), self.scv + seconds * max(1, self.spd))
 
     def passives(self):
@@ -1353,13 +1362,17 @@ class Battle:
         # the way they always did: faster first, then the player team, then slot.
         def rank_key(u):
             return (-u.spd, u.team, u.index)
-        step = min(u.fill_time() for u in alive)
-        if step > 0:
+        # A Headwinded unit reports an infinite fill time, so the step is taken over
+        # whoever can actually fill. If NOBODY can, the gauges simply do not advance --
+        # better a stalled queue than inf arithmetic on every bar.
+        fillable = [u for u in alive if not _engine_status.blocks_gauge_gain(u)]
+        step = min((u.fill_time() for u in fillable), default=0.0)
+        if step > 0 and step != float("inf"):
             for u in alive:
                 u.fill_gauge(step)
             # Same rounding guard as the projection below: the leader must actually
             # read full, or the client draws a 99% bar on the unit taking its turn.
-            lead = min(alive, key=lambda u: (u.fill_time(), *rank_key(u)))
+            lead = min(fillable, key=lambda u: (u.fill_time(), *rank_key(u)))
             lead.scv = float(SCV_FULL)
         rank = {u.order: rank_key(u) for u in alive}
         sim = {u.order: float(u.scv) for u in alive}
@@ -1371,15 +1384,21 @@ class Battle:
                 break
             ready = [u for u in alive if sim[u.order] >= FULL_EPS]
             if not ready:
-                gap = min((SCV_FULL - sim[u.order]) / max(1, u.spd) for u in alive)
-                for u in alive:
+                # The PROJECTION has to honour Headwind too, or the client's lookahead
+                # shows a unit that can never actually come round.
+                movers = [u for u in alive
+                          if not _engine_status.blocks_gauge_gain(u)]
+                if not movers:
+                    break
+                gap = min((SCV_FULL - sim[u.order]) / max(1, u.spd) for u in movers)
+                for u in movers:
                     sim[u.order] = min(float(SCV_FULL),
                                        sim[u.order] + gap * max(1, u.spd))
                 # Whoever needed the least time IS full now; float rounding must not
                 # be allowed to leave the step with nobody ready and the loop stuck.
                 ready = [u for u in alive if sim[u.order] >= FULL_EPS]
                 if not ready:
-                    ready = [min(alive, key=lambda u: (SCV_FULL - sim[u.order])
+                    ready = [min(movers, key=lambda u: (SCV_FULL - sim[u.order])
                                  / max(1, u.spd))]
             nxt = min(ready, key=lambda u: rank[u.order])
             sim[nxt.order] = 0.0
@@ -1875,6 +1894,9 @@ class Battle:
             # caster is at a full bar when it acts, so the increase clamps to 100 and is
             # then wiped by the line above. Carried as a pending delta so it survives.
             pending = getattr(acted, "pending_scv", 0.0)
+            if pending > 0 and _engine_status.blocks_gauge_gain(acted):
+                acted.pending_scv = 0.0        # Headwind refuses the head start too
+                pending = 0.0
             if pending:
                 acted.scv = max(0.0, min(float(SCV_FULL), acted.scv + pending))
                 acted.pending_scv = 0.0

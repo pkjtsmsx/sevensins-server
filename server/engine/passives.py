@@ -473,6 +473,9 @@ def fire(trigger, holder, passive_skill_id, units, ctx=None, fired=None):
                 elif rule.effect == DAMAGE:
                     target.hp = max(0, target.hp - amount)
                 elif rule.effect == GAUGE:
+                    # Steady refuses a reduction; a gain still lands.
+                    if amount < 0 and _status.blocks_gauge_loss(target):
+                        continue
                     target.scv = max(0.0, min(
                         100.0, float(getattr(target, "scv", 0.0)) + amount))
                 elif rule.effect == REVIVE:

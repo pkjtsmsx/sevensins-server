@@ -26,7 +26,7 @@ deletion rather than another sync: the state is already in the right place.
 """
 import random
 
-from . import core, specs, wire
+from . import core, specs, status as _status, wire
 
 SCV_FULL = 100.0
 
@@ -48,9 +48,19 @@ def _write_back(battle, outcome):
             # The caster is mid-turn at a full bar, and `end_turn` is about to zero it.
             # Stashed instead, and applied there once the bar has been spent -- which is
             # what "After the action, the caster's Move Gauge will increase N%" means.
+            if float(g["percent"]) > 0 and _status.blocks_gauge_gain(u):
+                continue
             u.pending_scv = getattr(u, "pending_scv", 0.0) + float(g["percent"])
         else:
-            u.scv = max(0.0, min(SCV_FULL, float(u.scv) + float(g["percent"])))
+            delta = float(g["percent"])
+            # Symmetric refusals: Steady ("will not decrease") blocks a cut, Headwind
+            # ("will not increase") blocks a boost. A gauge GAIN bypasses fill_gauge
+            # entirely, so it has to be checked here too.
+            if delta < 0 and _status.blocks_gauge_loss(u):
+                continue
+            if delta > 0 and _status.blocks_gauge_gain(u):
+                continue
+            u.scv = max(0.0, min(SCV_FULL, float(u.scv) + delta))
 
     dealt = outcome.total_damage()
     caster = battle.units.get(outcome.caster)
