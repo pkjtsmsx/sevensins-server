@@ -387,6 +387,28 @@ client renders, which we have been sending as zeros.
 
 ---
 
+## 3.7 Systems referenced by prose that never shipped
+
+Worth recording so they are not chased twice.
+
+**Fetish (珍寶殿, "Fetish Haven")** is referenced by skill prose -- Gabriel's Campus
+Correction and Metatron's Field Hospital both say their second-tier classes "can be
+unlocked at the Fetish and Consonance interface" -- and by quest text ("Complete Activate
+Fetish Haven: Awakening of Red LV1"). It does not exist in the client:
+
+* none of the 25 `Player*` subsystems is Fetish or Treasure;
+* there is no panel class and no prefab bundle for it;
+* `panel_localize`'s only three matches are bulletin-board quest ARTWORK
+  (`BulletinQuest-PathofFetish`), not a system UI;
+* in game, its section in the Relics panel reads **"Coming Soon"** (text 111223
+  `敬請熱切關注!!`, or 36 "This feature will be available soon").
+
+So it was planned and never completed before end of life. Those skill tiers were
+unreachable on the live server too, which means implementing them would ADD behaviour the
+real game never had -- the correct treatment is to leave them out, not to model them.
+
+---
+
 ## 4. What the client does NOT provide
 
 * **Damage numbers.** No damage formula exists client-side, at all.

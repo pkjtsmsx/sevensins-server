@@ -337,8 +337,17 @@ PASSIVES = {
 # Clauses the rule shape cannot express yet. Listed per passive so the gap is visible
 # instead of quietly absent.
 UNMODELLED = {
-    2096131: ["the second-tier Holy Arbiter / Shadow Ruler classes -- they are Fetish "
-              "unlocks, i.e. account progression we do not model at all"],
+    # NOT a gap: the Fetish system NEVER SHIPPED. Its section in the Relics panel reads
+    # "Coming Soon" (text 111223 / 敬請熱切關注!!, or 36 "This feature will be available
+    # soon"), and the client has no subsystem, panel class or prefab bundle for it -- 25
+    # Player* subsystems and none is Fetish. Only two skills in the whole pack mention
+    # it, Gabriel's and Metatron's passives, both saying second-tier classes "can be
+    # unlocked at the Fetish and Consonance interface".
+    #
+    # So these tiers were unreachable in the live game too, and modelling them would ADD
+    # behaviour the real server never had. Left unimplemented deliberately.
+    2096131: ["Holy Arbiter / Shadow Ruler -- Fetish unlocks, and Fetish never shipped "
+              "(Relics panel says Coming Soon); unreachable in the live game as well"],
     2094131: [],
     1100131: [],
     2080131: ["Stay Low: if affected by The Fallen, strip the target's unstackable "
