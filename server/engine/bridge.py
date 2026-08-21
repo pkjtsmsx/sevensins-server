@@ -7,11 +7,17 @@ rewards and the socket; only the *resolution of one skill use* moves across.
     SEVENSINS_BATTLE_ENGINE=new
 
 **Scope, stated plainly.** The new engine owns damage, targeting, swing structure and the
-`data` payload. It does NOT yet own persistent status state: the old `Battle` keeps its
-own status bookkeeping, and statuses this path applies are written to the wire and to the
-old unit's list, but the old engine's per-turn status ticking is what still advances them.
-So the flag is for A/B work and the differential, not a finished replacement. Phase 6 is
-moving state ownership across.
+**Statuses this path applies are COSMETIC.** They are written to the wire -- the client
+shows the icon and counts the duration down itself -- but nothing writes them into the
+old `Battle`'s own status list, so the server holds no record and they have no mechanical
+effect. A Freeze lands, the icon appears, and the target acts on its next turn anyway.
+
+That is the largest remaining gap and the reason this flag is A/B work rather than a
+replacement: on the new path the engine applies statuses to ~21,400 sites that the old
+one largely ignored, and today every one of them is decoration. Fixing it means moving
+status STATE across (apply, tick, expire, and the stat/turn effects that read it), which
+is a bigger change than the resolution move was -- the old engine ticks statuses inside
+`end_turn` and reads them in damage, targeting and turn skipping.
 
 The mirror is deliberately one-way per call: build `core.Unit` mirrors, resolve, then
 write back only HP. Anything else written back would be the new engine quietly reaching

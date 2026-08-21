@@ -408,6 +408,51 @@ formula from an overlevelled fight is how this was first misread. Always calibra
 
 ---
 
+## Phase 6 — status STATE (the next piece, and the largest remaining gap)
+
+The engine applies statuses; nothing tracks them. They are written to the wire, the
+client shows the icon and counts the duration down itself, but no server-side record
+exists, so **every status the new path applies is decoration**. A Freeze lands, the icon
+appears, and the target acts on its next turn regardless.
+
+Scale: **84% of playable cast attack skills (1,993 of 2,364) apply at least one status**,
+across 21,407 apply sites. This is also where the new engine's biggest measured advantage
+over the old one sits — 283 sampled skills where the old engine applied *none* — and none
+of it is real yet.
+
+What has to move, by share of apply sites:
+
+| kind | sites | what it needs |
+|---|---|---|
+| stat_mod | 5,749 (27%) | ATK/DEF/SPD modifiers read during damage |
+| control | 3,757 (18%) | turn skipping — the old engine's only status read (`is_immobilized`) |
+| other | 3,248 (15%) | unclassified; needs a pass before it can be executed |
+| damage_mod | 2,094 (10%) | multipliers in `formula.strike` |
+| immunity | 1,733 (8%) | gate on application, plus the `unremovable` flag already in the registry |
+| dot | 1,681 (8%) | per-turn tick |
+| gauge / heal / block_heal / shield | 2,799 (13%) | one rule each |
+
+The data is ready: `statuses.json` has the kind, category, stack cap and dispellability,
+and each apply site carries its own duration and magnitude with provenance. The gaps are
+known and visible — duration on 53% of sites, magnitude on 32% — so an unstated one is a
+policy decision, not a surprise.
+
+**Why it is bigger than the resolution move.** The old `Battle` ticks statuses inside
+`end_turn` and reads them in damage, targeting and turn skipping, so this is not one
+seam. The engine needs to own apply / tick / expire and every read, which means the
+bridge stops being a one-way HP mirror.
+
+### After that
+
+* **op 1 riders (326 sites)** whose kind is ambiguous, plus ops 7/3/118/6/11/122/119
+  (~1,300 sites). Ops 6 and 118 are understood in shape but name their triggered skill
+  only in prose, so they are not executable at any decoding effort.
+* **2,623 damage effects with no coefficient** and 1,411 magnitudes — all flagged, none
+  silent.
+* **Enemy AI** is still `Battle.auto_move`.
+
+---
+
 ## Risks
 
 * **Trigger timing is the weakest link.** The no-operand opcodes are prose inference, not
