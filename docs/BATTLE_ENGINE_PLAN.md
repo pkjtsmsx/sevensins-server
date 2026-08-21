@@ -183,6 +183,55 @@ hard. Not exact, but derived from the game's own data.
 
 Phases 0–2 change no behaviour and are useful even if the rewrite stalls.
 
+## Coverage vs the old prose parser (measured 2026-08-20)
+
+The old system parsed **English prose**; the new one reads the **opcode script** and
+falls back to prose only where no column exists. Headline:
+
+| | old (`skill_effects.json`) | new (`battle_data/skills/`) |
+|---|---|---|
+| rows in corpus | 12,893 | **14,410** |
+| ...with >= 1 effect | 10,309 (80.0%) | **12,866 (89.3%)** |
+| ...fully decoded | 5,865 (45.5%) | **7,631 (53.0%)** |
+
+The share is the least interesting row. Three things matter more:
+
+**1,517 rows the old parser could not see at all** — it keyed off `note1_en`, so a row
+with no English translation did not exist. Among them: **544 sub-skills** (the type-7
+follow-ups) and 515 passives, i.e. precisely the multi-hit and chain machinery the
+rewrite exists to fix.
+
+**1,159 enemy skills that silently did nothing.** Damage is the one effect with no
+opcode, so its coefficient must come from prose — but *whether* a skill attacks is
+structural (`hit >= 1` + an enemy target group). The old code conflated the two and
+emitted no damage entry when the prose had no percentage, so every untranslated mob and
+boss attack (e.g. 100201 `爆触手`) compiled to nothing. Now the effect is always emitted
+and only the coefficient can be unknown:
+
+| coefficient source | effects |
+|---|---|
+| English prose | 8,346 (84%) |
+| **original Chinese** `95%攻擊力` | 633 (6%) |
+| unknown — engine applies a policy, knowingly | 986 (10%) |
+
+The Chinese recovery is not a guess: `_note1` is the source language and carries a
+percentage in *more* rows than the English (11,041 vs 10,837). It writes the percentage
+before the stat, which is why an English-shaped pattern found nothing there.
+
+**821 multi-hit disagreements (11.2%).** Where both systems decoded the same skill, the
+old prose `times` and the new measured cinematic swing count differ on 821 of 7,304 —
+`Glory Slash` old=1 / new=2, `Depression II` old=1 / new=3. The cinematic is ground truth
+(§3), so those are old-system errors, and they are the reported bug: *"some skills that
+should hit multiple times are not doing this."*
+
+**The failure mode changed, which matters more than the count.** Prose parsing can be
+confidently wrong — it reads English riddled with typos and returns a number either way.
+Opcode decoding either recognises an opcode or files it under `unknown`, and every
+inferred value now carries a `source`. Nothing is silently defaulted: an unknown duration
+is `null`, never `0`.
+
+---
+
 ## Risks
 
 * **Trigger timing is the weakest link.** The no-operand opcodes are prose inference, not

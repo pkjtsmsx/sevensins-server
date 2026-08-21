@@ -29,8 +29,13 @@ SWINGS_FILE = os.path.join(SERVER, "battle_data/cinematic_swings.json")
 OUT_DEFAULT = os.path.join(SERVER, "battle_data/skills.json")
 
 sys.path.insert(0, SERVER)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.chdir(SERVER)
-import battle as bt  # noqa: E402
+# design_data is the design-PACK reader and has no battle imports. Reaching it via
+# `import battle` (as this did) needlessly pulled the OLD engine into the new pipeline;
+# nothing here should touch it.
+import design_data as dd  # noqa: E402
+import status_prose as sp  # noqa: E402
 
 SKILL_TYPE = {1: "com_attack", 2: "skill", 3: "sp_skill", 4: "passive",
               5: "support", 6: "status", 7: "sub_skill", 10: "god_item",
@@ -57,11 +62,77 @@ STATUS_BLOCK = {
 OP_APPLY, OP_APPLY_CHANCE, OP_REMOVE, OP_FOLLOW_UP = 112, 113, 114, 117
 OP_MODIFY_CD = 115
 
+# Operandless EFFECT opcodes, decoded by prose enrichment against the whole corpus: for
+# each opcode, how much more often its rows mention a concept than the corpus baseline.
+# The test is decisive because these three also appear ALONE on hundreds of rows, where
+# there is nothing else the prose could be describing.
+#
+#   116  move gauge   92% of 2,478 rows vs 6.4% baseline (4.2x); alone on 414 rows,
+#                     375 of which say "Move Gauge" / 行動值
+#   111  revive       98% of 245 rows vs 4% baseline (23x); alone on 14 rows reading 復活
+#   5    heal         84% of 919 rows vs 20% baseline (4.2x)
+#
+# Their MAGNITUDE is not encoded -- the operand is always 0 -- so it comes from prose on
+# the same three-tier basis as everything else, and is null when unstated.
+OP_EFFECT_NO_OPERAND = {116: "modify_gauge", 111: "revive", 5: "heal"}
+
+# --- op 1: the attack rider -------------------------------------------------------
+#
+# 1,195 sites, the largest single gap after 116/111/5. It is NOT one effect. Evidence:
+#
+#   * it rides on ATTACKS -- 87% of its rows are com_attack/skill/sp_skill and 93% of
+#     them deal damage (corpus baseline 58%). op 5 by contrast is 46% passives with a
+#     damage rate at baseline, which is what separates the two heal-ish opcodes.
+#   * on the 137 rows where op 1 is the ONLY opcode the prose partitions cleanly, with
+#     NO overlap: 102 heal ("Deals N% ATK as damage and recovers the caster's HP"),
+#     30 bonus damage ("if the target is stunned, additionally deal 100% ATK once"),
+#     5 neither.
+#   * across all 1,136 rows with prose the same split holds at 422 / 422.
+#
+# So the opcode encodes "this attack carries an extra effect"; WHICH effect is only in
+# prose, exactly as magnitudes are. 74% classify unambiguously; the remainder stay in
+# `unknown` rather than being guessed, because emitting a rider with no kind would be an
+# effect the engine silently skips.
+OP_ATTACK_RIDER = 1
+_RIDER_HEAL = re.compile(r"recover|restore|heal|absorb|回復|恢復|補血", re.I)
+_RIDER_DMG = re.compile(
+    r"additionally deal|extra .{0,10}(atk|damage)|額外造成|as damages", re.I)
+# The rider's own percentage, not the skill's main coefficient: a parenthetical
+# "(by 30% ATK)" for heals, or the number right after "additionally deal(s)".
+_RIDER_PCT_HEAL = re.compile(
+    r"(?:recovers?|restores?|heals?)[^.]{0,60}?(\d+(?:\.\d+)?)\s*%", re.I)
+_RIDER_PCT_DMG = re.compile(
+    r"additionally deals?[^.]{0,40}?(\d+(?:\.\d+)?)\s*%", re.I)
+
+
+def attack_rider(r):
+    """-> the op-1 rider effect, or None when its kind cannot be read."""
+    note = r.get("_note1_en") or r.get("_note1") or ""
+    if not note.strip():
+        return None
+    heal, dmg = bool(_RIDER_HEAL.search(note)), bool(_RIDER_DMG.search(note))
+    if heal == dmg:                      # neither, or both -- genuinely ambiguous
+        return None
+    kind = "heal" if heal else "bonus_damage"
+    m = (_RIDER_PCT_HEAL if heal else _RIDER_PCT_DMG).search(note)
+    return {"kind": kind,
+            "percent": float(m.group(1)) if m else None,
+            "source": "prose" if m else None}
+
+# Percent for the operandless effects, e.g. "increases Move Gauge by 30%",
+# "recovers the caster's Max HP by 15%", "recovers their HP by 35%".
+_PCT_ANY = re.compile(r"(\d+(?:\.\d+)?)\s*%")
+
 _COEF = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*(ATK|DEF|Max HP|HP)", re.I)
+# Chinese writes it either way round: `攻擊力95%` or `95%攻擊力`.
+_COEF_ZH = re.compile(
+    r"(攻擊力|最大體力|防禦力)\s*(\d+(?:\.\d+)?)\s*%"
+    r"|(\d+(?:\.\d+)?)\s*%\s*(?:的)?\s*(攻擊力|最大體力|防禦力)")
+_ZH_BASIS = {"攻擊力": "ATK", "防禦力": "DEF", "最大體力": "MAX_HP"}
 
 
 def _text(tid):
-    row = (bt.dd.rows("text") or {}).get(tid) or (bt.dd.rows("text") or {}).get(str(tid))
+    row = (dd.rows("text") or {}).get(tid) or (dd.rows("text") or {}).get(str(tid))
     if not row:
         return None
     return row.get("_text_en") or row.get("_text") or None
@@ -121,6 +192,88 @@ def status_meta(rows, sid):
             "category": cat, "stackable": stackable, "stack_cap": cap}
 
 
+_CORPUS = None
+
+
+def corpus_defaults(rows):
+    """-> {status name key: {duration, magnitude, agreement, samples}}.
+
+    Built once over every glossary line in the pack. Used ONLY as a fallback: 12,080 of
+    the 21,407 apply sites are on a skill whose prose never mentions the status (the
+    glossary lists what the description names, and passives, sub-skills and untranslated
+    rows name nothing), so without a fallback more than half the effect graph would carry
+    no duration at all.
+
+    `agreement` is the share of corpus bodies backing the modal value, and it is the
+    whole point of doing it this way: Daze agrees 93% across 473 bodies and a default is
+    genuinely safe, while Iron Wrist agrees on duration only 74% and on magnitude 31%,
+    where a default would be a fabricated number. The caller applies the threshold.
+    """
+    global _CORPUS
+    if _CORPUS is not None:
+        return _CORPUS
+    import collections
+    per = collections.defaultdict(list)
+    for row in rows.values():
+        for name, body in sp.glossary_lines(row.get("_note1_en")).items():
+            per[sp.norm_name(name)].append(sp.parse(body))
+    out = {}
+    for key, parsed in per.items():
+        entry = {"samples": len(parsed)}
+        for field in ("duration", "magnitude"):
+            vals = [p[field] for p in parsed if p[field] is not None]
+            if vals:
+                c = collections.Counter(vals).most_common(1)[0]
+                entry[field] = c[0]
+                entry[field + "_agreement"] = round(c[1] / len(vals), 3)
+            else:
+                entry[field] = None
+                entry[field + "_agreement"] = 0.0
+        out[key] = entry
+    _CORPUS = out
+    return out
+
+
+# Below this share of corpus agreement a modal value is a guess, not a reading, and the
+# field is left unknown instead. 0.8 keeps the control statuses (Daze 93%, Charm 98%,
+# Stun 95%, Taunt 93%, All DMG Reduction 98%) and drops Iron Wrist's 74%.
+DEFAULT_MIN_AGREEMENT = 0.8
+
+
+def status_numbers(rows, skill_row, status_id):
+    """-> the duration/magnitude for THIS skill applying THIS status, with provenance.
+
+    Three tiers, and `source` says which was used so a wrong number is attributable:
+      "skill"          -- the applying skill's own `* Name: ...` line (authoritative)
+      "corpus_default" -- the modal value across the pack, agreement >= threshold
+      None             -- nothing stated; the engine must apply a policy, knowingly
+    """
+    name = (rows.get(status_id) or {}).get("_name_en") \
+        or (rows.get(status_id) or {}).get("_name")
+    key = sp.norm_name(name)
+    lines = {sp.norm_name(k): v for k, v in
+             sp.glossary_lines(skill_row.get("_note1_en")).items()}
+    if key in lines:
+        got = sp.parse(lines[key])
+        got["source"] = "skill"
+        return got
+
+    d = corpus_defaults(rows).get(key)
+    out = {"duration": None, "permanent": False, "magnitude": None,
+           "magnitude_sign": None, "stat": None, "stacks": None, "raw": None,
+           "source": None}
+    if d:
+        used = False
+        for field in ("duration", "magnitude"):
+            if d[field] is not None and d[field + "_agreement"] >= DEFAULT_MIN_AGREEMENT:
+                out[field] = d[field]
+                used = True
+        if used:
+            out["source"] = "corpus_default"
+            out["default_samples"] = d["samples"]
+    return out
+
+
 def effects(rows, r):
     """-> (effects, unknown) read straight off the opcode slots.
 
@@ -138,7 +291,10 @@ def effects(rows, r):
         if op in (OP_APPLY, OP_APPLY_CHANCE) and aid in rows:
             out.append({"op": "apply_status", "slot": i,
                         "chance": op == OP_APPLY_CHANCE,
-                        "status": status_meta(rows, aid)})
+                        "status": status_meta(rows, aid),
+                        # Per-(skill, status): no column carries these, and they change
+                        # with skill level while act_id does not. See contract doc 5.1.
+                        "numbers": status_numbers(rows, r, aid)})
         elif op == OP_REMOVE:
             if aid in rows:
                 out.append({"op": "remove_status", "slot": i,
@@ -153,6 +309,17 @@ def effects(rows, r):
                                 or (rows.get(aid) or {}).get("_name")})
         elif op == OP_MODIFY_CD:
             out.append({"op": "modify_cd", "slot": i})
+        elif op == OP_ATTACK_RIDER and attack_rider(r):
+            out.append({"op": "attack_rider", "slot": i, **attack_rider(r)})
+        elif op in OP_EFFECT_NO_OPERAND:
+            # The opcode says WHAT; only prose says how much. A skill with an unstated
+            # magnitude still executes the right kind of effect, which is strictly better
+            # than filing the whole thing under `unknown` and executing nothing.
+            note = r.get("_note1_en") or r.get("_note1") or ""
+            m = _PCT_ANY.search(note)
+            out.append({"op": OP_EFFECT_NO_OPERAND[op], "slot": i,
+                        "percent": float(m.group(1)) if m else None,
+                        "source": ("prose" if m else None)})
         else:
             # Not decoded. Kept OUT of `effects` on purpose: the engine executes
             # `effects`, so an undecoded opcode sitting in that list would be silently
@@ -164,21 +331,59 @@ def effects(rows, r):
     return out, unknown
 
 
-def damage(r):
-    """-> the damage entry, from prose. The ONE inferred field."""
-    note = r.get("_note1_en") or ""
-    m = _COEF.search(note)
-    if not m:
-        return None
+def damage(r, targets_enemy):
+    """-> the damage entry, or None if this skill genuinely does not attack.
+
+    Damage is the one thing with NO opcode: there is no `deal damage` verb in
+    action[]. So its coefficient can only be read from prose -- but *whether* a skill
+    attacks is structural (an enemy-targeting attack row with hit >= 1), and those two
+    facts must not be conflated.
+
+    They were. Emitting nothing when the prose had no percentage meant 1,159 real
+    enemy-targeting skills -- the untranslated mob and boss attacks, e.g. 100201
+    `爆触手` -- compiled to no damage effect at all and would have silently done
+    nothing in a fight. That is the same silent-failure class as a zero duration, and
+    it gets the same treatment: emit the effect, mark the coefficient unknown.
+
+    Sources, in order of authority:
+      "en"   -- the English note states `N% ATK`
+      "zh"   -- the Chinese note states it; `_note1` is the ORIGINAL language and
+                carries a percentage in MORE rows than the English (11,041 vs 10,837),
+                so it is a recovery, not a guess
+      None   -- no percentage in any language (904 enemy skills, mostly rows whose note
+                was left as unfilled boilerplate: `強烈的一擊，%固定機率使對手的%(回合)。`).
+                The engine must apply a default and know that it did.
+    """
+    note_en = r.get("_note1_en") or ""
+    m = _COEF.search(note_en)
+    basis, coef, source = None, None, None
+    if m:
+        basis = m.group(2).upper().replace(" ", "_")
+        coef = round(float(m.group(1)) / 100.0, 4)
+        source = "en"
+    else:
+        # The Chinese writes the percentage BEFORE the stat -- `95%攻擊力的2段傷害` --
+        # which is why the English-shaped pattern finds nothing in these rows.
+        m = _COEF_ZH.search(r.get("_note1") or "")
+        if m:
+            stat = m.group(1) or m.group(4)
+            pct = m.group(2) or m.group(3)
+            basis = _ZH_BASIS.get(stat, "ATK")
+            coef = round(float(pct) / 100.0, 4)
+            source = "zh"
+
+    if coef is None and not (targets_enemy and (r.get("_count") or 0) >= 1):
+        return None                      # not an attack at all -- correctly no damage
+
     times = None
+    low = note_en.lower()
     for word, n in (("twice", 2), ("three times", 3), ("four times", 4),
                     ("five times", 5)):
-        if word in note.lower():
+        if word in low:
             times = n
             break
-    return {"op": "damage", "basis": m.group(2).upper().replace(" ", "_"),
-            "coefficient": round(float(m.group(1)) / 100.0, 4),
-            "prose_times": times, "source": "prose"}
+    return {"op": "damage", "basis": basis, "coefficient": coef,
+            "prose_times": times, "source": source}
 
 
 def compile_skill(rows, sid, swings_by_act):
@@ -207,7 +412,8 @@ def compile_skill(rows, sid, swings_by_act):
         "cinematic": act or None,
         "effects": [],
     }
-    d = damage(r)
+    d = damage(r, spec["target"].get("group") == "enemy"
+               and spec["type"] in ("com_attack", "skill", "sp_skill", "sub_skill"))
     if d:
         spec["effects"].append(d)
     eff, unknown = effects(rows, r)
@@ -225,7 +431,7 @@ def cast_owners(rows):
     skills at all, 64 of them safe as filenames.
     """
     owners = {}
-    for cid, c in (bt.dd.rows("char") or {}).items():
+    for cid, c in (dd.rows("char") or {}).items():
         name = (c.get("_name_en") or "").strip()
         if not name or not re.fullmatch(r"[A-Za-z0-9 _.'-]+", name):
             continue
@@ -243,7 +449,7 @@ def main():
     ap.add_argument("--stats", action="store_true")
     args = ap.parse_args()
 
-    rows = bt.dd.rows("skill") or {}
+    rows = dd.rows("skill") or {}
     swings_by_act = {}
     if os.path.isfile(SWINGS_FILE):
         with open(SWINGS_FILE) as f:

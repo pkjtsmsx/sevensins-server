@@ -1281,9 +1281,19 @@ class Battle:
             step is zero, so calling this again (a death prune, a resume) is free.
           * the rest of the queue is simulated on a COPY, so merely showing the order
             never spends anyone's gauge.
-        The projection is deduped down to one entry per unit: `line` has always been a
-        permutation of the live orders and UpdateTimeLine keys its row per unit, so a
-        fast unit that would lap the field stays a single entry.
+        The projection is deduped down to one entry per unit, and that is safe for a
+        reason worth writing down: the client does NOT read `line[1]` for its "Next"
+        badge. `BattleUnitManager.GetNextAction` (0x197E100) re-runs the ATB itself from
+        `LightBattleChar.Scv`/`SPD` -- refreshed each turn out of `sync` -- docking the
+        head of `line` by a full gauge and putting it back in the running. So `line`
+        supplies MEMBERSHIP plus whoever acts now; the lookahead is the client's own, and
+        it predicts a fast unit lapping the field without our help. See
+        docs/BATTLE_CLIENT_CONTRACT.md §3.5.
+
+        Known divergence: on an exact tie in fill time the client keeps the earliest
+        entry in its list (the actor having been re-inserted at the tail), i.e. it
+        prefers the unit that did NOT just act, while `rank_key` below prefers the faster
+        one. The badge then points at the wrong portrait for one turn.
         """
         alive = [u for u in self.units.values() if u.alive]
         if not alive:

@@ -71,3 +71,7 @@ banner_art/
 # files readable when you do want to inspect one.
 server/battle_data/skills/
 server/battle_data/cinematic_swings.json
+# Likewise tools/compile_statuses.py. NOTE: distinct from the tracked
+# status_catalog.json / skill_effects.json, which belong to the OLD engine and are
+# retired at the phase-5 cutover, not by this file.
+server/battle_data/statuses.json

@@ -225,6 +225,136 @@ fight silently stalls. See [[sevensins-move-gauge-and-swings]].
 
 ---
 
+## 3.5 Turn order — the server picks the actor, the client predicts the NEXT one itself
+
+Worth stating precisely, because the two halves are decided in different places and only
+one of them is ours.
+
+**Who acts now** is purely the server's. `PlayerBattle.UpdateTimeLine` (0x168C024) is a
+bare assignment — `BattleData.ActionOrderList = battleCmd.tempActionOrderList` (wire key
+`line`), no sorting, no filtering — and `PlayerBattle.GetFirst` reads `line[0]`. So
+whatever we put in `line[0]` acts, full stop.
+
+**The "Next" badge is NOT `line[1]`.** `AttackState.OnEnter` (0x17FAB3C) calls
+`SetNextSign(PlayerBattle.GetNextUnit())`, and `GetNextUnit` delegates to
+`BattleUnitManager.GetNextAction(ActionOrderList)` (0x197E100), which **re-runs the ATB
+simulation client-side**:
+
+```
+L = [ActionLineData(order=o, SPD=cache[o].SPD, scv=cache[o].Scv) for o in line]
+L[0].scv -= 100                 # the acting unit just spent a full gauge
+head = L.pop(0)
+i = first index where head.scv > cache[L[i].order].Scv, else len(L)
+L.insert(i, head)               # the actor goes back into the running
+return L[0].order if L[0].scv >= 100 else argmin over L of (100 - scv) / SPD
+```
+
+`cache` is `PlayerBattle`'s `Dictionary<string, LightBattleChar>`, refreshed every turn
+from `BattleCmd.sync` (`BattleUnitManager.SyncData` reads `[MaxHP, HP, Scv, SPD]`).
+`LightBattleChar.Scv` is at 0x38 and `SPD` at 0x3C, matching the `+14`/`+15` dword reads
+in the decompilation exactly.
+
+Three consequences:
+
+1. **`line` supplies membership, not lookahead.** The client only takes the *set* of
+   orders out of it (plus which one is at the head). Deduplicating our projection down to
+   one entry per unit is therefore harmless — the client never reads `line[1]`.
+2. **`sync.scv` is load-bearing.** The badge is computed from the gauge values we send,
+   not from anything about `line`. Stale or zeroed `Scv` silently mispredicts.
+3. **The client fully expects a unit to act twice in a row.** It puts the actor back into
+   the pool at `scv - 100` and lets it win again on fill time. A unit at 4× the field's
+   SPD does take ~4 turns per opponent turn, and the badge tracks that correctly.
+
+### The one real disagreement: tie-breaks
+
+Simulating `GetNextAction` against our own `battle_cmd_json` output, two units at SPD 2000
+and 500 agree on 5 turns out of 6. The exception is an exact tie in fill time:
+
+```
+turn 3: acting=101  sync scv {101: 100, 102: 75}
+        client badge = 102     we act 101      <-- disagree
+```
+
+Both fill in 0.05s — `100/2000` for the actor, `(100-75)/500` for the other. The client's
+scan uses a strict `<` against the running minimum, so it keeps the **earliest entry in
+`L`**, and since the actor was re-inserted at the tail, that means it prefers *the other
+unit*. Our `_roll_turn_order` tie-breaks on `(-spd, team, index)` and so prefers *the
+faster* one. The badge points at the wrong portrait for that turn.
+
+To match, the engine's tie-break must be positional rather than stat-based: among units
+with equal fill time, prefer the one earlier in the current `line`, with the unit that
+just acted placed last. This is a phase-4 serialiser invariant, not a gameplay change —
+whoever we choose still acts; only the prediction the player saw a moment earlier was
+wrong.
+
+---
+
+## 3.6 The attribute column — `char._job`, and there are FIVE of them
+
+Worth writing down because it is easy to get wrong twice: `_job` looks like a class
+field, and its distribution (`2: 1155, 4: 1145, 3: 1092, 0: 237, 1: 9, 5: 5`) looks like
+three real categories plus noise. It is the **attribute**, and the 14 outliers are real.
+
+`UICharacterRoom.UpdateCharInfo` (0x1626C0C) draws the badge beside the character name:
+
+```
+Job = CharData.get_Job()                       // -> DesignCharRow._job
+AtlasUtil.LoadAtlas(Job + 51801, _spJob, ...)
+_spJob.gameObject.SetActive(Job != 0)
+```
+
+So the sprite rows at `Job + 51801` name them outright:
+
+| `_job` | sprite | attribute | rows |
+|---|---|---|---|
+| 0 | `icon_charclass_void` | none — badge hidden | 237 |
+| 1 | `icon_charclass_hex` | **ABYSS** | 9 (Lucifer, Satan, Mammon, Belial, Metatron) |
+| 2 | `icon_charclass_strength` | **STR** | 1,155 |
+| 3 | `icon_charclass_speed` | **AGI** | 1,092 |
+| 4 | `icon_charclass_skill` | **TEC** | 1,145 |
+| 5 | `icon_charclass_psychic` | **SOLAR** | 5 (Leviathan, Panagia, Michael, Sariel, Gabriel) |
+
+`hex`/`psychic` are the internal names; ABYSS/SOLAR are what the game shows. Only ten
+characters carry them, all 5-star, which is exactly why they read as noise beside the
+~1,100-row STR/AGI/TEC blocks.
+
+The Chinese mission text corroborates the middle three — `CommonUtil.GetJobUseText`
+formats text `job + 12099`, giving 使力量型 (strength), 使速度型 (speed), 使技巧型 (skill) for
+jobs 2/3/4, and "any character" for 5.
+
+### The triangle is drawn in colour, so read the icons
+
+The in-game diagram uses no words: **red beats yellow beats blue beats red**. Cropping
+the icons out of `common/main/atlas_main_lobby` at the rects the NGUI `UIAtlas`
+MonoBehaviour gives, and taking each icon's most-saturated pixel:
+
+| attribute | sprite | vivid RGB | reads as |
+|---|---|---|---|
+| STR | `strength` | (254, 44, 189) | red / magenta |
+| TEC | `skill` | (218, 247, 24) | yellow |
+| AGI | `speed` | (115, 77, 255) | blue / violet |
+
+so the cycle is **STR → TEC → AGI → STR**.
+
+(Orientation check, because a flipped atlas y would invert the whole mapping silently:
+the as-is crops have transparent corners — a padded 64×64 icon — while the y-flipped
+crops land mid-atlas on opaque pixels.)
+
+### What the pack does NOT say
+
+The **magnitudes**. Text 17051 states only that the triangle exists ("Allies with
+advantageous attributes deal increased damage, while damage dealt by allies with other
+attributes is reduced"). The numbers in `engine/formula.py` — crit ±15%, the
+strong-attack upgrade that turns a failed crit into +30% on advantage, EFF ACC ±15%, and
+the 30%/-30% "miss" on disadvantage — are **community-documented, not extracted**, and
+are flagged as such in that file. Likewise whether SOLAR and ABYSS interact at all.
+
+Note "EFF ACC" is not an invention either: `BattleAttributeData` already carries `ehit`
+and `eanti` alongside `cri`, `cdi`, `cdr`, `ddi`, `ddr` and `prc` — real fields the
+client renders, which we have been sending as zeros.
+
+---
+
 ## 4. What the client does NOT provide
 
 * **Damage numbers.** No damage formula exists client-side, at all.
@@ -261,6 +391,79 @@ This is a far better parsing target than free prose: the `* Name: effect, lastin
 turns.` lines are a mini-format with the magnitude and duration in them, and the same
 status is defined identically across every skill that applies it — so definitions can be
 cross-validated against each other rather than trusted from one row.
+
+### 5.1 Exactly where the structured data stops
+
+Prose is a last resort, so it is worth being precise about what forces us to it. Dumping
+every column that is ever non-empty gives **26 columns on an attack row and 12 on a
+status row**, and the answer is unambiguous:
+
+| the engine needs | source | column? |
+|---|---|---|
+| which statuses a skill applies | `action` / `act_id` | ✅ |
+| category + stackability | the status id block (§6.1) | ✅ |
+| stack cap | `(N)` suffix on the name | ✅ |
+| targeting breadth | `target0` | ✅ |
+| swing count | `hit` | ✅ |
+| cooldown / ultimate charge | `cd` / `charge` | ✅ |
+| a status's own upgrade chain | `group` / `lv` on the type-6 row | ✅ |
+| **statuses applied BY a status** | `action` on 510 type-6 rows | ✅ |
+| icon / hidden-from-UI | `statusID`, `spriteID`, `hide` | ✅ |
+| **damage coefficient** | — | ❌ prose only |
+| **status magnitude** | — | ❌ prose only |
+| **status duration** | — | ❌ prose only |
+| **dispellability** | — | ❌ prose only |
+
+A type-6 status row has **no magnitude or duration field of any kind**. That is not an
+omission — those values do not belong to the status. They belong to the **(skill,
+status) pair**, and Frozen Inferno Thorn proves it:
+
+```
+2087111 lv1   act_id [6050, 2005, 4283, 4101, 0]   * Gash: Final damage dealt+35%, lasting two turns.
+2087114 lv4   act_id [6050, 2005, 4283, 4101, 0]   * Gash: Final damage dealt+40%, lasting three turns.
+```
+
+Identical opcode script, different numbers. Corpus-wide, **740 of 1,592 (status,
+skill-group) pairs change their glossary body across levels** — so a single canonical
+reading per status would be wrong 46% of the time. The numbers must be attached per
+applying skill row.
+
+The same row pair also kills the damage coefficient: lv1→lv4 moves `cd` 4→3 and
+`target0` 7→8, but **92% → 116% appears nowhere except `note1_en`**.
+
+### The three-tier provenance this forces
+
+Only 9,327 of the 21,407 apply sites carry a `* Name:` line on the applying skill — the
+glossary lists what the *description* names, and passives, sub-skills and untranslated
+rows name nothing. So `compile_skills.py` tags every number with where it came from:
+
+| source | sites | meaning |
+|---|---|---|
+| `skill` | 9,327 (44%) | the applying skill's own glossary line — authoritative |
+| `corpus_default` | 3,150 (15%) | modal value across the pack, **≥80% agreement only** |
+| `null` | 8,930 (42%) | nothing stated; the engine applies a policy, knowingly |
+
+The threshold is what makes the fallback honest rather than a fabrication. Daze agrees
+93% across 473 bodies, Charm 98%, Stun 95%, All DMG Reduction 98% — a default is a
+reading. Iron Wrist agrees on duration only 74% and on **magnitude 31%** — there a
+default would be an invented number, so it is left `null`.
+
+**An unknown duration is `null`, never `0`.** At runtime a zero is indistinguishable from
+"expires immediately", which is precisely the silent-failure class this whole effort
+exists to eliminate. `test_skill_specs.py` asserts it.
+
+### Dispellability
+
+500-odd status rows end their own note with a fixed parenthetical — `(unremovable)`,
+`(Cannot be cleansed by buff removals)`, `(Unremovable)`. This is a **marker, not free
+text**, which is what makes it safe to read. It matters because op 114 removes by
+*category block* ("removes the caster's removable buffs"), so an engine that ignores the
+flag would strip 509 statuses it must not touch.
+
+Likewise `(Crowd Control Debuff)` appears on 20 rows as an explicit category stated by
+the data, and overrides any wording-based classification.
+
+---
 
 `note2_en` is the per-level bonus list (`Skill Damage +32%`, `Skill CD -1`,
 `All DMG Reduction Target +1 Cast(s)`).
@@ -373,6 +576,87 @@ Of 9,346 statuses named in attack-skill glossaries, 6,885 (73.7%) are also named
 the stack-cap suffix: the glossary says `Agony`, `Fatigue`, `Listless`, `Spirit`, while
 the status ROW is `Agony(5)`, `Fatigue(5)`, `Listless(5)`, `Spirit(5)`. Normalise by
 stripping a trailing `(N)` and case-folding before joining.
+
+### 6.3.2 The operandless opcodes are NOT all triggers — three are effects
+
+§6.3 inferred from prose that the no-operand opcodes were trigger conditions. Op 115
+already contradicted that, and a corpus-wide enrichment test now settles it: for each
+opcode, how much more often its rows mention a concept than the corpus baseline does.
+
+| op | rows | concept | in these rows | baseline | lift | alone on |
+|---|---|---|---|---|---|---|
+| **116** | 2,775 | move gauge / 行動值 | 92% | 6.4% | **4.2×** | 414 rows, 375 say "Move Gauge" |
+| **111** | 269 | revive / 復活 | 98% | 4% | **23×** | 14 rows, bare 復活 |
+| **5** | 1,039 | heal / 補血 | 84% | 20% | **4.2×** | 47 rows |
+
+The "alone on" column is what makes this decisive rather than suggestive: on hundreds of
+rows these opcodes are the **only** non-zero slot, so there is nothing else in the row the
+prose could be describing. `[116, 0, 0, 0, 0]` with "increase all enemies' Move Gauge with
+a fixed chance after action" cannot be a trigger — if it were, the skill would do nothing
+at all.
+
+So: **116 = modify move gauge, 111 = revive, 5 = heal.** Their operand is always 0, so
+the *magnitude* still comes from prose and is null when unstated — but the engine now
+performs the right kind of effect instead of filing the whole skill under `unknown`.
+
+Decoding these three moved whole-corpus coverage from **53% to 74%**, and playable cast
+skills from 49% to **79%** of rows with every opcode recognised.
+
+### 6.3.3 Op 1 — the attack rider, and why it is not one effect
+
+1,195 sites, the largest gap after the three above. The naive read is "extra damage":
+62% of its rows use extra-damage phrasing, a 6.8x lift over the 9.2% corpus baseline, and
+its rows carry **two or more distinct damage percentages 55% of the time** against a 12%
+baseline. That read is wrong, or at least half wrong.
+
+**What it actually is.** Op 1 rides on an attack:
+
+| | op 1 | op 5 | baseline |
+|---|---|---|---|
+| rows that are com_attack/skill/sp_skill | **87%** | 46% are PASSIVE | — |
+| the skill itself deals damage | **93%** | 56% | 58% |
+
+That is what separates the two heal-ish opcodes: op 5 is a standalone or turn-scheduled
+heal that lives on passives ("Recovers N HP after action", "Before the turn starts…"),
+while op 1 is always attached to a blow landing.
+
+**But its kind is not in the opcode.** On the 137 rows where op 1 is the ONLY non-zero
+slot — so nothing else in the row can be what the prose describes — the prose partitions
+with **no overlap at all**:
+
+| | rows |
+|---|---|
+| heal — "Deals N% ATK as damage **and recovers the caster's HP**" | 102 |
+| bonus damage — "if the target is stunned, **additionally deal 100% ATK** once" | 30 |
+| neither | 5 |
+| **both** | **0** |
+
+Across all 1,136 rows with prose the split holds at **422 heal / 422 bonus damage**. No
+single effect explains that, and the operand is always 0, so nothing in the row encodes
+which one it is.
+
+So: **op 1 = an attack rider — an additional effect that fires when this skill's attack
+connects — whose KIND is stated only in prose**, exactly as magnitudes are. 74% classify
+unambiguously and are emitted as `attack_rider` with `kind: heal | bonus_damage` and the
+rider's own percentage (79% of those). The ambiguous 26% stay in `unknown`: emitting a
+rider with a null kind would be an effect the engine silently skips, which is the failure
+class this whole pipeline exists to prevent.
+
+Decoding it moved the corpus from 74% to **80%** fully decoded, and cast skills from 79%
+to **87%** of rows with every opcode recognised.
+
+The genuinely unresolved remainder, with what is known of each shape:
+
+| op | rows | evidence |
+|---|---|---|
+| 1 (residual) | 326 | op-1 rows whose rider kind is ambiguous or unstated — see §6.3.3 |
+| 7 | 320 | mixed; several rows pair with Deathblow |
+| 3 | 248 | mostly "will trigger «named» effect" — a cross-skill hook |
+| 118 | 146 | chance-triggered follow-up — "10% fixed chance to trigger Dead Silence 1 time" |
+| 6 | 125 | conditional extra attack — "If there are still at least 4 enemies … additionally" |
+
+118 and 6 are understood in shape but **not executable**: they name the triggered skill
+only in prose, and with no operand the row does not encode which skill it is.
 
 ### 6.4 SkillType **7** — undocumented sub-skills
 

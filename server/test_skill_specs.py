@@ -22,6 +22,7 @@ What it asserts, and why each one exists:
 
     python3 test_skill_specs.py
 """
+import collections
 import glob
 import json
 import os
@@ -33,9 +34,15 @@ SKILLS_DIR = os.path.join(HERE, "battle_data/skills")
 # Baselines, measured 2026-08-20. These are a ratchet: they may improve as opcodes are
 # decoded, and a regression is a failure. Update them deliberately, never to make a test
 # pass.
-BASELINE_FULLY_DECODED = 6964
-BASELINE_PARTIAL = 5235
+BASELINE_FULLY_DECODED = 11492
+BASELINE_PARTIAL = 1374
 BASELINE_SKILLS = 14410
+# Phase 2, measured 2026-08-20.
+BASELINE_STATUSES = 1685
+BASELINE_UNREMOVABLE = 509
+BASELINE_SRC_SKILL = 9327          # apply sites whose own skill states the numbers
+BASELINE_KNOWN_DURATION = 11391    # skill-stated + corpus-default, combined
+BASELINE_COEF_ZH = 633             # coefficients recovered from the original Chinese
 
 _fail = 0
 
@@ -153,10 +160,19 @@ def main():
     # and apply nothing to a chosen unit. Their raw values (41, 42, 309, 421-423, 3102,
     # 3502) have no `23000 + _target` label because the client never renders one for them.
     # They stay honestly marked "unknown" in the data rather than being faked.
+    # A type-7 sub-skill reached only through `follow_up` does NOT own its targeting: it
+    # inherits the target set the invoking skill already chose. The five rows with an
+    # unresolvable `_target` (41/42 -- values the client has no `23000 + _target` label
+    # for) are all `Refrain`, reached exclusively from `Aurora`, whose own targeting
+    # resolves cleanly to "3 enemies". So their column is a placeholder, and demanding it
+    # resolve would be asserting something the data never claims.
+    invoked = {e["skill"] for s in specs.values() for e in s["effects"]
+               if e["op"] == "follow_up"}
     needs_target = [sid for sid, s in specs.items()
                     if any(e["op"] in ("damage", "apply_status", "remove_status")
                            for e in s["effects"])
-                    and s["type"] in ATTACK]
+                    and s["type"] in ATTACK
+                    and not (s["type"] == "sub_skill" and sid in invoked)]
     unknown_target = [sid for sid in needs_target
                       if specs[sid]["target"].get("select") == "unknown"]
     check("targeting resolves for every skill that targets", not unknown_target,
@@ -186,6 +202,76 @@ def main():
               if any(str(e.get("op", "")).startswith("raw_") for e in s["effects"])]
     check("no undecoded opcode leaked into `effects`", not leaked,
           f"{len(leaked)}, e.g. {leaked[:5]}")
+
+    print("\nstatus registry (phase 2):")
+    reg_path = os.path.join(HERE, "battle_data/statuses.json")
+    if not os.path.isfile(reg_path):
+        check("statuses.json exists", False, "run tools/compile_statuses.py")
+    else:
+        with open(reg_path) as f:
+            reg = json.load(f)
+        check("registry compiled", len(reg) == BASELINE_STATUSES,
+              f"{len(reg)} vs {BASELINE_STATUSES}")
+
+        # The registry is the engine's status lookup, so an apply_status naming an id it
+        # does not hold would resolve to nothing at runtime -- the same silent class of
+        # bug as an unresolved status name.
+        applied = {e["status"]["id"] for s in specs.values() for e in s["effects"]
+                   if e["op"] == "apply_status"}
+        orphan = [i for i in applied if str(i) not in reg]
+        check("every applied status is in the registry", not orphan,
+              f"{len(orphan)}, e.g. {sorted(orphan)[:5]}")
+
+        # 509 statuses say in prose that a cleanse cannot strip them. op 114 removes by
+        # CATEGORY BLOCK, so an engine that ignores this flag would wrongly dispel them.
+        unrem = sum(1 for s in reg.values() if s["unremovable"])
+        check("unremovable statuses are still flagged",
+              unrem >= BASELINE_UNREMOVABLE, f"{unrem} < {BASELINE_UNREMOVABLE}")
+
+        # Category comes from the id block (a column). `kind` is prose-derived and only
+        # a convenience -- it is NOT allowed to become the thing the engine trusts.
+        uncat = [k for k, s in reg.items() if not s["category"]]
+        check("every status has a category", not uncat, f"{len(uncat)}")
+
+    print("\nstatus numbers -- provenance (a ratchet):")
+    numbered = [e for s in specs.values() for e in s["effects"]
+                if e["op"] == "apply_status"]
+    src = collections.Counter((e.get("numbers") or {}).get("source") for e in numbered)
+    known_dur = sum(1 for e in numbered
+                    if (e.get("numbers") or {}).get("duration") is not None
+                    or (e.get("numbers") or {}).get("permanent"))
+    check("durations read from the applying skill have not regressed",
+          src["skill"] >= BASELINE_SRC_SKILL, f"{src['skill']} < {BASELINE_SRC_SKILL}")
+    check("total known durations have not regressed",
+          known_dur >= BASELINE_KNOWN_DURATION,
+          f"{known_dur} < {BASELINE_KNOWN_DURATION}")
+    print(f"        (skill {src['skill']}, corpus_default {src['corpus_default']}, "
+          f"unknown {src[None]}; duration known {known_dur}/{len(numbered)})")
+
+    # An unknown duration must be VISIBLY unknown. A zero here would be indistinguishable
+    # from "expires immediately" once the engine is running.
+    zeroed = [e for e in numbered
+              if (e.get("numbers") or {}).get("source") is None
+              and (e.get("numbers") or {}).get("duration") == 0]
+    check("unknown durations are None, never 0", not zeroed, f"{len(zeroed)}")
+
+    # Damage has no opcode, so its coefficient can only come from prose -- but WHETHER a
+    # skill attacks is structural. Conflating the two meant 1,159 untranslated mob and
+    # boss skills compiled to no damage effect and would have silently done nothing.
+    # An enemy-targeting attack row must always carry a damage effect, even if the
+    # coefficient inside it is unknown.
+    silent = [sid for sid, s in specs.items()
+              if s["type"] in ATTACK and s["target"].get("group") == "enemy"
+              and not any(e["op"] == "damage" for e in s["effects"])]
+    check("every enemy-targeting attack skill deals damage", not silent,
+          f"{len(silent)}, e.g. {silent[:5]}")
+
+    dmg = [e for s in specs.values() for e in s["effects"] if e["op"] == "damage"]
+    src = collections.Counter(e.get("source") for e in dmg)
+    check("damage coefficients recovered from Chinese have not regressed",
+          src["zh"] >= BASELINE_COEF_ZH, f"{src['zh']} < {BASELINE_COEF_ZH}")
+    print(f"        (coefficient: en {src['en']}, zh {src['zh']}, "
+          f"unknown {src[None]} of {len(dmg)})")
 
     print(f"\n{_fail} failure(s)")
     return 1 if _fail else 0
