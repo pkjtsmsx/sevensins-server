@@ -27,6 +27,8 @@ import design_data as dd
 import battle_effects as fx
 from engine import core as _engine_core
 from engine import status as _engine_status
+from engine import passives as _engine_passives
+from engine import specs as _engine_specs
 
 # Phase-5 cutover switch. Defaults to the old engine: the new one is opt-in until it
 # owns battle state as well as resolution (see engine/bridge.py for exactly what moves).
@@ -1459,6 +1461,19 @@ class Battle:
         and self-immunities (e.g. Leviathan's Jealousy Vortex) are in place before the
         first turn. Runs before the turn order is rolled so a SPD buff can reorder it."""
         field = list(self.units.values())
+        if NEW_ENGINE:
+            # ONE engine owns battle content. The engine's passives are a declarative
+            # rule table (engine/passives.py) rather than fx phases.
+            if not hasattr(self, "_passives_fired"):
+                self._passives_fired = set()
+            for u in units:
+                for sid in (u.skills or []):
+                    spec = _engine_specs.skill(sid) if sid else None
+                    if spec and spec.get("type") == "passive":
+                        _engine_passives.fire(
+                            _engine_passives.BATTLE_START, u, sid, field,
+                            fired=self._passives_fired)
+            return
         for u in units:
             allies = [x for x in field if x.team == u.team]
             enemies = [x for x in field if x.team != u.team]
@@ -1904,6 +1919,13 @@ class Battle:
             self._roll_turn_order()
             self._start_of_turn(_depth + 1)
             return
+        if NEW_ENGINE:
+            # Turn-start passives fire BEFORE the can-it-act decision: "at the start of
+            # the turn, if you have a Commendation, you gain CC Immunity" has to be able
+            # to stop the very stun being checked for.
+            _engine_passives.fire_all(
+                _engine_passives.TURN_START, [unit],
+                fired=getattr(self, "_passives_fired", None))
         if (_engine_status.is_immobilized(unit) if NEW_ENGINE
                 else fx.is_immobilized(unit.statuses)):
             unit.tick_cooldowns()

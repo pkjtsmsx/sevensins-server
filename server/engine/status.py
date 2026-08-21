@@ -96,6 +96,29 @@ class Active:
         return direction * float(self.magnitude) * max(1, int(self.stacks))
 
 
+# What an UNSTATED duration becomes.
+#
+# It must not become permanent. Both branches of the old expression collapsed to None
+# when the duration was unknown, and None means "lasts the whole battle" -- so the raid
+# boss's Power Attack Seal, whose duration the pack never states, sealed the party's
+# power attacks for the entire fight. Only an explicit "until the end of battle" in the
+# prose should be permanent.
+#
+# 2 turns is the modal duration across the corpus and a deliberately conservative guess:
+# a status that expires too early is a fidelity loss, one that never expires is a broken
+# fight.
+DEFAULT_DURATION = 2
+
+
+def _remaining_for(event):
+    """-> turns remaining for a new Active: stated, permanent, or the safe default."""
+    if event.duration is not None:
+        return int(event.duration)
+    if getattr(event, "permanent", False):
+        return None                      # the prose said "until the end of battle"
+    return DEFAULT_DURATION
+
+
 def _registry(status_id):
     try:
         return specs.status(int(status_id)) or {}
@@ -129,8 +152,7 @@ def apply_event(unit, event, caster=None):
     active = Active(
         status_id=int(event.status_id), name=event.name or row.get("name"),
         kind=row.get("kind"), category=row.get("category"), stat=row.get("stat"),
-        remaining=None if event.duration is None and not event.unknown_duration
-        else event.duration,
+        remaining=_remaining_for(event),
         magnitude=event.magnitude, stack_cap=cap,
         unremovable=bool(row.get("unremovable")),
         source_atk=int(getattr(caster, "atk", 0) or 0) if caster is not None else None,

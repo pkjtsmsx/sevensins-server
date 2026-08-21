@@ -41,7 +41,7 @@ BASELINE_SKILLS = 14410
 BASELINE_STATUSES = 1685
 BASELINE_UNREMOVABLE = 509
 BASELINE_SRC_SKILL = 9327          # apply sites whose own skill states the numbers
-BASELINE_KNOWN_DURATION = 11527    # skill-stated + corpus-default, combined
+BASELINE_KNOWN_DURATION = 11570    # skill-stated + corpus-default, combined
 BASELINE_COEF_ZH = 633             # coefficients recovered from the original Chinese
 
 _fail = 0

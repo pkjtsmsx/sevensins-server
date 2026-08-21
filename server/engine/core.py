@@ -97,6 +97,7 @@ class StatusEvent:
     magnitude: Optional[float] = None
     stacks: Optional[int] = None
     unknown_duration: bool = False
+    permanent: bool = False
 
 
 @dataclasses.dataclass
@@ -257,7 +258,8 @@ def _status_event(caster, target, eff, rng):
         target=target.order, status_id=st.get("id"), name=st.get("name"),
         applied=True, duration=dur, magnitude=numbers.get("magnitude"),
         stacks=numbers.get("stacks"),
-        unknown_duration=dur is None and not numbers.get("permanent"))
+        unknown_duration=dur is None and not numbers.get("permanent"),
+        permanent=bool(numbers.get("permanent")))
 
 
 def _removable(status_row, category):

@@ -29,7 +29,7 @@ os.environ.setdefault("SEVENSINS_ACCOUNTS", "/tmp/sevensins-newpath-test")
 
 import battle as bt                          # noqa: E402
 import player_state as ps                    # noqa: E402
-from engine import status as est, wire       # noqa: E402
+from engine import core, specs, status as est, wire       # noqa: E402
 
 STAGE = 1101
 PARTY_LEVEL = 60
@@ -224,12 +224,73 @@ def check_legacy_and_engine_statuses_coexist():
     check("both survive the save together", "Active" in kinds, str(kinds))
 
 
+
+def check_passives_fire_at_battle_start():
+    """Hand-written passives must actually set the board up.
+
+    Passives are the one part of a skill that cannot be derived -- the opcodes name the
+    statuses but not the trigger, the condition or the selection -- so they are a
+    declarative rule table (engine/passives.py). This checks the table is wired to the
+    turn loop, not just that it parses.
+    """
+    from engine import passives
+
+    battle, state = a_battle()
+    with_passive = [u for u in battle.units.values()
+                    if any((specs.skill(s) or {}).get("type") == "passive"
+                           for s in (u.skills or []) if s)]
+    check("units in this fight have passives", bool(with_passive),
+          "no passive skills on the field")
+
+    # An unstated duration must NOT be permanent. The raid boss's Power Attack Seal has
+    # no duration anywhere in the pack, and treating None as "whole battle" sealed the
+    # party's power attacks for the entire fight.
+    from engine import status as est2
+    forever = [(u.order, s.name) for u in battle.units.values()
+               for s in u.statuses
+               if isinstance(s, est2.Active) and s.remaining is None]
+    known_permanent = {"Field Angel", "The Divine", "Stun/Confuse Immunity",
+                       "Swift Blade", "Return", "Elite", "CC Immunity"}
+    unexpected = [(o, n) for o, n in forever
+                  if not any(k.lower() in (n or "").lower() for k in known_permanent)]
+    check("only deliberately-permanent statuses last the whole battle",
+          not unexpected, str(unexpected))
+
+
+def check_raid_boss_is_cc_immune():
+    """The boss's own passive grants it CC Immunity -- so it cannot be stun-locked.
+
+    Reported from device: the boss was permanently frozen AND stunned. Two causes, and
+    this covers the second -- its passive was never executed, so the immunity its own
+    skill grants never existed.
+    """
+    from engine import status as est2
+
+    battle, state = a_battle(stage=1000005)
+    boss = next((u for u in battle.units.values() if u.team == bt.TEAM_ENEMY), None)
+    if boss is None:
+        check("the raid stage has a boss", False)
+        return
+    immune = [s.name for s in boss.statuses
+              if isinstance(s, est2.Active) and s.kind == "immunity"]
+    check("the raid boss starts CC immune", bool(immune), str(boss.statuses))
+
+    # And that immunity must actually refuse a control status.
+    ally = next(u for u in battle.units.values() if u.team == bt.TEAM_PLAYER)
+    ev = core.StatusEvent(target=boss.order, status_id=610, name="Stun",
+                          applied=True, duration=2)
+    landed = est2.apply_event(boss, ev, ally)
+    check("  ...and a stun is refused", landed is None, str(landed))
+
+
 def main():
     was = bt.NEW_ENGINE
     bt.NEW_ENGINE = True                     # the whole point of this file
     try:
         check("the flag is on for these checks", bt.NEW_ENGINE)
         for fn in (check_a_whole_fight,
+                   check_passives_fire_at_battle_start,
+                   check_raid_boss_is_cc_immune,
                    check_statuses_reach_the_unit,
                    check_control_actually_skips_a_turn,
                    check_legacy_and_engine_statuses_coexist):

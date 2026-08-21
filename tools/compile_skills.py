@@ -292,6 +292,41 @@ def status_meta(rows, sid):
 
 
 _CORPUS = None
+_CAST_GLOSSARY = None
+
+
+def cast_glossary(rows):
+    """-> {skill id: {status key: body}} merged across each CAST's whole skill set.
+
+    A cast's four skills are written as a unit, and the glossary line for a status is
+    stated once -- on whichever skill introduces it -- not repeated on every skill that
+    applies it. Raphael's `Sweet Rhapsody` defines "Power Attack Seal: ... Lasts for 1
+    turn"; his passive `Zero Cal` applies the same seal with no glossary line at all.
+
+    Without this the passive's seal has no duration, and an unstated duration used to
+    mean PERMANENT -- so the boss sealed the party's power attacks for the entire fight.
+    """
+    global _CAST_GLOSSARY
+    if _CAST_GLOSSARY is not None:
+        return _CAST_GLOSSARY
+    out = {}
+    for char in (dd.rows("char") or {}).values():
+        skills = [s for s in (char.get("_skills") or []) if s]
+        if not skills:
+            continue
+        merged = {}
+        for sid in skills:
+            row = rows.get(sid) or {}
+            for name, body in sp.glossary_lines(row.get("_note1_en")).items():
+                merged.setdefault(sp.norm_name(name), body)
+        # Every level of every skill in the set shares the cast's glossary.
+        for sid in skills:
+            base = (rows.get(sid) or {}).get("_group") or sid
+            for other, orow in rows.items():
+                if (orow.get("_group") or other) == base:
+                    out.setdefault(other, {}).update(merged)
+    _CAST_GLOSSARY = out
+    return out
 
 
 def corpus_defaults(rows):
@@ -344,6 +379,7 @@ def status_numbers(rows, skill_row, status_id):
 
     Three tiers, and `source` says which was used so a wrong number is attributable:
       "skill"          -- the applying skill's own `* Name: ...` line (authoritative)
+      "cast"           -- another skill of the SAME CAST defines it (see cast_glossary)
       "corpus_default" -- the modal value across the pack, agreement >= threshold
       None             -- nothing stated; the engine must apply a policy, knowingly
     """
@@ -355,6 +391,12 @@ def status_numbers(rows, skill_row, status_id):
     if key in lines:
         got = sp.parse(lines[key])
         got["source"] = "skill"
+        return got
+
+    own = cast_glossary(rows).get(skill_row.get("_id") or 0, {})
+    if key in own:
+        got = sp.parse(own[key])
+        got["source"] = "cast"
         return got
 
     d = corpus_defaults(rows).get(key)
