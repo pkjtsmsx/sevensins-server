@@ -56,9 +56,20 @@ KARMA_CHAPTER2_CHAR = 10981            # Caillen
 # Chapter 1 is Jacqueline (the tutorial portrait). Chapter 2 is Caillen -- she is the
 # cast the chapter is actually about, and paying its karma to Jacqueline was just the
 # fallback showing through.
+KARMA_CHAPTER3_CHAR = 10821            # Matina, "Conflagration"
+KARMA_CHAPTER5_CHAR = 20811            # Leviathan, "Milky Way"
+
 KARMA_CHAPTER_CHAR = {
     1: KARMA_TUTORIAL_CHAR,
     2: KARMA_CHAPTER2_CHAR,
+    # Chapter 3's decision at 3-6 "It's Punishment Time!" (avg 21601) was observed in
+    # play paying Matina. Note this is the chapter that exposed the avg_chapter bug: the
+    # old `avg_id // 10000` rule read 21601 as chapter 2 and would have paid Caillen.
+    3: KARMA_CHAPTER3_CHAR,
+    # Chapter 5 is Leviathan's -- "Head to Sea Grotto" through "Sea Demon I/II/III", and
+    # its decisions sit at 5-7 and 5-10. Inferred from the stage names, NOT observed on
+    # the banner; correct it if a run shows otherwise.
+    5: KARMA_CHAPTER5_CHAR,
 }
 
 # Observed in the tutorial, as (decision, option picked, gems, fexp). These become

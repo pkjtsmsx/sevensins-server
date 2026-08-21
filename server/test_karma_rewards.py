@@ -387,6 +387,15 @@ def check_avg_chapter_resolution():
     check("a mid-chain id interpolates to its neighbour's chapter",
           karma.avg_chapter(10102) == 1, str(karma.avg_chapter(10102)))
 
+    # Observed in play: the chapter-3 decision at 3-6 pays Matina. Under the old rule
+    # this id read as chapter 2 and would have paid Caillen, so it is the regression
+    # case worth pinning.
+    check("21601 (stage 3-6) is chapter 3", karma.avg_chapter(21601) == 3,
+          str(karma.avg_chapter(21601)))
+    check("...and pays Matina, not Caillen",
+          karma.karma_char_for(21601) == karma.KARMA_CHAPTER3_CHAR,
+          str(karma.karma_char_for(21601)))
+
 
 def main():
     for fn in (check_table_matches_the_screenshot, check_a_single_rank_up_pays_once,
