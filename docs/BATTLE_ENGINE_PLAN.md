@@ -1,7 +1,11 @@
 # Battle engine — design plan
 
-Companion to `BATTLE_CLIENT_CONTRACT.md`, which records what the client tells us. This
-one is about what we build.
+Companion to `BATTLE_CLIENT_CONTRACT.md`, which records what the client and the shipped
+data tell us. This one is about what we build.
+
+> **Revised** after decoding `action[]`/`act_id[]` (contract doc §6). Effects are no
+> longer compiled from English prose — they come from the original server's own effect
+> script, with prose filling only the numeric gaps.
 
 ## What actually goes wrong today
 
@@ -11,152 +15,181 @@ chased has the same shape:
 > **an ambiguous input is interpreted at runtime into a wire payload that violates a hard
 > client contract, and fails silently.**
 
-Three real examples:
-
 | bug | cause | symptom |
 |---|---|---|
 | Gabriel stalls the fight | two damage effects → duplicate target in one group | client throws inside a swallowed handler; attacker never yields; **fight hangs** |
 | swings animate with no number | fewer groups sent than the cinematic has Damage tags | guarded read; **no error at all** |
 | AoE hit one target | breadth guessed from English prose | quietly wrong damage |
 
-None of these produced a server-side error. That is the thing to design against — not
-"write better effect code".
+None produced a server-side error. That is the thing to design against — not "write better
+effect code".
 
 ## The four principles
 
-1. **Interpretation happens offline, once.** Skills compile to a checked-in data artifact
-   that a human can read and diff. Nothing parses prose at runtime. A wrong skill becomes
-   a visible one-line data change, not a mystery at turn 7.
-2. **Client-derived facts beat inference.** Targeting breadth, swing count, cooldown,
-   charge and skill type are all recoverable exactly (see the contract doc). Never guess
-   what we can read.
-3. **The wire contracts are enforced in exactly one place**, with assertions, and that
-   place is covered by tests that transcribe the client's own logic.
-4. **Every layer is testable without a client.** The engine is pure functions over state;
-   the serialiser is a pure function of an outcome.
+1. **Interpretation happens offline, once.** Skills compile to a checked-in artifact a
+   human can read and diff. Nothing parses prose at runtime.
+2. **Structured data beats inference, and the client beats both.** Targeting breadth and
+   swing counts come from the client; status application/removal comes from the opcodes.
+   Prose is the *last* resort, not the first.
+3. **The wire contracts are enforced in exactly one place**, with assertions, covered by
+   tests that transcribe the client's own consumption logic.
+4. **Every layer is testable without a client.**
+
+## What each source of truth actually covers
+
+This is the heart of the revision.
+
+| concern | source | confidence |
+|---|---|---|
+| targeting group + breadth | `_target` → `23000+t` label table | **exact** |
+| swing count | cinematic Damage tags (`hit` agrees 3138/3138) | **exact** |
+| cooldown, charge, skill type, level chain | design columns | **exact** |
+| **which statuses a skill applies / removes** | **opcodes 112 / 113 / 114** | **exact** |
+| **resisted vs guaranteed application** | **112 vs 113** | **exact** |
+| **status taxonomy** (buff/debuff/shield/DoT/HoT, stackable, stack cap) | **status id block + `(N)` suffix** | **exact** |
+| **follow-up / pursuit attacks** | **opcode 117 → type-7 sub-skill** | **exact** |
+| skill-CD manipulation | opcode 115 | strong |
+| trigger timing (on-hit, after-action, turn-start) | no-operand opcodes | **inferred from prose** |
+| status magnitude + duration ("DEF-50%, two turns") | prose glossary | inferred, cross-validatable |
+| damage coefficient ("108% ATK") | prose only | inferred |
+| **damage formula** | nowhere | **ours to invent** |
+
+Two consequences worth stating plainly:
+
+* **Damage is not in the script.** 195 pure-damage attack skills carry *no* opcodes at
+  all, and no opcode ever encodes a coefficient. The script covers statuses, removals,
+  follow-ups and CD — damage stays a prose-derived number.
+* **83.2% of skill rows carry at least one opcode**, so the structured path covers the
+  overwhelming majority of non-damage behaviour.
 
 ## Layers
 
 ```
-design pack ──► [compile] ──► skills.json      ─┐
-                             statuses.json      │
-                                                ▼
-   battle state ──────────────────────► engine (pure)
-                                                │  outcome
-                                                ▼
-                                        serialiser ──► AttackJsonData
-                                        (invariants)
+design pack ─┬─ opcodes  ──► [compile] ──► skills.json    ─┐
+             ├─ cinematics ─►               statuses.json  │
+             └─ prose (numbers only) ─►                    ▼
+   battle state ──────────────────────────────────► engine (pure)
+                                                           │ outcome
+                                                           ▼
+                                                   serialiser ──► AttackJsonData
+                                                   (invariants)
 ```
 
-### 1. Skill spec — compiled, checked in
+### 1. Skill spec — compiled from opcodes first
 
 `tools/compile_skills.py` → `server/battle_data/skills.json`.
 
 Per skill: `id, group, lv, type, target_group, breadth, swings, cd, charge, effects[]`.
 
-* **breadth** from the `23000 + _target` table — exact, no inference
-* **swings** from the cinematic Damage-tag count where the cinematic has tags, else `hit`
-  (they agree on 3,138 / 3,138 real player attack skills)
-* **effects** an ordered op list: `damage`, `status`, `heal`, `gauge`, `cd`, with
-  coefficient, stat basis and condition
+`effects[]` is built **from the opcode slots**, not from prose:
 
-Generated offline; **hand-editable and hand-patchable**, because the long tail will need
-it. Regeneration must never clobber a manual override — keep overrides in a separate file
-that layers on top.
+```json
+{ "op": "apply_status",  "status": 4101, "chance": false }   // 112
+{ "op": "apply_status",  "status": 619,  "chance": true  }   // 113
+{ "op": "remove_status", "status": 2005 }                    // 114, specific
+{ "op": "remove_status", "category": "stackable_buff" }      // 114, block code
+{ "op": "follow_up",     "skill": 2010141 }                  // 117 -> type-7 sub-skill
+{ "op": "modify_cd",     "...": "..." }                      // 115
+{ "op": "damage",        "basis": "ATK", "coefficient": 1.08 }  // from PROSE
+```
 
-### 2. Status registry — compiled, cross-validated
+Only the `damage` entry is prose-derived. Everything else is a direct read.
+
+Manual overrides live in a **separate** file layered on top, so regeneration never
+clobbers hand-fixes.
+
+### 2. Status registry — taxonomy from ids, numbers from prose
 
 `tools/compile_statuses.py` → `server/battle_data/statuses.json`.
 
-Source: the `* Name: effect, lasting N turns.` glossary lines in `note1_en` — 6,271 skills
-define 326 distinct statuses. **The same status is defined identically wherever it
-appears**, so this is a cross-validation problem, not a trust-one-row problem: parse every
-definition, group by name, and require agreement. Report conflicts rather than silently
-picking one.
-
-Model per status: kind (stat mod / damage-taken multiplier / DoT / immunity / gauge lock /
-action denial), magnitude, duration, stacking rule, and whether it is dispellable.
+* **kind and stacking come from the id block** — 1000 HoT, 2000 buff, 3000 stackable
+  buff, 4000 shield, 5000 DoT, 6000 debuff, 7000 stackable debuff, 8000 passive grant,
+  9000 stat up. Stack cap from the `(N)` name suffix.
+* **magnitude and duration come from the glossary** (`* DEF Break UL: DEF-50%, lasting
+  two turns.`), cross-validated across the 6,271 skills that define statuses — the same
+  status is defined identically wherever it appears, so require agreement and report
+  conflicts rather than trusting one row.
+* joining opcode → glossary needs **name normalisation**: strip a trailing `(N)` and
+  case-fold, or `Agony` will not match row `Agony(5)`.
 
 ### 3. Engine — pure
 
 ```python
-resolve_targets(caster, skill, units)  -> [unit]        # breadth table
-execute(caster, targets, skill, state) -> Outcome       # strikes, statuses, gauge, cd
+resolve_targets(caster, skill, units)  -> [unit]       # breadth table
+execute(caster, targets, skill, state) -> Outcome      # strikes, statuses, follow-ups
 ```
 
-`Outcome` carries **per-swing strikes** (`seq`, target, amount) plus status events. It
-knows nothing about JSON. This is where the damage formula lives, and it is the only place
-that needs tuning.
+`Outcome` carries per-swing strikes (`seq`, target, amount), status events, and any
+follow-up skills to run. Knows nothing about JSON.
+
+**Follow-ups are recursive:** a type-7 sub-skill is a full skill spec with its own
+targeting, swings and cinematic, so `execute` calls itself. Needs a depth guard.
 
 ### 4. Serialiser — the single choke point
 
-`outcome_to_attack_json(outcome, swings)` and nothing else builds `data`. It asserts:
+`outcome_to_attack_json(outcome, swings)` is the only thing that builds `data`, and it
+asserts:
 
 * **exactly `swings` groups** — the count the cinematic will consume
 * **at most one row per unit per group** — fold duplicates, summing
 * `die` only on the last row naming a unit
 
-These are the three rules that have each cost us a debugging session. Asserting them here
-converts a silent client hang into a server-side test failure.
+Each of these has already cost a debugging session. Asserting here turns a silent client
+hang into a server-side test failure.
 
 ## The damage formula — the one genuine unknown
 
-There is **no formula anywhere in the client** and none documented in the text data. Nor
-is the attribute-advantage multiplier stated. This is ours to invent.
-
-Proposal: a small parameterised formula with named tunables in one file, rather than
-constants scattered through the code —
+No formula exists in the client and none is documented in the text data; the
+attribute-advantage multiplier is not stated either. Proposal: one small parameterised
+formula with named tunables in a single file —
 
 ```
-raw   = base(stat) * coefficient          # stat per the skill's basis (ATK/DEF/MaxHP)
+raw   = base(stat) * coefficient
 mit   = raw * defence_curve(target.DEF)
 final = mit * attribute_mult * status_mults * crit
 ```
 
-**Validation signal, since we have no ground truth:** the stage star conditions encode the
-designers' intended clear speed — `_rating_datas` rows like "clear in at most 9 turns" for
-a stage whose mob HP and party level are both known. That gives a calibration target for
-the whole curve: a correctly-tuned formula should let a level-appropriate party hit the
-3-star turn limits on a decent share of campaign stages, and miss them on the ones meant
-to be hard. It is not exact, but it is a real signal derived from the game's own data
-rather than a guess.
+**Calibration signal:** the stage star conditions encode the designers' intended clear
+speed — `_rating_datas` rows like "clear in at most 9 turns" for a stage whose mob HP and
+party level are both known. A correctly-tuned curve should let a level-appropriate party
+hit the 3-star turn limits on most campaign stages and miss them on the ones meant to be
+hard. Not exact, but derived from the game's own data.
 
 ## Validation harness
 
-* **static** — every compiled skill: swings vs cinematic, breadth resolvable, effects
-  well-formed, statuses referenced exist
-* **wire invariants** — the serialiser's three rules, as tests that transcribe the
-  client's own consumption logic (as `test_battle_effects.py` already does for the
-  duplicate-target rule)
-* **turn inspector** — freeze a live fight on any turn, decode the outgoing message, edit
-  and step. Defer the reply rather than blocking the handler thread (heartbeats share the
-  socket and a 120 s idle timeout applies), and take a lock around `send` because the RC4
-  keystream is stateful per direction
-* **differential** — run current and new engines over scripted fights and diff outcomes;
-  the point is to see *what changes*, not to prove equality
+* **static** — every compiled skill: swings vs cinematic, breadth resolvable, every
+  opcode operand resolves, every referenced status exists
+* **opcode/prose agreement** — statuses named by 112/113 vs those in the glossary; a
+  divergence means a compile bug or a genuinely undocumented effect. Baseline after name
+  normalisation, and treat regressions as failures
+* **wire invariants** — the serialiser's three rules, transcribing the client's own logic
+  (as `test_battle_effects.py` already does for duplicate targets)
+* **turn inspector** — freeze a live fight, decode the outgoing message, edit, step.
+  Defer the reply rather than blocking the handler thread (heartbeats share the socket,
+  120 s idle timeout) and lock around `send` (RC4 keystream is stateful per direction)
+* **differential** — current vs new engine over scripted fights; the point is to see what
+  changes, not to prove equality
 
 ## Phasing
 
-| phase | deliverable | why first |
+| phase | deliverable | why |
 |---|---|---|
 | **0** | inspector + static harness | measure before changing anything |
-| **1** | `skills.json` (targeting, swings, cd, charge) + validator | pure client-derived facts, no invention |
-| **2** | `statuses.json` from the glossary, with a conflict report | the biggest ambiguity, isolated |
-| **3** | engine core + damage formula | the only genuinely new design |
+| **1** | `skills.json` — targeting, swings, cd, charge, **opcode effects** | almost entirely exact data |
+| **2** | `statuses.json` — taxonomy from ids, numbers from glossary | the ambiguity, isolated |
+| **3** | engine core + damage formula + follow-ups | the only genuinely new design |
 | **4** | serialiser with enforced invariants | closes the silent-failure class |
 | **5** | cutover behind a flag, with the differential report | reversible |
 
-Phases 0–2 produce **no behaviour change at all** — they are data and tooling, and they
-are independently useful even if the rewrite stalls.
+Phases 0–2 change no behaviour and are useful even if the rewrite stalls.
 
 ## Risks
 
-* **The long tail.** 14,410 skill rows; the top few hundred cover most play. Compile all,
-  ship the common ones verified, and let the harness list what is unverified.
-* **Damage tuning is subjective** and cannot be finished from data alone. Keep it in one
-  file with named constants so it is tunable without touching engine logic.
-* **Regression during cutover.** Mitigated by the flag and the differential report.
-* **`action[]`/`act_id[]` remain undecoded** — 21 opcodes, no client-side ground truth
-  (see the contract doc §6). If they are ever decoded they replace the prose-derived
-  effect list, which is why effects are a separate compiled artifact rather than being
-  woven through the engine.
+* **Trigger timing is the weakest link.** The no-operand opcodes are prose inference, not
+  proof — and op 115 shows the set mixes triggers with operandless *effects*, so "no
+  operand" must not be read as "condition". Expect to iterate here.
+* **Damage tuning is subjective** and cannot be finished from data. Keep it in one file
+  with named constants.
+* **The long tail** — 14,410 rows; the harness should list what is unverified rather than
+  pretending completeness.
+* **Regression during cutover** — mitigated by the flag and the differential report.

@@ -358,12 +358,21 @@ Isolated by looking at skills with exactly ONE non-zero action slot, which gives
 | 116 | 2,775 | "**When affected by this status**, …" |
 | 1 | 1,195 | "**While taking damage** …" / "**While dealing attack** …" |
 | 5 | 1,039 | "**When taking damage**, recovers …" |
-| 115 | 1,012 | "at the **beginning of each turn**" / "if total turns reaches N" |
+| 115 | 1,012 | **NOT a trigger — an effect: skill-CD change.** "Gain a reduction in Skill CD at the beginning of each turn" / "increases the Skill CD of the target". Confirmed by skill 235, `[(114,2000),(114,3000),(115,0)]` = "removes the caster's removable buffs when the turn starts and increase the [CD]" |
 | 118 | 146 | "**After action**, there is a N% chance …" |
 | 122 | 50 | "**造成傷害後** (after dealing damage), if the target has …" |
 
 So the script reads as *trigger* + *(verb, operand)* effects, which is exactly the shape a
-status/passive system needs.
+status/passive system needs — **but the no-operand set is a mix of triggers AND
+operandless effects**, as op 115 shows. Do not assume "no operand" means "condition".
+
+### 6.3.1 Joining opcodes to the prose glossary needs name normalisation
+
+Of 9,346 statuses named in attack-skill glossaries, 6,885 (73.7%) are also named by a
+112/113 opcode on the same row. Most of the 2,461 residue is **not** missing data — it is
+the stack-cap suffix: the glossary says `Agony`, `Fatigue`, `Listless`, `Spirit`, while
+the status ROW is `Agony(5)`, `Fatigue(5)`, `Listless(5)`, `Spirit(5)`. Normalise by
+stripping a trailing `(N)` and case-folding before joining.
 
 ### 6.4 SkillType **7** — undocumented sub-skills
 
