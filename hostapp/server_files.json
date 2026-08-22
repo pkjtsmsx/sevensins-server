@@ -5,6 +5,7 @@
         "wire.py",
         "battle.py",
         "design_data.py",
+        "settings.py",
         "bundle_server.py",
         "save_editor.py"
     ],

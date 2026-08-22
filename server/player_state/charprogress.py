@@ -7,6 +7,7 @@ Split out of the former monolithic core.py; depends only on .core.
 import json, math
 import battle as bt
 import design_data as dd
+import settings
 
 from .core import (
     CURRENCY_COIN,
@@ -191,8 +192,12 @@ STAGE_XP_PER_LEVEL_PER_WAVE = 40
 
 
 def stage_battle_xp(stage_row, waves):
-    return STAGE_XP_PER_LEVEL_PER_WAVE * max(int(stage_row.get("_stagelv") or 1), 1) \
-        * max(int(waves), 1)
+    # NOTE the battle_xp rate is the one whose 1.0 is NOT a reconstruction: the real
+    # per-stage XP is not in the pack, so 1.0 means "our best guess", not "what retail
+    # paid". See settings.RATES.
+    return settings.scale(
+        STAGE_XP_PER_LEVEL_PER_WAVE * max(int(stage_row.get("_stagelv") or 1), 1)
+        * max(int(waves), 1), "battle_xp")
 
 
 def apply_char_xp(entry, add):

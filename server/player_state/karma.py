@@ -5,6 +5,8 @@ Split out of the former monolithic core.py; depends only on .core.
 
 import re
 
+import settings
+
 from .core import (
     CUR_CASH,
 )
@@ -490,7 +492,12 @@ def karma_reward(avg_id, option):
                       if f == observed[3]), grade)
     cur, amount, fexp = KARMA_TIERS.get(grade) or (
         KARMA_DEFAULT[0], KARMA_DEFAULT[1], KARMA_DEFAULT[3])
-    return cur, amount, karma_char_for(avg_id), fexp
+    # The tables above stay the RECORD of what retail paid; the server rate scales the
+    # payout here, at the point of grant. Default 1.0 pays the observed 5/10/15 exactly.
+    # Karma (fexp) is deliberately NOT scaled -- the banner grades itself off that number
+    # ("Up!" under 20, "Big Up!" from 20, "Ultimate Up!" from 100), so scaling it would
+    # silently relabel every decision.
+    return cur, settings.scale(amount, "karma_gems"), karma_char_for(avg_id), fexp
 
 
 # The identity unlock mask: digit at position i has the value i+1, so option N sits at

@@ -24,6 +24,7 @@ import os
 import re
 
 import design_data as dd
+import settings
 import battle_effects as fx
 from engine import core as _engine_core
 from engine import status as _engine_status
@@ -595,11 +596,17 @@ def _scaled(count, mult):
 
 
 def _roll(span, rng, mult=1.0):
-    """Roll an inclusive (low, high) span and apply the multiplier. -> int."""
+    """Roll an inclusive (low, high) span, apply the difficulty multiplier, then the
+    server's drop_count rate. -> int.
+
+    Every material stack in the pool comes through here, so this is the single point the
+    rate needs to touch; `mult` is the stage's DIFFICULTY scaling and is a reconstruction,
+    while the rate is the operator's deliberate choice on top of it.
+    """
     low, high = span
     if high <= 0:
         return 0
-    return _scaled(rng.randint(int(low), int(high)), mult)
+    return settings.scale(_scaled(rng.randint(int(low), int(high)), mult), "drop_count")
 
 
 def drop_rung(ap):
@@ -694,8 +701,9 @@ def material_dungeon_drops(stage_id, waves=1, rng=None):
     per_wave = clear_count * DUNGEON_DROP_SHARE / waves
     lo = int(per_wave * (1.0 - DUNGEON_SPREAD))
     hi = int(per_wave * (1.0 + DUNGEON_SPREAD))
-    return [(item_id, _scaled(rng.randint(min(lo, hi), max(lo, hi)) if hi > lo
-                              else int(per_wave), mult))
+    return [(item_id, settings.scale(
+                _scaled(rng.randint(min(lo, hi), max(lo, hi)) if hi > lo
+                        else int(per_wave), mult), "dungeon_drop"))
             for _ in range(waves)]
 
 
@@ -750,7 +758,7 @@ def kizuna_drops(stage_id, rng=None):
     rng = rng or _r
     band = KIZUNA_DROP_BAND.get(stage_difficulty(stage_id),
                                 KIZUNA_DROP_BAND[DIFFICULTY_NORMAL])
-    return [(item_id, rng.randint(*band))]
+    return [(item_id, settings.scale(rng.randint(*band), "dungeon_drop"))]
 
 
 # **Evolution Gem is NOT gated behind the Evolution Abyss.** An earlier draft locked it
@@ -771,7 +779,7 @@ def _pool_roll(rng, ap, mult):
         base = max(COIN_PER_WAVE, ap * COIN_PER_AP)
         lo = int(base * (1.0 - COIN_SPREAD))
         hi = int(base * (1.0 + COIN_SPREAD))
-        return COIN_ITEM_ID, _scaled(rng.randint(lo, hi), mult)
+        return COIN_ITEM_ID, settings.scale(_scaled(rng.randint(lo, hi), mult), "coin")
     roll -= DROP_POOL_COIN
     member = DROP_POOL_WEIGHTS[-1][0]
     for candidate, weight in DROP_POOL_WEIGHTS:
