@@ -4,7 +4,7 @@ This exists so the two engines can be swapped under a running server without for
 whole battle state machine. The old `Battle` still owns waves, turn order, cooldowns,
 rewards and the socket; only the *resolution of one skill use* moves across.
 
-    SEVENSINS_BATTLE_ENGINE=new
+    SEVENSINS_BATTLE_ENGINE=old     # escape hatch; the new engine is the default now
 
 The new engine owns damage, targeting, swing structure and the `data` payload.
 

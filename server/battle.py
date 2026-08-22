@@ -32,9 +32,17 @@ from engine import status as _engine_status
 from engine import passives as _engine_passives
 from engine import specs as _engine_specs
 
-# Phase-5 cutover switch. Defaults to the old engine: the new one is opt-in until it
-# owns battle state as well as resolution (see engine/bridge.py for exactly what moves).
-NEW_ENGINE = os.environ.get("SEVENSINS_BATTLE_ENGINE", "old").strip().lower() == "new"
+# The engine switch, now defaulting to the NEW engine. It is a temporary escape hatch
+# rather than a choice: `SEVENSINS_BATTLE_ENGINE=old` still selects battle_effects while
+# that package exists, and goes away with it.
+#
+# Defaulting to "old" was not a neutral default. Nothing sets this variable on the phone
+# -- main.py sets SEVENSINS_ACCOUNTS / _DESIGN_CACHE / _PATCH_ROOT and nothing else --
+# so every device ran the old engine no matter what was fixed here, while the desktop
+# server ran the new one because the flag was passed on the command line. Measured on
+# the same corpus, that is 4,754 runnable player skills instead of 8,318, plus none of
+# the status enforcement.
+NEW_ENGINE = os.environ.get("SEVENSINS_BATTLE_ENGINE", "new").strip().lower() != "old"
 
 # CALIBRATION HOOK (temporary, pairs with patch_design.py's lattice): the served
 # formation table is a 10x10 lattice of candidate positions rather than 5 real slots,

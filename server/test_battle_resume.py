@@ -107,6 +107,10 @@ def test_round_trip():
 
 def test_statuses_and_shield_survive():
     state = fresh_state("resume_test_2")
+    # Old-engine round-trip: pinned, because the default is the new engine now and the
+    # legacy statuses below would be migrated on restore (which
+    # test_legacy_statuses_migrate_to_the_engine covers on purpose).
+    was, bt.NEW_ENGINE = bt.NEW_ENGINE, False
     battle = bt.Battle(1101, ps.battle_team(state), 10, None, 0, 0)
     import battle_effects as fx
     caster = next(u for u in battle.units.values() if u.team == bt.TEAM_PLAYER)
@@ -128,6 +132,7 @@ def test_statuses_and_shield_survive():
     check("a synthesized (non-catalog) status keeps its own definition",
           synth is not None and synth.definition.get("stat_mods") ==
           [{"stat": "ATK", "value": 30, "unit": "pct"}])
+    bt.NEW_ENGINE = was
 
 
 def test_full_lifecycle_across_a_simulated_restart():

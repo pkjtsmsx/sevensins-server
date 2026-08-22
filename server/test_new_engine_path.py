@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Integration coverage for the NEW engine path, with the flag actually on.
 
-**Why this file exists.** `SEVENSINS_BATTLE_ENGINE` is off by default, so every other
-suite exercises the old engine. That is the configuration nobody plays on, and it has now
-let two bugs through to a live device:
+**Why this file exists.** `SEVENSINS_BATTLE_ENGINE` used to default to the OLD engine,
+so every other suite exercised a configuration nobody plays on -- and worse, so did every
+PHONE, since nothing sets that variable there. It has now let two bugs through to a live
+device:
 
   * a mode-4 (move gauge) DamageInfo row that hung the client outright;
   * `'Active' object has no attribute 'dot_atk'` -- the battle save choking on an engine
     status the moment a fight started, dropping the connection.
 
-Both were reachable in one turn of ordinary play. All eleven suites passed anyway,
+The default is now the new engine, so this file is no longer the only one exercising it;
+it stays because it pins the behaviour the flag used to hide. Both bugs below were
+reachable in one turn of ordinary play. All eleven suites passed anyway,
 because on the old path neither code path is ever entered.
 
 So this drives the same three things the server does on every battle RPC, together:

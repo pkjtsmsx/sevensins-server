@@ -31,6 +31,13 @@ os.environ["SEVENSINS_ACCOUNTS"] = _tempfile.mkdtemp(prefix="sevensins-test-")
 import battle as bt          # noqa: E402
 import battle_effects as fx  # noqa: E402
 
+# This suite tests the OLD engine, so it pins the flag rather than inheriting it. The
+# default is the new engine now; without this the checks below build a Battle that
+# resolves skills through the engine and then assert on `battle_effects` statuses it
+# never reads -- a suite failing because it is testing the wrong thing, not because the
+# thing is broken. Goes away with the package.
+bt.NEW_ENGINE = False
+
 SKILL_EFFECTS = os.path.join(HERE, "battle_data", "skill_effects.json")
 
 
