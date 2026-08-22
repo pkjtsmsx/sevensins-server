@@ -284,6 +284,22 @@ MAX_SUPER_STAR = 6
 #   3 -> 11123 "Clear in at most {0} turns"
 #   4 -> 11124 "Clear with Kizuna quest's leading cast"; 5..22 are other modes
 RATING_CLEARED, RATING_MAX_DEATHS, RATING_MAX_TURNS = 1, 2, 3
+# **Kind 4 is "clear with a SPECIFIC cast in the team"**, and `[3]` is that cast's
+# charID -- not a turn/death threshold like the other kinds put there. 579 rows use it,
+# across 122 distinct casts, every one of which resolves to a real `char` row whose
+# `_group` is itself: 10001 Lucifer, 10011 Leviathan, 10021 Satan and on down. They sit
+# in the bond dungeons (dmap 20001+), 8 rows to a map, and each pays a Diamond. Falling
+# through to the catch-all meant that star could never be earned on ANY of them, no
+# matter who was fielded, so the Diamond behind it never paid.
+#
+# Matching is by `_group`, NOT by raw charID, and it has to cut both ways:
+#   * a Bunrei or grow-star form must COUNT -- 10002 "Lucifer's Bunrei XE" is its own
+#     fieldable unit but carries `_group` 10001, so it satisfies a row naming Lucifer;
+#   * an ALT COSTUME must NOT -- 20241 Beelzebub "Nightingale Empress" carries `_group`
+#     20241 while 10051 Beelzebub carries 10051. Same character NAME, different units,
+#     and the row names one of them specifically. Matching on name, or folding 20xxx
+#     onto 10xxx, would hand the star to the wrong Beelzebub.
+RATING_LEAD_CHAR = 4
 # **Kinds 11..15 are "clear with at least [3] ally casts of a JOB", and the job is the
 # kind itself minus 10.** DesignChar `_job` is 2 STR / 3 AGI / 4 TEC (text 12013/12014/
 # 12015 in that order), and the Hell Express bears it out: B01 is kind 14 and the panel
@@ -1697,6 +1713,51 @@ def _char_job(char_id):
     return int((dd.row("char", int(char_id)) or {}).get("_job") or 0)
 
 
+_grade_group_index = None
+
+
+def _grade_groups():
+    """{any grow-star grade id: canonical group id}. Lazy, cached, never raises.
+
+    `_group` alone is not quite enough. A unit declares its whole grade ladder in
+    `_growStar` -- Lucifer declares 10001..10006 plus 110001..110006 -- but the pack
+    ships only some of those as rows of their own: **1,327 of the 3,801 declared grade
+    ids have no `char` row at all.** A grade with no row would fall back to comparing
+    equal only to itself, so a starred-up cast could fail a condition naming its base.
+    Indexing `_growStar` covers the grades that were never shipped as rows.
+    """
+    global _grade_group_index
+    if _grade_group_index is not None:
+        return _grade_group_index
+    index = {}
+    try:
+        for char_id, row in dd.rows("char").items():
+            group = int(row.get("_group") or char_id)
+            index[int(char_id)] = group
+            for grade in (row.get("_growStar") or []):
+                if grade:
+                    index.setdefault(int(grade), group)
+    except Exception:                       # noqa: BLE001 -- never break a clear
+        index = {}
+    _grade_group_index = index
+    return index
+
+
+def _char_group(char_id):
+    """The canonical unit id shared by every grade and Bunrei form of a cast.
+
+    Falls back to the charID itself when nothing knows it, so an unrecognised unit
+    compares equal to itself rather than to everything else that is also unknown.
+    """
+    char_id = int(char_id)
+    group = _grade_groups().get(char_id)
+    if group:
+        return group
+    return int((dd.row("char", char_id) or {}).get("_group") or char_id)
+
+
+
+
 class Battle:
     """One run of one stage: a list of waves, each a mob group from the design data."""
 
@@ -2552,6 +2613,14 @@ class Battle:
                 allowed = row[4] if len(row) > 4 else 0
                 ok = cleared and (not name
                                   or self.status_taken.get(name, 0) <= allowed)
+            elif kind == RATING_LEAD_CHAR:
+                # Composition, not performance -- judged over the party as FIELDED,
+                # dead members included, exactly like the job conditions below.
+                # Bringing the named cast and losing it is still bringing it.
+                want = _char_group(limit)
+                ok = cleared and any(_char_group(u.char_id) == want
+                                     for u in self.units.values()
+                                     if u.team == TEAM_PLAYER)
             elif kind in RATING_JOB_MIN:
                 # Composition, not performance: judged over the party as fielded, dead
                 # members included -- the condition is what you brought, not what
