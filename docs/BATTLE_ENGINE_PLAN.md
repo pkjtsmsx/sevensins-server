@@ -632,6 +632,90 @@ max HP matching the live trace to the digit confirmed the right party.
 
 ---
 
+## Phase 8 — retiring `battle_effects` (2026-08-22)
+
+### Measured: the new engine is a strict superset
+
+| | player-castable skills it can run |
+|---|---|
+| old (`fx.is_complete`) | 4,754 / 8,333 — 57% |
+| new (compiled spec) | 8,318 / 8,333 — 99.8% |
+
+Buckets: old-yes/new-yes 4,754, old-no/new-yes 3,564, **old-yes/new-no 0**. The 15
+neither runs are boss phase scripts (`即死`, "HP Changed to 50%"), not castable skills.
+
+Knowledge source: the old engine ran off a **hand-written catalog of 748 status
+definitions**; the new one reads the pack — 1,685 status rows, 14,410 skill specs. The
+278 names "only the old catalog knew" are not a loss: **253 are never applied by any
+skill** (prose clause names its scraper mistook for statuses — `Angel Blood`,
+`Heavenly Focus`), 2 are covered by qualified rows (`Revelations` →
+`Revelations (ATK)/(SPD)`), and ~23 are alias spellings (`Heal Block` vs `Block Heal`).
+
+Op counts (old 11, new 9) are not comparable: the old engine had `stat_mod`, `shield`,
+`immunity` and `cleanse` as skill OPS, while the new one derives those from the status
+rows (`stat_multiplier`, `absorb`, `is_immune`, `remove_category`) and adds `follow_up`,
+`attack_rider`, nested scripts and the attribute triangle.
+
+### The flags were not "still handled by the old engine" — nothing handled them
+
+`battle_effects.has_flag` filters through `own()`, which keeps only statuses carrying a
+`.definition`. An engine status has none, so on the new path **every flag check returned
+False**. The statuses applied, the icons drew, the trace listed them, and they did
+nothing. Fixed, and each derived from the registry's own wording rather than `kind`:
+
+* **seals are per-SLOT**, which the old boolean could not express — Power Attack Seal
+  locks slot 1, Special Move Seal the ultimate, Skill Seal both. `kind` cannot separate
+  them (605/606/607 are all `control`);
+* **heal-block must NOT use `kind`.** That bucket holds 18 rows of which two block
+  anything; it also collects healing INCREASES (Concentrate, Blessing), healing
+  REDUCTIONS (Injured, Deterioration), an immunity, and Field Shield — a shield granting
+  immunity *to* Block Heal. Keying on the kind blocked every heal in the game, because
+  the party carries Field Shield from turn one. Matched on "cannot be healed" instead;
+* **control is THREE redirects**, not one flag: Taunt "can only attack the taunt
+  caster", Charm/Enchant "will attack allies", Confuse "will attack both allies and
+  enemies". Charm and Confuse outrank Taunt. Taunt needs the inflicter, so `Active`
+  gained `source_order`;
+* **counters** needed no new trigger — `ON_DAMAGE_TAKEN` already fires per struck target
+  and a rule can DAMAGE the ATTACKER. The bug was that every caller **discarded
+  `fire_all`'s return value**, so passive damage moved server HP and the client was
+  never told;
+* **cooldowns did not exist.** `modify_cd` was a `pass` and all 1,012 sites carried no
+  delta and no recipient, so `CD Reduction Block` had nothing to block. Both are now
+  extracted from the cooldown clause (810 deltas, 679 recipients), signed, with
+  "increase" winning ties. The block is checked on the SIGN — it refuses a refresh while
+  a delay still lands.
+
+### Save migration, not save loss
+
+Battles are persisted on every message, so live saves carry old-format statuses at all
+times. They convert exactly, because both models store the same facts under different
+names: `remaining "battle"` → `None`, `dot_atk` → `source_atk`, `taunt_source` →
+`source_order`. An unresolvable name is DROPPED, never given an invented id — the client
+feeds every id to `GetRow`, which throws (contract §3.8).
+
+### The default was the whole ballgame
+
+`SEVENSINS_BATTLE_ENGINE` defaulted to `"old"` and **nothing sets it on the device** —
+`main.py` exports `SEVENSINS_ACCOUNTS` / `_DESIGN_CACHE` / `_PATCH_ROOT` and nothing
+else. Every phone ran the old engine while the desktop ran the new one purely because
+the flag was passed on the command line. A flag whose default nobody audits is not a
+safety mechanism; it is a second product.
+
+### Pre-flight before deletion
+
+Wrapping `fx` in a recording proxy and driving AI-vs-AI play (four stages, 89 turns on
+the raid, wave advances, a save/restore mid-fight, plus the per-turn payload builders,
+ratings, drops and rewards) touches `battle_effects` **zero times**. AI selection was
+never the old engine's: `auto_move` is `usable_slots` + `skill_ratio` + first live
+target; `design_enemy_targets`/`aoe_damage` live in the old ATTACK path.
+
+What remains is mechanical: the fallback attack path, `hit_count`/`is_complete`/
+`status_skill_id`/`_status_wire`/`_defend_reduce`, `passives()` switching to
+`specs.skill(...).type == "passive"`, the flag itself, the package, and
+`test_battle_effects.py`.
+
+---
+
 ## Risks
 
 * **Trigger timing is the weakest link.** The no-operand opcodes are prose inference, not
