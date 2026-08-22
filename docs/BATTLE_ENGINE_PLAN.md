@@ -537,6 +537,101 @@ bridge stops being a one-way HP mirror.
 
 ---
 
+## Phase 7 — what device testing found (2026-08-21)
+
+Six defects in one session, every one of which produced plausible output server-side.
+The pattern is worth more than the individual fixes: **the engine was almost always
+right about WHAT happened and wrong about a quantity, a direction, or a recipient** —
+none of which any assert could see, because each value was individually well-formed.
+
+### Reading a clause: the sentence matters, and so does which sentence
+
+Lucifer's Lamenting Starlight is a toggle whose two clauses each name BOTH markers — as
+the condition in one, as the grant in the other. Matching a status to "the first
+sentence naming it" gated both halves on The Divine, so the stance could never return.
+`_clause_for` now prefers the sentence where a **granting verb precedes the name**.
+
+Three more of the same family, all in `tools/compile_skills.py`:
+
+* **`heals?` had no word boundary** and matched inside "**Heal**thy Strike IV: … ATK+35%",
+  dragging a heal's magnitude, recipient AND basis off a line about a stat buff.
+* **A possessive names the SOURCE of a number, not the recipient.** "restores HP to all
+  allies by 20% of *the caster's* Max HP" was read as a caster-only heal because the
+  word "caster" occurs in it. `clause_target` strips possessive stat phrases first;
+  104 heals moved off `caster`.
+* **"lasts the entire battle" matched none of `PERMANENT_RE`'s patterns**, so 807 apply
+  sites silently became 2-turn buffs. On the wire that shipped `round: 1`, which the
+  client counts to zero and deletes.
+
+### A percentage is a percentage OF something
+
+Every heal was applied as a fraction of the RECIPIENT's max HP. Michael's *"restores HP
+of all allies by 250% ATK"* therefore healed each ally for 250% of their own bar — a
+guaranteed full-party heal on a zero-cooldown skill, which reads as a design mistake
+rather than ours. (The zero cooldown is real: `_cdTurn` is 0.)
+
+| basis | sites | shape |
+|---|---|---|
+| % of the caster's ATK | 8 | "by 250% ATK" |
+| % of the caster's max HP | 489 | "by 20% of the caster's Max HP" |
+| % of the recipient's max HP | 542 | "recovers the caster's Max HP by 15%" |
+
+Only the last scales per recipient. The bases differ by an order of magnitude, so an
+unstated basis is not a small error.
+
+### Direction: `Return` is a debuff, not a reflect
+
+`ON_HIT_EXTRA` (was `REFLECT`). Michael's passive reads *"Sword Draw: when a battle
+starts, inflicts Return on all **enemies**"*, and Return's own line — *"While taking
+damage, deals Target's 100% ATK as damage"* — names the Target, which is the holder. We
+paid it to the attacker instead, so a player passive was attacking its own party for the
+attacker's full ATK once per skill.
+
+**The test asserted the old direction and passed.** A test written from the same
+misreading as the code confirms the misreading; it now checks both halves (attacker
+takes nothing, holder takes its own ATK).
+
+### Synthesised ids must never reach the client
+
+`passives.py` mints a negative id from a status name when a rule names something with no
+design row. Correct for tracking it on a unit, fatal on the wire — see contract §3.8.
+Seven of the eight names that were synthesising had real rows all along (the lookup only
+searched the cast's own kit, never the status registry) and the eighth was a dropped
+comma in "Hold On, Classmates". `SYNTHESISED_ON_PURPOSE` is now an empty set, and a
+check fails if anything lands in it silently.
+
+Name matching is punctuation-insensitive but **qualifier-preserving**: exact matching
+missed the comma, and loose matching folds `Keen`, `Keen UL`, `Keen(SP)`, `Keen(SP2)`
+into one and hands rules the wrong magnitude.
+
+### Nested status scripts (contract §6.4.2)
+
+Implemented in `status.run_nested`, fired for every living unit at turn start. Removal is
+**by id, never by name** — the pack ships duplicate rows per name and markers do
+`apply 400, remove 400`; matching by name deleted the real marker. Apply/remove pairs a
+single run produced are collapsed so a no-op never reaches the wire.
+
+Retired Lucifer's three hand-written rules (CC Immunity, Keen, Teardown) — keeping them
+would refresh each twice a turn. Gabriel's `Hold On, Classmates` stays a rule: its gate
+is an HP threshold, not holding a marker.
+
+### Delivering out-of-band status changes
+
+Turn-start grants have no attack to ride on. They are queued and attached to the next
+payload (status rows are unit-addressed, so any group can carry them), collapsing
+repeats — otherwise a held marker adds a row per turn forever. Not persisted with the
+battle: on reconnect the client rebuilds everything from `BattleDatas.status`.
+
+### Reproducing a live fight in a harness
+
+`Battle(stage, party, team_level, None, 0, 0)` silently drops ~31% of a real account's
+stats. The server passes `team_star`, `team_super_star` and `book_rank` (6 / 6 / 241 on
+the test account) and the party may not be formation 0. Wrong arguments produce numbers
+that look plausible and are not — it cost two wrong answers about Michael's heal before
+max HP matching the live trace to the digit confirmed the right party.
+
+---
+
 ## Risks
 
 * **Trigger timing is the weakest link.** The no-operand opcodes are prose inference, not

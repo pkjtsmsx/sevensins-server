@@ -409,6 +409,93 @@ real game never had -- the correct treatment is to leave them out, not to model 
 
 ---
 
+## 3.8 Statuses reach the client on TWO channels, with different arg layouts
+
+Decompiled 2026-08-21, after the whole opening buff bar turned out to be invisible.
+
+**Per-action** — `DamageInfo.status`, `List<List<int>>`, rows of `[order, skill_id,
+round]`. Each row names its OWN unit, so any row can carry a change for any unit; they
+all hang off the lead row. `AttackBehavior.updateStatus` walks them in order and calls
+`BattleUnit.UpdateStatus`, which reads `args[1]` as the id and `args[2]` as the round.
+
+**Battle open** — `BattleDatas.status` (field `StatusDatas`, wire key `status`),
+`{order: {skill_id: args}}`. `BattleDatas.RebuildAllStatus` walks it from
+`BattleDataInitializer.<InitUI>d__22.MoveNext`. This is the ONLY way a status that no
+attack applied can be drawn, which is every battle-start passive aura. Sending `{}` (as
+we did) meant Field Shield, both Field Angels, both Commendations, the boss's opening
+seals and Lucifer's The Divine were all invisible from turn zero.
+
+### `round` is a three-way discriminator, not a duration
+
+`BattleUnit.UpdateStatusRound` decrements only when `round >= 1` and removes at exactly
+0. So:
+
+| `round` | meaning |
+|---|---|
+| `>= 1` | lasts that many turns, counted down client-side |
+| `0` | **REMOVE** — `UpdateStatus` routes to `removeStatusDataByID` |
+| `< 0` | permanent: never decremented, never expires |
+
+`-1` is therefore the sentinel for "lasts the entire battle", not a large number. And a
+removal has no other channel: dropping `applied=False` events left the client drawing
+statuses the server had already stripped.
+
+### The two arg layouts DIFFER — this is the trap
+
+`StatusST` has two constructors and they do not agree:
+
+```
+.ctor(List<int> curArgs)             [1]=skill [2]=round, and [3]=lv [4]=value
+                                     [5]=actOn ONLY when Count >= 4
+.ctor(int skillID, List<int> args)   [0]=round [1]=value [2]=actOn [5]=lv
+```
+
+The per-action channel uses the first, so a 3-element row is safe. The battle-open
+channel uses the second, which reads index 5 **unconditionally** — six entries is the
+floor there or it throws `ArgumentOutOfRangeException` inside battle load.
+
+### Every id is fed to `GetRow`, which THROWS on a miss
+
+Both constructors do `DesignSkillForm.GetRow(skillID)` to read the row's `_statusID`.
+That call throws rather than returning null, and on the battle-open channel it throws
+inside the load coroutine — the coroutine dies and the loading screen hangs forever,
+with nothing wrong server-side:
+
+```
+DesignException: (0x0012) DesignSkillForm row ID -175492 not found
+  at Game.Player.Battle.StatusST..ctor (Int32 _skillID, List`1 serverArgs)
+  at Game.Player.Char.BattleDatas.RebuildAllStatus
+  at Game.Battle.Common.BattleDataInitializer+<InitUI>d__22.MoveNext
+```
+
+So an id must be *resolvable*, not merely non-null. Ours was a synthesised negative id
+minted from a status name for a rule with no design row — see the engine plan.
+
+### Duplicate rows share a name, so removal must be by ID
+
+397 and 399 are both `The Divine`; 398 and 400 are both `The Fallen`. A status's nested
+script routinely applies the duplicate and removes it again (`apply 400, remove 400`, a
+no-op as written). Matching that removal by NAME deletes the real marker too.
+
+Both stance markers also carry `_statusID: 1` and `_spriteID: 1000131` — Divine and
+Fallen render with the *same icon*. That is retail data, not a bug to chase.
+
+---
+
+## 3.9 The preparation screen art is YOUR lead unit, not the boss
+
+`PanelBattlePreparation.UpdateLive2d` (0x16ABAFC) never reads the stage or the mob
+group. It takes `PlayerChar.Formations[_nowTeamListIndex]`, member **[0]**, and renders
+that character through `FittingRoom.ShowChar`. Gabriel showing on Raphael's daily raid
+is correct — she was in slot 0.
+
+Worth writing down because the near-miss is very convincing: the seven daily challenges
+have one virtue dmap each (`21001` Faith: Michael … `21006` Temperance: Raphael,
+`21007` Chasity: Gabriel) and the seven bosses are adjacent too (`1000206` Raphael,
+`1000207` Gabriel). "Art is one row off" fits perfectly and is wrong.
+
+---
+
 ## 4. What the client does NOT provide
 
 * **Damage numbers.** No damage formula exists client-side, at all.
@@ -747,6 +834,38 @@ complete program.
 
 **Practical consequence:** compile repeats verbatim (one effect per slot, with its slot
 index) and let the prose disambiguate stacks vs triggers per skill. Do not guess.
+
+### 6.4.2 A status's own script — when it fires, and what a repeat means
+
+The table in §5.1 records that 510 type-6 rows carry an `action` script (428 of them
+survive into `statuses.json` as `nested`: 719 applies, 199 removes, 87 category
+cleanses). What it did not record is the SEMANTICS, which nothing in the pack states —
+the original server interpreted these, and there is no server binary to decompile. What
+follows is inferred from prose, and is flagged as inference deliberately.
+
+A status is not only a modifier; it can be a **trigger marker** whose script runs while
+it is held. The prose says so directly: *"When affected by this status, Angel of Faith,
+Michael will trigger Destiny UL effects."*
+
+| question | reading | evidence |
+|---|---|---|
+| WHEN | every turn while held, not once on apply | Lucifer's passive spells the timing out — *"if affected by The Fallen, grants Keen (CRT+35%) for two turns at EACH START OF A TURN"* — and The Fallen's row is exactly `apply 2007 Keen, apply 2009 Teardown` |
+| a REPEATED identical apply | a stack count | `Destiny UL` lists 3804 five times; `Haughty Malefics` lists 3012 twice |
+| ONE-SHOT vs recurring | a row that removes ITSELF is consumed by firing | `Never Surrender` = `apply All DMG Reduction, remove Never Surrender` |
+
+Two consequences that only show up in play:
+
+* **Scope is every unit, not the acting one.** Durations tick once per global turn but a
+  unit acts once every N turns, so refreshing a marker's grants only on the holder's own
+  turn makes them flicker — Keen and Teardown were on/off every other turn with two
+  units on the field, and would be up 2 turns in 6 with a full party.
+* **Recursion is one level.** A status applied by a script runs its own script at the
+  NEXT turn start, once the unit actually holds it. Same rule as everything else, and it
+  makes an unbounded chain impossible without a depth counter to tune.
+
+Still unproven: whether "each start of a turn" means each *global* turn (what we
+implement) or each of the holder's own turns. The flicker argues for global; the prose
+does not settle it.
 
 ### 6.5 What is still open
 
