@@ -32,6 +32,15 @@ import battle as bt          # noqa: E402
 import battle_effects as fx  # noqa: E402
 
 SKILL_EFFECTS = os.path.join(HERE, "battle_data", "skill_effects.json")
+
+
+def pool_items():
+    """Every item id the ordinary-stage drop pool can produce -- see battle.DROP_POOL_*."""
+    return ({bt.COIN_ITEM_ID, bt.EVOLUTION_GEM, bt.MINION_SUMMON_ORB,
+             bt.LIMBO_LEGACY_ITEM, bt.STARDUST_OF_INFERNO_ITEM}
+            | set(bt.TRAINER_ITEMS.values())
+            | set(bt.GREMLIN_PIECE_TIERS.values())
+            | {i for i, _w in bt.KARMA_GIFT_WEIGHTS})
 _fail = 0
 
 
@@ -635,9 +644,14 @@ def test_starshard_temple_drops():
 
     # An ordinary stage must be untouched by any of this.
     check("a main-story stage drops no shards", bt.starshard_temple_drops(1101) == [])
-    check("and still previews coins",
-          set(bt.stage_drop_preview(1101)) == {bt.COIN_ITEM_ID},
-          str(bt.stage_drop_preview(1101)))
+    # An ordinary stage previews whatever the drop POOL rolled, which is coin plus any
+    # of the materials -- so pin the invariant that matters here (nothing outside the
+    # pool, and never a shard) rather than an exact set the roll decides.
+    _pool_items = pool_items()
+    _preview = bt.stage_drop_preview(1101)
+    check("and previews a non-empty pool roll", bool(_preview), str(_preview))
+    check("and previews only pool members, never a shard",
+          set(_preview) <= _pool_items, str(_preview))
 
 
 def test_transcend_corridor_drops():
@@ -819,8 +833,16 @@ def test_auto_play_sweep():
     check("stage_drops_for matches the corridor table",
           bt.stage_drops_for(1800021, rng=random.Random(2))[0][0]
           in bt.GREMLIN_PIECE_ITEMS)
-    check("and falls back to coins for an ordinary stage",
-          bt.stage_drops_for(9999999) == [(bt.COIN_ITEM_ID, bt.COIN_PER_WAVE)])
+    # A stage with no row at all falls to the generic generator: exactly one pool stack
+    # for its single notional wave, and nothing from the corridor table. Asserted as a
+    # shape rather than an exact list -- which member lands is rolled.
+    _fallback = bt.stage_drops_for(9999999, rng=random.Random(2))
+    check("and falls back to the generic generator for an ordinary stage",
+          len(_fallback) == 1
+          and _fallback[0][0] in pool_items()
+          and _fallback[0][1] >= 1
+          and all(i not in bt.GREMLIN_PIECE_ITEMS for i, _c in _fallback),
+          str(_fallback))
 
     # bestrec drives the panel's "Stage Clear Record" and its time estimate.
     _ps.record_stage_turns(st, 1600002, 7)

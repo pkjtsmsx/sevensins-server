@@ -323,6 +323,473 @@ COIN_ITEM_ID = 2
 # See Battle.drops(): fitted to footage of a 1-1 clear (3 waves, 3 coin icons of 250).
 COIN_PER_WAVE = 250
 
+# ---- generated drop tables -------------------------------------------------
+#
+# STAGE_DROPS below still wins outright: observed footage beats anything generated here.
+# This is what a stage with NO observation pays.
+#
+# **The real per-stage drop tables are in no client form.** The client asks the server
+# for them (StageRpc GetDrops 8 -> 25); they were live-ops data, and for ordinary stages
+# that pool is simply gone.
+#
+# **THE TWO KINDS BELOW ARE NOT EQUALLY WELL FOUNDED. Do not read them as one thing.**
+#
+#   DERIVED -- the dungeons. A farm or bond dungeon exists to pay ONE resource, and the
+#     stage's own Stage Clear row names it. There is a real answer and we read it, so
+#     kizuna_drops and material_dungeon_drops reconstruct rather than invent. The
+#     material dungeon amounts are fitted to live footage on top of that.
+#
+#   PLACEHOLDER -- ordinary stages, i.e. generated_drops and DROP_LADDER. A normal stage
+#     had a POOL of items it rolled from and that information is lost; nothing in the
+#     pack states it. The flat 250-per-wave coin payout was the original stand-in, and
+#     this is a better-shaped stand-in, not a recovery. What it pays is grounded (every
+#     item in the pool names Main Story as its own source -- see the note by
+#     TRAINER_ITEMS) but HOW MUCH, and the whole ap/rarity ladder, is invented.
+#
+# So: correcting a dungeon means finding the row that already knew the answer.
+# Correcting an ordinary stage means observation, or a deliberate design choice.
+#
+# `_ap` -- the stamina a run costs -- is the game's own statement of what a stage is
+# worth, so it is the scale. 1-1 costs 5 ap and pays 250, which fixes COIN_PER_AP at 50.
+# Note `_ap` is 0 on 1,569 of the 6,628 rows (arena, tutorial rooms, the ap-0 challenge
+# stages); those floor at COIN_PER_WAVE in generated_drops rather than paying nothing.
+BASE_AP = 5                                     # 1-1's cost, the 250 baseline's stage
+COIN_PER_AP = COIN_PER_WAVE // BASE_AP          # 50 Mira per stamina point
+COIN_SPREAD = 0.20                              # coins swing +/-20% per wave
+
+# ---- the ordinary-stage drop POOL ------------------------------------------
+#
+# Membership comes from two INDEPENDENT sources that agree with each other, which is
+# what makes this a reconstruction rather than a guess:
+#
+#   (a) THE ITEM SAYS SO. Each member's own `_note1` names Main Story as a source.
+#       Read the JP note, not only the EN one -- the EN translation dropped the word
+#       "Story" from the Gremlin Pieces, whose JP still reads
+#       "【ストーリー/ダンジョン入手可能】" (obtainable from Story / Dungeon).
+#   (b) IT WAS SEEN DROPPING. 19 live chapter 1-3 clears, 38 drop slots in total.
+#
+# Every member below is confirmed by at least one and contradicted by neither -- EXCEPT
+# the karma gifts, which are a deliberate design addition and are marked as such.
+#
+# **Two near misses, kept out on purpose.** Both look like obvious members and both are
+# refuted by their own notes, so check the note before adding anything here:
+#   * EX Evolution Shard 139 -- "Can be exchanged in Belphie's Booth -> PVP Shop".
+#     The contributed ladder dropped it from ap 40 up; that would have had story stages
+#     printing a PVP-shop currency.
+#   * Transcender Gremlin 111..115 (the WHOLE creatures) -- JP reads
+#     "【魂の祭壇交換可能】", exchangeable at the Soul Altar. Only the PIECES drop.
+TRAINER_ITEMS = {1: 101, 2: 102, 3: 103, 4: 104, 5: 105}
+EVOLUTION_GEM = 556
+GREMLIN_PIECE_TIERS = {1: 116, 2: 117, 3: 118, 4: 119, 5: 120}
+MINION_SUMMON_ORB = 210         # observed as a x10 stack, matching STAGE_DROPS[2101]
+MINION_SUMMON_ORB_COUNT = 10
+
+# ---- karma gifts: a DESIGN CHOICE, not a reconstruction ---------------------
+#
+# These three are in the pool because we put them there, not because the data says so.
+# Being explicit because every other member earned its place by evidence:
+#   * No gift item names a source in ANY language -- all 148 `_action 3` rows carry a UI
+#     hint ("Tap Karmameter to send gifts") where the pool members carry
+#     "(Main Story / Daily Dungeon Reward)". Checked EN, JP, TC and SC.
+#   * None was ever seen in a Drops slot across the 19 clears. Gifts appear only in the
+#     RATINGS block as Stage Clear rewards (2103 pays Popular Manga x5, 2106 x10) and
+#     the bond dungeons' clear rows are almost entirely gifts.
+#
+# The three chosen are the GENERIC ones -- the only gifts not tied to one cast's taste.
+# Manga and Poster say "Everybody's favorite" outright; Ramen carries no favourite
+# clause. Every other gift is "<Character>'s favorite" and stays out, or a story stage
+# would be handing out one specific cast's gift track at random.
+#
+# WEIGHTED BY VALUE, INVERSELY. `_param2` is the karma each is worth, and they are far
+# apart -- so a flat weight would make the Poster the dominant karma source in the game.
+# Note the EN notes are stale here and claim "by 10" for both Manga and Poster; the JP
+# and `_param2` agree on the real figures, which is what charprogress reads.
+#
+#     401 Ramen           10 karma   weight 3
+#     486 Popular Manga   20 karma   weight 2
+#     487 Popular Poster 100 karma   weight 1   <- lower this first if karma flows fast
+KARMA_GIFT_WEIGHTS = ((401, 3), (486, 2), (487, 1))
+
+# ap threshold -> (tier, material count span). ONE stack per slot; the span is an
+# inclusive (low, high) for that stack. Rising stamina buys a higher TIER -- of trainer
+# and of gremlin piece alike, both being ★1..★5 families -- and a slightly larger stack.
+#
+# **The counts are small on purpose.** In every observed clear the material stacks show
+# no number at all, which is this panel's way of writing x1; the only stacks carrying a
+# number are coin, the x10 summon orb and the x6 cards. So ap 5 pays exactly x1 and the
+# high rungs grow slowly. An earlier draft paid Evolution Gem x146 at ap 120, which no
+# footage supports.
+DROP_LADDER = [
+    (100, 5, (2, 4)),
+    (80,  5, (2, 4)),
+    (60,  5, (2, 3)),
+    (40,  5, (1, 3)),
+    (30,  5, (1, 3)),
+    (25,  4, (1, 2)),
+    (20,  4, (1, 2)),
+    (15,  3, (1, 2)),
+    (10,  2, (1, 2)),
+    (5,   1, (1, 1)),
+    (0,   1, (1, 1)),
+]
+
+# **Each WAVE contributes exactly one drop stack, and every stack is one pool roll.**
+# That shape is the single most solid thing known about ordinary-stage drops: across all
+# 19 clears the stack count equals the wave count, every time, and a clear can roll the
+# same member twice (one 2-wave clear paid two trainer cards) or no coin at all.
+#
+#   1101 (3 waves)   coin 250 | ★1 Trainer | coin 250
+#   2101 (2 waves)   coin 250 | coin 250
+#   2109 (2 waves)   Evolution Gem | Minion Summon Orb x10
+#   2110 (2 waves)   Evolution Gem | coin 250
+#   3-1.. (2 waves)  ★1 Trainer | ★1 Trainer
+#   3-x  (2 waves)   Evolution Gem | Gremlin Piece
+#
+# WEIGHTS are the observed slot frequencies over those 38 slots, which is why they are
+# not round numbers. Coin is a POOL MEMBER like any other, not a fallback:
+#
+#      coin 14   evolution gem 9   trainer 8   gremlin piece 5   summon orb 2
+#
+# (The two x6 "cards" are counted as trainers -- the icon family matches and no other
+# member is drawn as a character card.)
+#
+# The karma gifts are then added at weight 6 total, which is the ONE part of this table
+# not read off the footage -- see the design-choice block above. They take ~14% of slots
+# and leave the observed members' proportions to each other intact.
+#
+# Chapter 3 skewed materially heavier than chapters 1-2 (14 of 18 slots vs 10 of 20).
+# That may mean the coin share falls with progression, but 38 slots cannot separate that
+# from ordinary variance, so ONE weight table is used everywhere. It is the first thing
+# to revisit if deeper footage turns up.
+DROP_POOL_COIN = 14
+DROP_POOL_WEIGHTS = (
+    (EVOLUTION_GEM, 9),
+    ("trainer", 8),             # tier from the ladder
+    ("gremlin", 5),             # tier from the ladder
+    (MINION_SUMMON_ORB, 2),
+) + KARMA_GIFT_WEIGHTS          # 401 x3, 486 x2, 487 x1 -- design choice, see above
+
+# ---- items whose note names SPECIFIC main-story stages ----------------------
+#
+# Two items do not merely say "Main Story" -- they name the stages, so they are placed
+# rather than pooled:
+#
+#   1400009 Limbo Legacy        "Can be obtained in Main Story Normal stages,
+#                                Hard 5-10, 6-10, 7-10, etc."
+#   1400010 Stardust of Inferno "Can be obtained in Main Story Nightmare 5-10, 6-10,
+#                                7-10, etc."
+#
+# Both are gacha-summon currencies -- Limbo Legacy is the SOLE cost of the "In the
+# Enchanted Stars" banner (see player_state.gacha), which nothing else in the server
+# grants, so that banner is unbuyable until these drop.
+#
+# "5-10" is chapter 5 stage 10, i.e. `_sort` 10 of a main-story dmap, and the "etc."
+# means every chapter from 5 on. Normal Limbo Legacy is unrestricted across main story;
+# the Hard/Nightmare grants are the chapter finales only.
+STORY_DMAP_MAX = 100            # main-story dmaps are 1..34; the dungeons start at 20001
+LIMBO_LEGACY_ITEM = 1400009
+STARDUST_OF_INFERNO_ITEM = 1400010
+CHAPTER_FINALE_SORT = 10        # the "X-10" the notes name
+FINALE_DROP_MIN_CHAPTER = 5     # "5-10, 6-10, 7-10, etc." starts at chapter 5
+# One extra slot, appended rather than replacing a pool roll: the notes describe these
+# as things the stage gives, and the observed slot-count rule is about the POOL. Rolled
+# so a finale is not a guaranteed farm.
+FINALE_DROP_CHANCE = 0.5
+STORY_SPECIAL_SPAN = (1, 2)
+
+
+def story_chapter(stage_id):
+    """(dmap, sort) for a main-story stage, or None when it is not one."""
+    row = dd.row("stage", int(stage_id)) or {}
+    dmap = int(row.get("_dmap_id") or 0)
+    if not 0 < dmap < STORY_DMAP_MAX:
+        return None
+    return dmap, int(row.get("_sort") or 0)
+
+
+def story_special_drop(stage_id, rng):
+    """[(item, count)] for a stage a note names by id, else [].
+
+    Limbo Legacy on any Normal main-story stage and on the Hard chapter finales from
+    chapter 5; Stardust of Inferno on the Nightmare finales from chapter 5. Straight
+    off the two item notes -- nothing here is extrapolated beyond the "etc.".
+    """
+    where = story_chapter(stage_id)
+    if where is None:
+        return []
+    dmap, sort = where
+    difficulty = stage_difficulty(stage_id)
+    finale = sort == CHAPTER_FINALE_SORT and dmap >= FINALE_DROP_MIN_CHAPTER
+
+    item = None
+    if difficulty == DIFFICULTY_NORMAL:
+        item = LIMBO_LEGACY_ITEM
+    elif difficulty == DIFFICULTY_HARD and finale:
+        item = LIMBO_LEGACY_ITEM
+    elif difficulty == DIFFICULTY_NIGHTMARE and finale:
+        item = STARDUST_OF_INFERNO_ITEM
+    if item is None or rng.random() >= FINALE_DROP_CHANCE:
+        return []
+    return [(item, _roll(STORY_SPECIAL_SPAN, rng,
+                         difficulty_multiplier(difficulty)))]
+
+
+# `_difficulty` 1/2/3 = Normal/Hard/Nightmare -- confirmed by the same content existing
+# three times, one row per tier: dmap 1 sort 1 is stage 1101 (ap 5, difficulty 1), 1201
+# (ap 15, difficulty 2) and 1301 (ap 20, difficulty 3). The multiplier stacks ON TOP of
+# the stamina scaling, so a Nightmare run already costs more ap and then pays a further
+# 1.5x. `_difficulty` 4 is exactly 7 ap-0 "<Virtue>'s Challenge" rows under dmap 30009 --
+# never observed, so it takes Nightmare's multiplier rather than an invented one.
+DIFFICULTY_NORMAL, DIFFICULTY_HARD, DIFFICULTY_NIGHTMARE = 1, 2, 3
+DIFFICULTY_MULTIPLIER = {DIFFICULTY_NORMAL: 1.0, DIFFICULTY_HARD: 1.2,
+                         DIFFICULTY_NIGHTMARE: 1.5, 4: 1.5}
+DIFFICULTY_MULTIPLIER_DEFAULT = 1.0
+
+
+def stage_ap(stage_id):
+    """The stamina a stage charges; 0 when it charges none (arena, tutorial rooms).
+
+    Note this is the stage's NOTIONAL cost. Nothing deducts it -- see the stamina
+    invariant in player_state.roster -- it is read here purely as a measure of worth.
+    """
+    row = dd.row("stage", int(stage_id)) or {}
+    return int(row.get("_ap") or 0)
+
+
+def stage_difficulty(stage_id):
+    """1/2/3 = Normal/Hard/Nightmare. Defaults to Normal for a stage with no row."""
+    row = dd.row("stage", int(stage_id)) or {}
+    return int(row.get("_difficulty") or DIFFICULTY_NORMAL)
+
+
+def difficulty_multiplier(difficulty):
+    return DIFFICULTY_MULTIPLIER.get(int(difficulty or 0),
+                                     DIFFICULTY_MULTIPLIER_DEFAULT)
+
+
+def _scaled(count, mult):
+    """Apply the difficulty multiplier without letting a nonzero drop round to nothing.
+
+    round() rather than int(): 3 x 1.2 = 3.6 should be 4, not 3, or Hard would be
+    indistinguishable from Normal at the small counts the early ladder pays.
+    """
+    if not count:
+        return 0
+    return max(1, int(round(count * mult)))
+
+
+def _roll(span, rng, mult=1.0):
+    """Roll an inclusive (low, high) span and apply the multiplier. -> int."""
+    low, high = span
+    if high <= 0:
+        return 0
+    return _scaled(rng.randint(int(low), int(high)), mult)
+
+
+def drop_rung(ap):
+    """-> (trainer star, material count span) for a stamina cost."""
+    for threshold, star, span in DROP_LADDER:
+        if ap >= threshold:
+            return star, span
+    return DROP_LADDER[-1][1:]
+
+
+def stage_clear_reward(stage_id):
+    """(item_id, count) from the stage's guaranteed Stage Clear rating row, or None.
+
+    `DesignStageRow.PaserRatingData` splits each `_rating_datas` on ',' into ints, so a
+    row is [type, item, count, threshold]; type 1 is the unconditional Stage Clear row
+    (the rest are graded on turns, deaths and so on). Battle.rating_rows parses the same
+    columns for the star flags -- this is the module-level read of the one row that is
+    guaranteed, which the drop generators use to learn what a dungeon is FOR.
+    """
+    row = dd.row("stage", int(stage_id)) or {}
+    for i in range(1, RATING_SLOTS + 1):
+        parts = dd.csv_ints(row.get(f"_rating_datas{i}"))
+        if len(parts) >= 3 and parts[0] == 1:
+            return int(parts[1]), int(parts[2])
+    return None
+
+
+# ---- material dungeons -----------------------------------------------------
+#
+# The three farm dungeons each exist to pay ONE resource, and the stage row says which:
+#   dmap 30003 Treasure Raiders  -> Coin          (Stage Clear 5,000 .. 700,000)
+#   dmap 30002 Evolution Abyss   -> Evolution Gem (Stage Clear x100 on every rung)
+#   dmap 30004 Trainers Gym      -> ★3/★4 Trainer (Stage Clear x5 .. x15)
+#
+# **The two panels are different reward streams and must not be confused.** The results
+# screen shows Ratings above Drops:
+#
+#     Ratings   Stage Clear                     Evolution Gem x100     <- ONE-TIME, all
+#               Clear within 30 turns           Diamond x1                four of them
+#               Clear within 20 turns           Diamond x3                (rating_rewards,
+#               Less than 0 cast(s) defeated    Diamond x5                masked per stage)
+#     Drops     Evolution Gem x4  x7  x9                               <- EVERY run
+#
+# That is live footage of an Evolution Abyss clear, and it is what this generator is
+# fitted to. The Ratings block is handled entirely by rating_rewards and is paid once
+# per condition; this function only ever produces the Drops row.
+#
+# What the footage establishes:
+#   * The drop ITEM is the dungeon's own resource -- the same item as the Stage Clear
+#     row, which is the only place the pack states what a farm rung is for. That also
+#     means each dungeon's real ladder is reproduced in proportion: Trainers Gym
+#     switches ★3 -> ★4 where its own rungs do, Treasure Raiders climbs 5,000 ->
+#     700,000, and the "SP" rungs pay Master Coin.
+#   * ONE STACK PER WAVE. All 48 Evolution Abyss stages are 3-wave and the panel shows
+#     exactly 3 stacks, which is the same per-wave shape the coin drops already use.
+#   * The stacks are ROLLED, not fixed: 4 / 7 / 9 on one clear.
+#
+# And the two constants below are read straight off it rather than invented:
+#   * 4 + 7 + 9 = 20 against a Stage Clear reward of 100 -> DUNGEON_DROP_SHARE = 0.20.
+#   * 20 over 3 waves is 6.67 a wave, and the observed 4..9 is that mean +/-35%
+#     -> DUNGEON_SPREAD = 0.35, which regenerates the footage's own band.
+#
+# One clear is one sample, so the SHARE is the part to re-check first if more footage
+# turns up -- the per-wave shape and the item are directly observed. The ascending 4/7/9
+# may also mean later waves pay more rather than each wave rolling independently; one
+# clear cannot tell those apart, and independent rolls are the weaker assumption.
+#
+# For reference, this replaces the contributed version's `base x (1 + 0.05 * rung)`
+# ramp, which re-derived the count from the dungeon's FIRST rung and paid it as a single
+# stack -- both the wrong shape and, at 15,388 against a listed 700,000, the wrong size.
+MATERIAL_DUNGEON_DMAPS = {30002, 30003, 30004}
+DUNGEON_DROP_SHARE = 0.20       # a clear drops this much of the Stage Clear reward...
+DUNGEON_SPREAD = 0.35           # ...split per wave, each rolled at this spread
+
+
+def material_dungeon_drops(stage_id, waves=1, rng=None):
+    """[(item, count) per wave] for a farm-dungeon stage, or None when it is not one."""
+    row = dd.row("stage", int(stage_id)) or {}
+    if int(row.get("_dmap_id") or 0) not in MATERIAL_DUNGEON_DMAPS:
+        return None
+    reward = stage_clear_reward(stage_id)
+    if not reward:
+        return None
+    item_id, clear_count = reward
+    if not clear_count:
+        return None
+
+    import random as _r
+    rng = rng or _r
+    waves = max(1, int(waves))
+    mult = difficulty_multiplier(stage_difficulty(stage_id))
+    per_wave = clear_count * DUNGEON_DROP_SHARE / waves
+    lo = int(per_wave * (1.0 - DUNGEON_SPREAD))
+    hi = int(per_wave * (1.0 + DUNGEON_SPREAD))
+    return [(item_id, _scaled(rng.randint(min(lo, hi), max(lo, hi)) if hi > lo
+                              else int(per_wave), mult))
+            for _ in range(waves)]
+
+
+# ---- Kizuna dungeons -------------------------------------------------------
+#
+# The bond dungeons hand out a category Coin spent at the Department Store on the gift
+# items that raise a cast's Karma. WHICH coin is not guessed: it is the stage's own
+# guaranteed Stage Clear reward -- `1,9511,1` on dmap 41419 is Drink Coin, through 9520
+# Weapon Coin. So the panel and the payout cannot disagree about which character's gift
+# track a run feeds.
+#
+# **Exactly 120 stages qualify.** The rest of the family has a type-1 reward of item 36
+# (Soul Gem, the generic Kizuna-skill material) and is deliberately NOT treated as karma
+# -- paying Soul Gems as though they were a gift coin would be wrong. Those fall through
+# to the generic generator.
+KARMA_COIN_MIN, KARMA_COIN_MAX = 9511, 9520
+
+# Chest tier -> how many coins a NORMAL clear pays. Bronze 1 / Silver 2 / Gold 3 is the
+# whole Normal band, so the tier IS the roll on Normal; Hard and Nightmare widen it.
+# **All 120 karma stages in this pack are `_difficulty` 1**, so the Hard and Nightmare
+# bands are unreachable today. They are here so a rebuilt dungeon carrying a higher tier
+# works without another code change, not because such a stage has been seen.
+KIZUNA_CHEST_BRONZE, KIZUNA_CHEST_SILVER, KIZUNA_CHEST_GOLD = 1, 2, 3
+KIZUNA_DROP_BAND = {
+    DIFFICULTY_NORMAL: (KIZUNA_CHEST_BRONZE, KIZUNA_CHEST_GOLD),     # 1-3
+    DIFFICULTY_HARD: (3, 5),
+    DIFFICULTY_NIGHTMARE: (7, 10),
+    4: (7, 10),
+}
+
+
+def kizuna_karma_item(stage_id):
+    """The Karma coin a bond stage pays, or None when it is not a karma stage."""
+    reward = stage_clear_reward(stage_id)
+    if not reward:
+        return None
+    item_id, _count = reward
+    return item_id if KARMA_COIN_MIN <= item_id <= KARMA_COIN_MAX else None
+
+
+def kizuna_drops(stage_id, rng=None):
+    """[(karma coin, count)] for a bond stage -- REPLACES the generic loot entirely.
+
+    A bond run exists to feed one character's gift track, so paying it trainers and
+    evolution material instead would make the dungeon pointless. Returns None for a
+    stage that is not one, so the caller falls through to the ordinary generator.
+    """
+    item_id = kizuna_karma_item(stage_id)
+    if item_id is None:
+        return None
+    import random as _r
+    rng = rng or _r
+    band = KIZUNA_DROP_BAND.get(stage_difficulty(stage_id),
+                                KIZUNA_DROP_BAND[DIFFICULTY_NORMAL])
+    return [(item_id, rng.randint(*band))]
+
+
+# **Evolution Gem is NOT gated behind the Evolution Abyss.** An earlier draft locked it
+# until a stage reached the dungeon's own entry rung (lowest `_stagelv` in dmap 30002,
+# which is 11) on the reasoning that handing out rank-up material before the farm opens
+# makes the farm pointless. Live footage says otherwise: chapter 2 is `_stagelv` 1..10
+# and Evolution Gem drops there in four separate observed clears. The gate would have
+# blocked precisely what the game actually paid, so it is gone rather than retuned.
+
+def _pool_roll(rng, ap, mult):
+    """One drop slot -> (item id, count), drawn from DROP_POOL_WEIGHTS by frequency."""
+    star, span = drop_rung(ap)
+    total = DROP_POOL_COIN + sum(w for _m, w in DROP_POOL_WEIGHTS)
+    roll = rng.random() * total
+    if roll < DROP_POOL_COIN:
+        # An ap-0 stage floors at the flat rate rather than paying nothing. 250 at ap 5
+        # is the observed anchor and every observed coin stack in main story is 250.
+        base = max(COIN_PER_WAVE, ap * COIN_PER_AP)
+        lo = int(base * (1.0 - COIN_SPREAD))
+        hi = int(base * (1.0 + COIN_SPREAD))
+        return COIN_ITEM_ID, _scaled(rng.randint(lo, hi), mult)
+    roll -= DROP_POOL_COIN
+    member = DROP_POOL_WEIGHTS[-1][0]
+    for candidate, weight in DROP_POOL_WEIGHTS:
+        if roll < weight:
+            member = candidate
+            break
+        roll -= weight
+
+    if member == "trainer":
+        return TRAINER_ITEMS[star], _roll(span, rng, mult)
+    if member == "gremlin":
+        return GREMLIN_PIECE_TIERS[star], _roll(span, rng, mult)
+    if member == MINION_SUMMON_ORB:
+        # Observed as a x10 stack twice, never any other size.
+        return MINION_SUMMON_ORB, _scaled(MINION_SUMMON_ORB_COUNT, mult)
+    return member, _roll(span, rng, mult)
+
+
+def generated_drops(stage_id, waves=1, rng=None):
+    """The Drops row for a stage with no observed table -> [(item, count) per wave].
+
+    ONE stack per wave, each an independent roll of the pool -- see the slot model above
+    the weights. A stage whose own item notes name it (the Limbo Legacy / Stardust of
+    Inferno chapter finales) may add one further stack on top.
+    """
+    import random as _r          # local, matching starshard_temple_drops
+    rng = rng or _r
+    ap = stage_ap(stage_id)
+    mult = difficulty_multiplier(stage_difficulty(stage_id))
+    out = [_pool_roll(rng, ap, mult) for _ in range(max(1, int(waves)))]
+    out.extend(story_special_drop(stage_id, rng))
+    return out
+
+
 # Per-stage drop tables, [(item id, count), ...], reconstructed from footage one stage at
 # a time. Real drop tables were live-ops data and are in NO client file -- not in any of
 # the pack's 55 forms, not on the stage row, not on mob_group -- which is exactly why the
@@ -789,7 +1256,15 @@ def stage_drops_for(stage_id, waves=None, rng=None):
     if waves is None:
         row = dd.row("stage", int(stage_id)) or {}
         waves = len(dd.csv_ints(row.get("_mobGroup_datas"))) or 1
-    return [(COIN_ITEM_ID, COIN_PER_WAVE)] * waves
+    # A bond stage pays its karma coin INSTEAD of generic loot, and a farm dungeon pays
+    # the one resource it exists for; only what neither claims falls to the generator.
+    karma = kizuna_drops(stage_id, rng)
+    if karma is not None:
+        return karma
+    farmed = material_dungeon_drops(stage_id, waves, rng)
+    if farmed is not None:
+        return farmed
+    return generated_drops(stage_id, waves, rng)
 
 
 def stage_drop_preview(stage_id):
@@ -820,7 +1295,26 @@ def stage_drop_preview(stage_id):
         return list(gremlins)
     row = dd.row("stage", int(stage_id)) or {}
     waves = len(dd.csv_ints(row.get("_mobGroup_datas"))) or 1
-    return [COIN_ITEM_ID] * waves
+    # Preview EXACTLY what a clear pays, deduped -- the panel lists each item id once,
+    # not once per stack. Both sides read the same generators so the panel cannot drift
+    # from the payout, which is the failure the docstring above describes.
+    #
+    # Fixed seed: only the ID SET is read here and that does not depend on the roll, so
+    # this must not consume from -- or reseed -- a caller's generator.
+    import random as _r
+    preview_rng = _r.Random(0)
+    karma = kizuna_drops(stage_id, preview_rng)
+    if karma is not None:
+        return [item_id for item_id, _count in karma]
+    farmed = material_dungeon_drops(stage_id, waves, preview_rng)
+    if farmed is not None:
+        return sorted({item_id for item_id, _count in farmed})
+    seen, out = set(), []
+    for item_id, _count in generated_drops(stage_id, waves, preview_rng):
+        if item_id not in seen:
+            seen.add(item_id)
+            out.append(item_id)
+    return out
 
 
 def soulbook_bonus(book_rank):
@@ -2099,16 +2593,18 @@ class Battle:
     def drops(self):
         """[(item_id, count), ...] for the Drops row of the results panel.
 
-        **The COUNT is right, the CONTENTS are a placeholder.** Two clears of footage
-        agree that there is one drop per wave -- 1-1 has three waves and shows three
-        icons, 2-1 has two and shows two -- and that is what this reproduces.
+        **The COUNT is right; the CONTENTS are observed where we have footage and
+        DERIVED everywhere else.** Two clears agree that there is one coin drop per
+        wave -- 1-1 has three waves and shows three icons, 2-1 has two and shows two --
+        and that is what the coin part reproduces.
 
-        What it does NOT reproduce is what actually drops. 1-1 pays three 250 coin
-        stacks, but 2-1 pays an emblem x10 plus a character card, so "250 Mira per wave"
-        was overfitted to the tutorial. Real per-stage drop tables were live-ops data:
-        the stage row has no drop column at all (`box_rank` is a chest-rank pair, not
-        items), so each stage needs its own footage to reconstruct, exactly like the
-        karma payouts. Until then every stage drops coins.
+        Real per-stage drop tables were live-ops data and are in no client file, so a
+        stage without footage cannot be reproduced, only derived. STAGE_DROPS holds what
+        has actually been seen and always wins; everything else is generated from real
+        columns on the stage row -- see the generated drop tables block. 1-1 pays three
+        250 coin stacks but 2-1 pays an emblem x10 plus a character card, which is why
+        "250 Mira per wave" was overfitted to the tutorial and is no longer the answer
+        for every stage.
         """
         if not self.wave_cleared():
             return []
