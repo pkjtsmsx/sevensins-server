@@ -29,7 +29,7 @@ os.environ.setdefault("SEVENSINS_ACCOUNTS", "/tmp/sevensins-newpath-test")
 
 import battle as bt                          # noqa: E402
 import player_state as ps                    # noqa: E402
-from engine import core, specs, status as est, wire       # noqa: E402
+from engine import core, passives, specs, status as est, wire   # noqa: E402
 
 STAGE = 1101
 PARTY_LEVEL = 60
@@ -309,26 +309,35 @@ def check_damage_and_after_action_hooks():
         return
 
     # Return is held by the VICTIM, so it cannot be a rule in Michael's table --
-    # fire_all runs a passive for its own holder. It lives in status.REFLECT instead.
+    # fire_all runs a passive for its own holder. It lives in status.ON_HIT_EXTRA.
     # Applied directly here so the check does not depend on Michael being in the party.
+    #
+    # It is a DEBUFF, not a reflect. "Sword Draw: when a battle starts, inflicts Return
+    # on all ENEMIES" -- so being hit costs the holder extra, scaled off the holder's own
+    # ATK. This check previously asserted the opposite and passed, which is how Michael's
+    # passive came to be attacking his own party on a live device.
     boss.statuses.append(est2.Active(status_id=402, name="Return", kind="other",
                                      category="misc", remaining=None))
     boss.max_hp = boss.hp = 10 ** 8
-    before = ally.hp
+    ally_before, boss_before = ally.hp, boss.hp
     battle.attack_cmd_json(ally.order, boss.order, ally.skills[0])
-    check("attacking a unit with Return costs the attacker its own ATK",
-          before - ally.hp >= ally.atk * 0.9,
-          f"{before} -> {ally.hp}, atk {ally.atk}")
+    check("attacking a unit with Return costs the ATTACKER nothing",
+          ally.hp == ally_before, f"{ally_before} -> {ally.hp}")
+    check("  ...and adds the holder's own ATK to what it takes",
+          boss_before - boss.hp >= boss.atk * 0.9,
+          f"took {boss_before - boss.hp} for atk {boss.atk}")
 
     # Once per SKILL, not per swing: "triggers once while dealing multiple attacks".
     multi = next((s for s in (ally.skills or [])
                   if (specs.skill(s) or {}).get("swings", 0) >= 2), None)
     if multi:
-        ally.hp = before = 10 ** 7
+        boss.hp = boss_before = 10 ** 8
+        plain = est2.on_hit_extra_damage(boss)
         battle.attack_cmd_json(ally.order, boss.order, multi)
-        paid = before - ally.hp
+        swings = (specs.skill(multi) or {}).get("swings", 1)
         check("  ...once per skill, not once per swing",
-              paid <= ally.atk * 1.5, f"paid {paid} for atk {ally.atk}")
+              boss_before - boss.hp < plain * swings + plain,
+              f"took {boss_before - boss.hp}, extra is {plain} x {swings} swings")
 
     # After-action: the holder acts, the field is selected across.
     battle2, _ = a_battle(stage=1000005)
@@ -484,6 +493,133 @@ def check_headwind_stops_the_gauge():
     check("  ...including the boss", boss.order in acted, str(acted))
 
 
+def check_divine_fallen_toggle():
+    """Lucifer's marker flips on each Lamenting Starlight and never doubles up.
+
+    Three separate bugs met here, and the old output looked plausible through all of
+    them:
+      * the compiler matched BOTH clauses to the same sentence, because each status is
+        named in both -- as the condition in one and as the grant in the other -- so
+        both halves gated on The Divine and the toggle could never come back;
+      * "removes its the Divine effect" was not extracted at all, so once The Fallen did
+        land the two markers simply piled up together;
+      * with those fixed, resolving the clauses in sequence let the first one's grant
+        satisfy the second one's gate, and the marker flipped twice inside one cast.
+    """
+    b, _ = a_battle(1000005, party=[20801])
+    luci = next((o for o, u in b.units.items() if u.char_id == 20801), None)
+    check("Lucifer is in the fixture party", luci is not None)
+    if luci is None:
+        return
+    unit = b.units[luci]
+
+    def marks():
+        return [s.name for s in unit.statuses
+                if isinstance(s, est.Active) and s.name in ("The Divine", "The Fallen")]
+
+    check("Abyssal Prime grants The Divine at battle start",
+          marks() == ["The Divine"], str(marks()))
+    for n, expect in enumerate(("The Fallen", "The Divine", "The Fallen"), 1):
+        b.attack_cmd_json(luci, "106", 2080121)
+        check(f"Lamenting Starlight x{n} leaves only {expect}",
+              marks() == [expect], str(marks()))
+
+
+# Rules that legitimately invent a status the pack has no row for. Empty on purpose:
+# every name in the table currently resolves. Add a name here only after confirming the
+# pack really lacks the row -- the last two entries that looked missing were a dropped
+# comma in "Hold On, Classmates (ATK)".
+SYNTHESISED_ON_PURPOSE = set()
+
+
+def check_passive_statuses_resolve():
+    """Every status a passive rule names must resolve to a real, sendable row.
+
+    A rule whose name does not resolve gets a synthesised negative id, and the client
+    turns every id into DesignSkillForm.GetRow, which THROWS on a miss -- at battle open
+    that kills the load coroutine and hangs the loading screen. Nothing about the failure
+    is visible server-side, so it needs a check rather than a comment: seven of the eight
+    names that were synthesising had real rows all along, and the eighth was a typo.
+    """
+    for pid, rules in passives.PASSIVES.items():
+        ids = passives._status_ids(specs.skill(pid) or {}, None)
+        for rule in rules:
+            if not rule.status or rule.status in SYNTHESISED_ON_PURPOSE:
+                continue
+            found = ids.get(rule.status)
+            sid = found[0] if found else passives.registry_id(rule.status)
+            check(f"passive {pid}: {rule.status!r} resolves to a real row",
+                  est.wire_status_id(sid) is not None, f"got {sid!r}")
+
+
+def check_no_unsendable_ids_on_the_wire():
+    """Neither status channel may carry an id the client cannot resolve."""
+    b, _ = a_battle(1000005)
+    initial = json.loads(b.battle_datas_json())["status"]
+    for order, rows in initial.items():
+        for raw in rows:
+            check(f"battle-open status {raw} on {order} is a real row",
+                  est.wire_status_id(int(raw)) is not None)
+            check(f"battle-open row {raw} has the 6 entries StatusST reads",
+                  len(rows[raw]) >= 6, str(rows[raw]))
+
+    seen = 0
+    for order, unit in list(b.units.items()):
+        for sid in (unit.skills or [])[:3]:
+            try:
+                cmd = json.loads(b.attack_cmd_json(order, "106", sid))
+            except Exception:                             # noqa: BLE001
+                continue
+            for group in (cmd.get("combo") or [{}])[0].get("data") or []:
+                for row in group:
+                    for st in row.get("status") or []:
+                        seen += 1
+                        check(f"cast status row {st} names a real row",
+                              est.wire_status_id(st[1]) is not None)
+    check("  ...and some cast status rows were actually produced", seen > 0, str(seen))
+
+
+def check_nested_status_scripts():
+    """A status that is a trigger marker grants its nested statuses while it is held.
+
+    The Fallen's row is `apply 2007 Keen, apply 2009 Teardown, apply 400, remove 400`.
+    Three things have to hold at once: the grants land every turn, the marker itself
+    SURVIVES (400 is a duplicate row of The Fallen, and removing it by name took the
+    real one with it), and the apply/remove no-op pair never reaches the wire.
+    """
+    b, _ = a_battle(1000005, party=[20801])
+    luci = next((o for o, u in b.units.items() if u.char_id == 20801), None)
+    check("Lucifer is in the fixture party", luci is not None)
+    if luci is None:
+        return
+    unit = b.units[luci]
+    b.attack_cmd_json(luci, "106", 2080121)               # -> The Fallen
+    for _ in range(4):
+        try:
+            b.end_turn()
+        except Exception:                                 # noqa: BLE001
+            break
+    held = {s.name for s in unit.statuses if isinstance(s, est.Active)}
+    check("the marker survives its own duplicate-row removal", "The Fallen" in held,
+          str(sorted(held)))
+    check("  ...and grants Keen every turn", "Keen" in held, str(sorted(held)))
+    check("  ...and Teardown", "Teardown" in held, str(sorted(held)))
+    check("no status exceeds its stack cap",
+          all(s.stacks <= (s.stack_cap or 1)
+              for u in b.units.values() for s in u.statuses
+              if isinstance(s, est.Active)))
+
+    queued = {(c["target"], c["status_id"]) for c in b._pending_status_rows}
+    check("the apply/remove no-op pair is not queued",
+          all(sid != 400 for _, sid in queued), str(sorted(queued)))
+    cmd = json.loads(b.attack_cmd_json(luci, "106", 2080101))
+    rows = [r for g in cmd["combo"][0]["data"] for r in g for r in (r.get("status") or [])]
+    check("turn-start grants reach the client on the next attack",
+          any(r[1] in (2007, 2009) for r in rows), str(rows))
+    check("  ...and the queue is drained by delivering them",
+          not b._pending_status_rows, str(b._pending_status_rows))
+
+
 def main():
     was = bt.NEW_ENGINE
     bt.NEW_ENGINE = True                     # the whole point of this file
@@ -497,7 +633,11 @@ def main():
                    check_headwind_stops_the_gauge,
                    check_statuses_reach_the_unit,
                    check_control_actually_skips_a_turn,
-                   check_legacy_and_engine_statuses_coexist):
+                   check_legacy_and_engine_statuses_coexist,
+                   check_divine_fallen_toggle,
+                   check_passive_statuses_resolve,
+                   check_no_unsendable_ids_on_the_wire,
+                   check_nested_status_scripts):
             print(f"\n{fn.__name__}:")
             fn()
     finally:
@@ -508,3 +648,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+

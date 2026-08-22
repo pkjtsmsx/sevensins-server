@@ -47,6 +47,10 @@ skipped entirely, so such a row names no unit.
 all hang off the lead row.
 """
 
+from . import status as _status    # safe: status does not import wire
+
+ROUND_PERMANENT = -1          # see battle.ROUND_PERMANENT
+
 MODE_HP = 1
 MODE_REVIVE = 2
 MODE_GAUGE = 4
@@ -84,13 +88,32 @@ def _all_strikes(outcome):
 def _status_rows(outcome):
     rows = []
     for ev in outcome.statuses:
-        if not ev.applied or ev.status_id is None:
+        # Not just "is it set" -- it must be a status the CLIENT can resolve. A
+        # synthesised id throws DesignException in StatusST's constructor, which on this
+        # channel lands mid-animation. See status.wire_status_id.
+        sid = _status.wire_status_id(ev.status_id)
+        if sid is None:
+            continue
+        if not ev.applied:
+            # A REMOVAL. `UpdateStatus` reads args[2] and calls removeStatusDataByID
+            # when it is 0, so this is the channel -- and the only one. Dropping these
+            # rows left the client drawing statuses the server had already stripped:
+            # Lucifer's stance swap looked like it granted The Fallen and kept The
+            # Divine, because the strip was never sent.
+            rows.append([ev.target, sid, 0])
+            continue
+        if ev.permanent:
+            # -1, not a big number: UpdateStatusRound decrements only when round >= 1
+            # and deletes at exactly 0, so a negative round is never counted down.
+            # Sending 1 here made "lasts the entire battle" statuses vanish at the end
+            # of the turn that applied them.
+            rows.append([ev.target, sid, ROUND_PERMANENT])
             continue
         # An unknown duration must not silently become 0 -- the client counts `rounds`
-        # down itself, and 0 would expire the status instantly. 1 is the minimum that
-        # still shows the icon; the uncertainty is recorded in the spec, not here.
+        # down itself, and 0 now means REMOVE. 1 is the minimum that still shows the
+        # icon; the uncertainty is recorded in the spec, not here.
         rounds = ev.duration if ev.duration is not None else 1
-        rows.append([ev.target, int(ev.status_id), int(rounds)])
+        rows.append([ev.target, sid, max(1, int(rounds))])
     for child in outcome.children:
         rows.extend(_status_rows(child))
     return rows

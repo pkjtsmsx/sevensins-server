@@ -23,8 +23,13 @@ _NUM = r"(\d+|" + "|".join(WORD_NUM) + r")"
 # the pack drops the space often enough that requiring one loses real rows).
 DURATION_RE = re.compile(
     r"(?:last(?:s|ing)?|for|during)\s*(?:for)?\s*" + _NUM + r"\s*turns?\b", re.I)
+# "lasts the entire battle" is the pack's most common way of saying permanent, and it
+# matches none of the patterns below on its own -- no "until", no "permanent", no "rest
+# of". Missing it made The Fallen a 2-turn buff that the client counted straight down to
+# zero and deleted, so Lucifer's stance swap dropped her marker instead of holding it.
 PERMANENT_RE = re.compile(
-    r"until the (?:end of (?:the )?)?(?:battle|stage)|permanent|for the rest of", re.I)
+    r"until the (?:end of (?:the )?)?(?:battle|stage)|permanent|for the rest of"
+    r"|(?:entire|whole|full)\s+(?:battle|stage)", re.I)
 
 # "DEF-50%", "Final damage dealt+40%", "ATK -30%", "+25%"
 SIGNED_PCT_RE = re.compile(r"([+\-])\s*(\d+(?:\.\d+)?)\s*%")

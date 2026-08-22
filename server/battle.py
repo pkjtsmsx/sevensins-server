@@ -1765,6 +1765,82 @@ def _char_group(char_id):
 
 
 
+# Opt-in action trace: `SEVENSINS_BATTLE_TRACE=1`. Off by default and one line per
+# action when on. Every battle defect in this project so far has failed SILENTLY -- the
+# server computes a reply, logs nothing wrong, and the client draws the wrong thing --
+# so the cheapest thing that shortens the next one is seeing who cast what and which
+# statuses each side is holding, on the turn it happens.
+TRACE = os.environ.get("SEVENSINS_BATTLE_TRACE", "").strip() not in ("", "0", "false")
+
+
+def _trace_names(unit):
+    return ",".join(str(getattr(s, "name", "?")) for s in
+                    getattr(unit, "statuses", [])) or "-"
+
+
+def _trace_action(battle, attacker, target, skill_id):
+    if not TRACE or attacker is None:
+        return
+    try:
+        from engine import specs
+        spec = specs.skill(skill_id) or {}
+        print(f"[trace] r{getattr(battle, 'round', '?')} "
+              f"{attacker.order}/char{getattr(attacker, 'char_id', '?')} "
+              f"-> {getattr(target, 'order', '?')} "
+              f"skill {skill_id} {spec.get('name') or '?'}", flush=True)
+        for u in battle.units.values():
+            if u.alive:
+                print(f"[trace]    {u.order}/char{getattr(u, 'char_id', '?'):<6} "
+                      f"hp={u.hp}/{u.max_hp} [{_trace_names(u)}]", flush=True)
+    except Exception as exc:                              # noqa: BLE001
+        print(f"[trace] failed: {exc!r}", flush=True)     # never break a battle
+
+
+
+# --- initial status map (BattleDatas.status) ---------------------------------------
+#
+# Statuses reach the client on TWO channels, and we were only ever using one.
+#
+#   per-action  DamageInfo `status` rows, `[order, skill_id, round]`. BattleUnit.
+#               UpdateStatus reads args[1] as the id and args[2] as the round, and a
+#               round of **0 REMOVES** the status (removeStatusDataByID) rather than
+#               applying it for zero turns.
+#   battle open BattleDatas.status, `{order: {skill_id: args}}`, walked by
+#               BattleDatas.RebuildAllStatus from BattleDataInitializer._InitUI. This
+#               is the ONLY way a status that no attack applied can ever be drawn --
+#               which is every battle-start passive, so Lucifer's The Divine, all the
+#               Field/Commendation auras and the boss's opening seals were invisible.
+#
+# The two arg layouts DIFFER, which is the trap. StatusST has two constructors:
+#   .ctor(List<int> curArgs)            [1]=skill [2]=round, and [3]=lv [4]=value
+#                                       [5]=actOn only when Count >= 4
+#   .ctor(int skillID, List<int> args)  [0]=round [1]=value [2]=actOn [5]=lv
+# The second reads index 5 UNCONDITIONALLY, so a short list throws
+# ArgumentOutOfRangeException inside battle load. Six entries is the minimum here.
+ROUND_PERMANENT = -1
+# UpdateStatusRound decrements only when `round >= 1` and removes at exactly 0, so a
+# negative round is never counted down and never expires. That is the sentinel for
+# "lasts the whole battle", not a large number.
+
+
+def _status_wire_id(st):
+    """-> the design row id the client keys this status by, or None if unsendable."""
+    sid = getattr(st, "status_id", None)
+    if sid is None:
+        defn = getattr(st, "definition", None)          # legacy fx status
+        sid = getattr(defn, "id", None) if defn is not None else None
+    return _engine_status.wire_status_id(sid)
+
+
+def _status_round(st):
+    rem = getattr(st, "remaining", None)
+    if rem is None:
+        return ROUND_PERMANENT
+    try:
+        return max(1, int(rem))
+    except (TypeError, ValueError):
+        return ROUND_PERMANENT
+
 
 class Battle:
     """One run of one stage: a list of waves, each a mob group from the design data."""
@@ -1793,6 +1869,13 @@ class Battle:
         self.wave_max = max(1, len(self.wave_groups))
         self.round = 1
         self.damage_sum = 0
+        # Status changes that happened OUTSIDE an attack -- turn-start nested scripts.
+        # They have no DamageInfo of their own to ride on, and `status` rows are
+        # unit-addressed (`[order, id, round]` names its own unit), so they are queued
+        # here and attached to the next payload that goes out. Deliberately not saved
+        # with the battle: on reconnect the client rebuilds every unit's statuses from
+        # BattleDatas.status, so a dropped queue costs nothing.
+        self._pending_status_rows = []
         self.units = {}
         # status name -> times it landed on a PLAYER unit this run (rating kind 20)
         self.status_taken = {}
@@ -2096,7 +2179,7 @@ class Battle:
             # StartState.OnEnter plays pavg_id and only then runs the battle opening
             "pavg_id": self.avg(self.pre_avgs),
             "b1_avg_id": self.avg(self.before_avgs),
-            "status": {},
+            "status": self.status_datas(),
             "backup_order": "",
             # sk_overwrite / mod_overwrite are OVERRIDES and must stay null (absent).
             # DesignRoleModelInfoRow.get_BattleModel checks only for non-null, so an
@@ -2105,6 +2188,58 @@ class Battle:
             "custom_value": {},
             "team_skill": [],
         }, separators=(",", ":"))
+
+    def _queue_status_rows(self, changes):
+        """Queue out-of-band status changes, collapsing repeats.
+
+        A marker re-grants the same status every turn it is held, so without collapsing
+        the queue grows by a row per turn for as long as the fight runs and the client
+        gets handed the same row many times over. Only the LATEST state of each
+        (unit, status) matters -- the rows carry absolute state, not a delta.
+        """
+        for ch in changes or []:
+            key = (ch.get("target"), ch.get("status_id"))
+            self._pending_status_rows = [
+                q for q in self._pending_status_rows
+                if (q.get("target"), q.get("status_id")) != key]
+            self._pending_status_rows.append(ch)
+
+    def _drain_pending_status(self, combo):
+        """Attach queued out-of-band status changes to an outgoing attack."""
+        rows = self._pending_status_rows
+        if not rows:
+            return
+        groups = (combo or {}).get("data") or []
+        if not groups or not groups[0]:
+            return
+        lead = groups[0][0]
+        for ch in rows:
+            sid = _engine_status.wire_status_id(ch.get("status_id"))
+            if sid is None:
+                continue
+            rounds = 0 if not ch.get("applied") else (
+                ROUND_PERMANENT if ch.get("duration") is None
+                else max(1, int(ch["duration"])))
+            lead.setdefault("status", []).append([ch["target"], sid, rounds])
+        self._pending_status_rows = []
+
+    def status_datas(self):
+        """BattleDatas.status -- every unit's CURRENT statuses, so the client can draw
+        what is already on the field when the battle scene opens. See the notes on
+        ROUND_PERMANENT for the (different) arg layout this channel uses.
+        """
+        out = {}
+        for order, unit in self.units.items():
+            rows = {}
+            for st in getattr(unit, "statuses", []):
+                sid = _status_wire_id(st)
+                if sid is None:
+                    continue
+                # [round, value, actOn, _, _, lv] -- index 5 is read unconditionally.
+                rows[str(sid)] = [_status_round(st), 0, 0, 0, 0, 0]
+            if rows:
+                out[order] = rows
+        return out
 
     def battle_cmd_json(self, cur_team=TEAM_PLAYER):
         """BattleCmd, the per-turn payload for 1100/1101/1200/1201.
@@ -2150,6 +2285,8 @@ class Battle:
                 self, attacker_order,
                 target.order if target else defender_order, skill_id)
             if combo is not None:
+                self._drain_pending_status(combo)
+                _trace_action(self, attacker, target, skill_id)
                 cmd = json.loads(self.battle_cmd_json(
                     cur_team=attacker.team if attacker else TEAM_PLAYER))
                 cmd["combo"] = [combo]
@@ -2517,6 +2654,21 @@ class Battle:
             _engine_passives.fire_all(
                 _engine_passives.TURN_START, [unit], list(self.units.values()),
                 fired=getattr(self, "_passives_fired", None))
+            # A status can be a trigger marker that grants further statuses while held --
+            # see engine/status.py. Runs after the passives so a marker applied THIS turn
+            # start does not also fire in the same tick; it fires next turn, once the
+            # unit is actually holding it.
+            #
+            # EVERY living unit, not just the one acting. Durations tick once per global
+            # turn but a unit only acts once every N turns, so refreshing a marker's
+            # grants on the holder's own turn alone left them lapsing in between --
+            # Lucifer's Keen and Teardown flickered on and off every other turn with two
+            # units on the field, and would have been up for 2 turns in 6 with a full
+            # party. "When affected by this status, X will trigger Y" is a continuous
+            # consequence of holding the marker, not a once-per-own-turn event.
+            for u in self.units.values():
+                if u.alive:
+                    self._queue_status_rows(_engine_status.run_nested(u))
         if (_engine_status.is_immobilized(unit) if NEW_ENGINE
                 else fx.is_immobilized(unit.statuses)):
             unit.tick_cooldowns()

@@ -463,6 +463,7 @@ def effects(rows, r):
                         "conditional": is_conditional(r, meta.get("name")),
                         "requires": condition_requires(r, meta.get("name")),
                         "recipient": status_target(r, meta.get("name")),
+                        "removes": status_removes(r, meta.get("name")),
                         "status": meta,
                         # Per-(skill, status): no column carries these, and they change
                         # with skill level while act_id does not. See contract doc 5.1.
@@ -532,6 +533,74 @@ def effects(rows, r):
 # Attributed per EFFECT, not per skill: the sentence that names the status is the one
 # that governs it. Per-skill would flag 73% of sites; per-sentence flags 25%.
 _CONDITIONAL = re.compile(r"\b(if|when|whenever|upon|while|should)\b", re.I)
+# Verbs that mean "this status is being APPLIED here", as opposed to merely referenced.
+_GRANTS = re.compile(r"\b(grants?|inflicts?|applies|apply|gives?|gains?|cast)\b", re.I)
+# "removes its the Divine effect", "removes it's the Fallen effect" (sic, both spellings)
+_REMOVES = re.compile(
+    r"removes?\s+([A-Za-z][A-Za-z0-9 '\-]{2,40}?)\s*effect", re.I)
+# Leading words that name WHOSE status is stripped, not which one.
+_REMOVE_OWNER = re.compile(
+    r"^(?:it'?s|its|the|all|a|an|caster'?s?|target'?s?|enemy'?s?|"
+    r"ally'?s?|allies'?|enemies'?|unit'?s?)\s+", re.I)
+_STATUS_NAMES = None
+
+
+def _loose(name):
+    """Join key for a status name, matching engine/status.py's `_loose`. The leading
+    article has to go: the registry row is `The Divine`, and the clause that strips it
+    says "removes its the Divine effect", which the owner-stripper reduces to `Divine`.
+    """
+    n = sp.norm_name(name)
+    return n[4:] if n.startswith("the ") else n
+
+
+def _status_names():
+    """Normalised names of every type-6 status row -- the whitelist a named strip must
+    match. Without it the regex happily captured category cleanses ("removes control
+    effect") and multi-name phrases ("removes Taunt and Freeze effect"), and a named
+    strip outranks the `unremovable` guard, so a loose match there deletes statuses the
+    game says nothing may remove.
+    """
+    global _STATUS_NAMES
+    if _STATUS_NAMES is None:
+        _STATUS_NAMES = set()
+        for row in (dd.rows("skill") or {}).values():
+            if row.get("_type") != 6:
+                continue
+            nm = _loose(row.get("_name_en") or row.get("_name") or "")
+            if nm:
+                _STATUS_NAMES.add(nm)
+    return _STATUS_NAMES
+
+
+def status_removes(r, status_name):
+    """-> the status this application STRIPS, when the clause plainly names one.
+
+    Lucifer's toggle: "grants the caster The Fallen and removes its the Divine effect".
+    Without this both markers accumulate and the toggle never toggles.
+
+    Only a single, known status name counts. A category cleanse ("removes control
+    effect") is op 114's job and comes through as `remove_status`, and a status that
+    reads as removing ITSELF is the sentence-matching heuristic misfiring, not a rule.
+    """
+    clause = _clause_for(r.get("_note1_en") or "", status_name)
+    if not clause:
+        return None
+    for m in _REMOVES.finditer(clause):
+        got = m.group(1).strip()
+        while True:                       # "removes all allies' Fracture effect"
+            stripped = _REMOVE_OWNER.sub("", got, count=1)
+            if stripped == got:
+                break
+            got = stripped
+        if re.search(r"\band\b|,", got):        # two names -- ambiguous, skip
+            continue
+        norm = _loose(got)
+        if not norm or norm not in _status_names():
+            continue
+        if norm == _loose(status_name or ""):
+            continue                      # a status does not strip itself
+        return got
 
 
 def _clause_for(note, name):
@@ -548,11 +617,29 @@ def _clause_for(note, name):
     bare = re.sub(r"\s*\([^)]*\)\s*$", "", name).strip().lower()
     if bare and bare != wanted[0]:
         wanted.append(bare)
+
+    # A status is often named in SEVERAL sentences -- as the CONDITION in one and as the
+    # thing GRANTED in another. Lucifer's Lamenting Starlight is the clean example:
+    #
+    #   "if the caster is affected by The Divine, grants the caster The Fallen ..."
+    #   "if the caster is affected by The Fallen, grants the caster The Divine ..."
+    #
+    # Taking the first match gave The Divine the FIRST sentence, so both halves of the
+    # toggle came out requiring The Divine and the marker never flipped. Prefer the
+    # sentence where a granting verb precedes the name; fall back to first match.
+    fallback = None
     for sentence in re.split(r"(?<=[.!?])\s+", note):
         low = sentence.lower()
-        if any(w in low for w in wanted):
-            return sentence
-    return None
+        for w in wanted:
+            at = low.find(w)
+            if at < 0:
+                continue
+            if fallback is None:
+                fallback = sentence
+            if _GRANTS.search(low[:at]):
+                return sentence
+            break
+    return fallback
 
 
 # A condition of the form "if the caster is affected by The Divine" IS evaluatable -- it

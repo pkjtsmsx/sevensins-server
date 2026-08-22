@@ -120,6 +120,32 @@ def _remaining_for(event):
     return DEFAULT_DURATION
 
 
+def wire_status_id(status_id):
+    """-> the id to send the client, or None when it must not be sent.
+
+    The client feeds every status id straight into `DesignSkillForm.GetRow(id)`
+    (StatusST's constructors do it to read the row's `_statusID`), and that call THROWS
+    on a miss rather than returning null. On the battle-open channel it throws inside
+    BattleDataInitializer._InitUI, which kills the coroutine and leaves the loading
+    screen up forever:
+
+        DesignException: (0x0012) DesignSkillForm row ID -175492 not found
+          at Game.Player.Battle.StatusST..ctor (Int32 _skillID, List`1 serverArgs)
+          at Game.Player.Char.BattleDatas.RebuildAllStatus
+
+    -175492 is one of OURS. A passive rule that names a status with no design row of its
+    own gets a synthesised negative id minted from the name (see passives.py), which is
+    exactly right for tracking it on the unit and fatal to hand to the client. Requiring
+    a registry hit -- not merely a positive number -- also covers a status row id that
+    simply is not in the pack.
+    """
+    try:
+        sid = int(status_id)
+    except (TypeError, ValueError):
+        return None
+    return sid if sid > 0 and _registry(sid) else None
+
+
 def _registry(status_id):
     try:
         return specs.status(int(status_id)) or {}
@@ -240,8 +266,111 @@ def tick(unit):
     return dot, hot, tick_duration(unit)
 
 
+# --- nested opcodes ----------------------------------------------------------------
+#
+# 428 of the 1,685 status rows carry their own `_action`/`_actID` script (719 applies,
+# 199 removes, 87 category cleanses). A status is not only a modifier -- it can be a
+# TRIGGER MARKER that grants further statuses while it is held. Their prose says so in
+# so many words: "When affected by this status, Angel of Faith, Michael will trigger
+# Destiny UL effects."
+#
+# Three readings, each forced by the data rather than chosen:
+#
+#   WHEN.    Once per turn while the status is held, not once when it lands. Lucifer's
+#            passive spells the timing out -- "if affected by The Fallen, grants Keen
+#            (CRT+35%) for two turns at EACH START OF A TURN" -- and The Fallen's row is
+#            exactly `apply 2007, apply 2009`.
+#   STACKS.  A repeated identical apply is a stack count, not a duplicated line.
+#            `Destiny UL` lists 3804 five times; `Haughty Malefics` lists 3012 twice.
+#   ONE-SHOT. A row that removes ITSELF is consumed by firing. `Never Surrender` is
+#            `apply All DMG Reduction, remove Never Surrender` -- so the self-removal is
+#            what separates a one-shot marker from a recurring one, and no extra flag is
+#            needed to tell them apart.
+#
+# Deliberately NOT recursive: a status applied here runs its own nested script at the
+# next turn start, because by then the unit holds it. That is the same rule as everything
+# else in this module rather than a special case, and it makes an unbounded chain
+# impossible without a depth counter to tune.
+
+
+def nested_ops(status_id):
+    return (_registry(status_id) or {}).get("nested") or []
+
+
+def run_nested(unit, caster=None):
+    """Fire the nested scripts of every status `unit` holds. -> [StatusEvent-ish dicts].
+
+    Returns what changed so the caller can put it on the wire; the client is never told
+    about a status it did not see applied, and a turn-start grant has no attack of its
+    own to ride on.
+    """
+    changed = []
+    for st in list(_actives(unit)):
+        ops = nested_ops(st.status_id)
+        if not ops:
+            continue
+        stacks = {}
+        for op in ops:
+            if op.get("op") == "apply_status" and op.get("status"):
+                stacks[int(op["status"])] = stacks.get(int(op["status"]), 0) + 1
+        for sid, count in stacks.items():
+            row = _registry(sid)
+            if not row:
+                continue
+            ev = None
+            for _ in range(count):
+                ev = apply_event(unit, _NestedEvent(sid, row), caster or unit)
+            if ev is not None:
+                changed.append({"target": unit.order, "status_id": sid,
+                                "applied": True, "duration": ev.remaining})
+        for op in ops:
+            if op.get("op") == "remove_status" and op.get("status"):
+                for dead in remove_id(unit, op["status"]):
+                    changed.append({"target": unit.order, "status_id": dead.status_id,
+                                    "applied": False, "duration": 0})
+            elif op.get("op") == "remove_category" and op.get("category"):
+                for dead in remove_category(unit, op["category"]):
+                    changed.append({"target": unit.order, "status_id": dead.status_id,
+                                    "applied": False, "duration": 0})
+    return _collapse_noops(changed)
+
+
+def _collapse_noops(changed):
+    """Drop (apply, remove) pairs a single run produced for the same status.
+
+    The pack's markers routinely read `apply 400, remove 400` -- 400 being a duplicate
+    row of the marker itself -- which nets to nothing. Left in, the wire carries a
+    removal for a status the client was never told was applied, and the engine reports a
+    change that did not happen.
+    """
+    seen = {}
+    for i, ch in enumerate(changed):
+        key = (ch["target"], ch["status_id"])
+        if ch["applied"]:
+            seen[key] = i
+        elif key in seen:
+            changed[seen.pop(key)] = None
+            changed[i] = None
+    return [c for c in changed if c is not None]
+
+
+class _NestedEvent:
+    """The minimal shape apply_event reads. A nested grant states no duration of its own,
+    so it takes the module default like any other unstated one."""
+
+    def __init__(self, status_id, row):
+        self.status_id = status_id
+        self.name = row.get("name")
+        self.duration = None
+        self.magnitude = None
+        self.permanent = bool(row.get("permanent"))
+
+
 def remove_category(unit, category):
-    """Cleanse. -> the names removed.
+    """Cleanse. -> the Active objects removed.
+
+    Returns the objects, not the names: the client is told about a removal by a status
+    row carrying that status's ID and a round of 0, so a name alone cannot be sent.
 
     `unremovable` is honoured: 509 statuses declare in prose that a cleanse cannot touch
     them, and op 114 removes by CATEGORY BLOCK, so without the check a cleanse would
@@ -253,7 +382,67 @@ def remove_category(unit, category):
             continue
         if category in (None, "any") or st.category == category:
             unit.statuses.remove(st)
-            gone.append(st.name)
+            gone.append(st)
+    return gone
+
+
+def _loose(name):
+    """Normalise a status name for matching: casefold, drop a trailing qualifier and a
+    leading article. The prose names a status inconsistently -- the registry row is
+    `The Divine` while the clause that strips it says "removes its the Divine effect",
+    which the compiler reduces to `Divine`.
+    """
+    n = re.sub(r"\s*\([^)]*\)\s*$", "", name or "")
+    n = " ".join(re.sub(r"[^a-z0-9]+", " ", n.lower()).split())
+    return n[4:] if n.startswith("the ") else n
+
+
+def remove_id(unit, status_id):
+    """Strip exactly the status with this id. -> the Active objects removed.
+
+    By ID, never by name, and that distinction is load-bearing: the pack ships DUPLICATE
+    rows under one name -- 397 and 399 are both "The Divine", 398 and 400 both "The
+    Fallen" -- and a status's nested script routinely applies the duplicate and then
+    removes it again (`apply 400, remove 400`), which is a no-op as written. Matching
+    that removal by name deleted the REAL marker along with the duplicate, so Lucifer
+    lost her stance a few turns after entering it.
+    """
+    try:
+        want = int(status_id)
+    except (TypeError, ValueError):
+        return []
+    gone = []
+    for st in list(unit.statuses):
+        if isinstance(st, Active) and st.status_id == want:
+            unit.statuses.remove(st)
+            gone.append(st)
+    return gone
+
+
+def remove_named(unit, name):
+    """Strip one status BY NAME. -> the Active objects removed.
+
+    Deliberately not `remove_category`, and deliberately ignores `unremovable`. This is
+    not a cleanse -- it is a skill naming the exact status it replaces, as Lucifer's
+    Lamenting Starlight does: "grants the caster The Fallen and removes its the Divine
+    effect". The Divine is `unremovable` (a cleanse must not touch it), so routing the
+    swap through the cleanse path left both markers on the caster and the toggle stopped
+    toggling. A named swap outranks the cleanse guard.
+    """
+    want = _loose(name)
+    if not want:
+        return []
+    gone = []
+    for st in list(unit.statuses):
+        if not isinstance(st, Active):
+            continue
+        got = _loose(st.name)
+        # Equality after normalising, or containment when the shorter side is long
+        # enough to be unambiguous -- a 3-letter fragment would match half the registry.
+        if got == want or (min(len(got), len(want)) >= 5
+                           and (want in got or got in want)):
+            unit.statuses.remove(st)
+            gone.append(st)
     return gone
 
 
@@ -264,15 +453,22 @@ def remove_category(unit, category):
 # prose does: "While taking damage, deals Target's 100% ATK as damage (triggers once
 # while dealing multiple attacks)."
 #
-# Keyed by a lowercase name fragment, matched loosely as elsewhere. A reflect is a
-# percentage of the ATTACKER's ATK, paid back to the attacker.
-REFLECT = {
+# Keyed by a lowercase name fragment, matched loosely as elsewhere. The value is a
+# percentage of the HOLDER's own ATK, dealt as extra damage TO THE HOLDER when it is hit.
+#
+# This is NOT a reflect, and reading it as one had Michael's passive attacking his own
+# party. `Return` is an offensive debuff: "Sword Draw: When a battle starts, inflicts
+# Return on all ENEMIES", dispelled when Michael dies. Its own line -- "While taking
+# damage, deals Target's 100% ATK as damage" -- names the Target, and the Target is the
+# unit being attacked, i.e. the holder. A player passive that handed every enemy a free
+# retaliation aura would be a downside, not a skill.
+ON_HIT_EXTRA = {
     "return": 100.0,
 }
 
-# "triggers once while dealing multiple attacks" -- a multi-hit skill reflects ONE time,
-# not once per swing, or a 4-hit skill would pay four times.
-REFLECT_ONCE_PER_SKILL = True
+# "triggers once while dealing multiple attacks" -- a multi-hit skill triggers this ONE
+# time, not once per swing, or a 4-hit skill would pay four times.
+ON_HIT_EXTRA_ONCE_PER_SKILL = True
 
 
 # Statuses that stop the move gauge moving, derived from the registry's own wording
@@ -321,16 +517,17 @@ def blocks_gauge_loss(unit):
     return any(st.status_id in ids for st in _actives(unit))
 
 
-def reflect_amount(victim, attacker):
-    """-> damage the victim's statuses pay back to `attacker`, or 0."""
-    if attacker is None:
-        return 0
+def on_hit_extra_damage(victim):
+    """-> extra damage the victim's own statuses add when it is struck, or 0.
+
+    Paid by the VICTIM and scaled off the VICTIM's ATK -- see ON_HIT_EXTRA.
+    """
     total = 0.0
     for st in _actives(victim):
         name = (st.name or "").lower()
-        for frag, pct in REFLECT.items():
+        for frag, pct in ON_HIT_EXTRA.items():
             if frag in name:
-                total += float(getattr(attacker, "atk", 0) or 0) * pct / 100.0
+                total += float(getattr(victim, "atk", 0) or 0) * pct / 100.0
                 break
     return int(total)
 

@@ -233,7 +233,25 @@ def _heal_recipients(who, caster, targets, units, out, op, skill_id):
     return []
 
 
-def _holds_status(unit, name):
+def _held_names(unit):
+    return [str(getattr(st, "name", "") or "").lower()
+            for st in getattr(unit, "statuses", [])]
+
+
+def _snapshot(units):
+    """Status names per unit, frozen BEFORE any of this action's effects land.
+
+    Every `requires` gate in one action is judged against this, not against the running
+    state. Lucifer's Lamenting Starlight is the case that forces it: its two clauses are
+    a toggle -- hold The Divine, get The Fallen; hold The Fallen, get The Divine -- so
+    resolving them in sequence let the first clause's grant satisfy the second clause's
+    gate and the marker flipped straight back inside a single cast. Same shape as the
+    passive rules, which evaluate every condition before applying any effect.
+    """
+    return {id(u): _held_names(u) for u in units}
+
+
+def _holds_status(unit, name, snapshot=None):
     """Does this unit hold a status by (loose) name?
 
     Loose because the prose and the status row do not always spell it identically --
@@ -243,14 +261,16 @@ def _holds_status(unit, name):
     if not name:
         return False
     want = str(name).strip().lower()
-    for st in getattr(unit, "statuses", []):
-        got = str(getattr(st, "name", "") or "").lower()
+    names = (snapshot or {}).get(id(unit)) if snapshot is not None else None
+    if names is None:
+        names = _held_names(unit)
+    for got in names:
         if got and (want in got or got in want):
             return True
     return False
 
 
-def _status_event(caster, target, eff, rng):
+def _status_event(caster, target, eff, rng, snapshot=None):
     """-> a StatusEvent, or None when the application does not land."""
     st = eff.get("status") or {}
     numbers = eff.get("numbers") or {}
@@ -260,7 +280,7 @@ def _status_event(caster, target, eff, rng):
         # for real rather than rolled -- this is the shape behind Eclipse Slash gating
         # its Freeze on The Divine and its Stun on The Fallen.
         holder = caster if requires.get("on") == "caster" else target
-        if not _holds_status(holder, requires.get("status")):
+        if not _holds_status(holder, requires.get("status"), snapshot):
             return None
     elif eff.get("conditional") and not eff.get("chance"):
         if CONDITIONAL_POLICY == "skip":
@@ -346,6 +366,9 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
                 out.strikes.append(Strike(swing=sw, target=tgt.order, amount=amount,
                                           detail=detail, died=False))
 
+    # Frozen before the non-damage effects run; see _snapshot.
+    held = _snapshot(list(units) + [caster])
+
     # --- everything else, once ------------------------------------------------------
     for e in effects:
         op = e["op"]
@@ -356,7 +379,7 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
             # buffs its own side. `None` means the prose did not say, which is the
             # ordinary "inflicts X on the target" case.
             for tgt in _status_recipients(e.get("recipient"), caster, targets, units):
-                ev = _status_event(caster, tgt, e, r)
+                ev = _status_event(caster, tgt, e, r, held)
                 if ev is None:
                     continue
                 # Land it on the unit as STATE, not just on the wire. The unit is shared
@@ -364,13 +387,24 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
                 # list everything else reads.
                 if apply_damage and _status.apply_event(tgt, ev, caster) is None:
                     continue          # blocked by an immunity -- do not report it either
+                # A clause may name the status this one REPLACES ("grants the caster The
+                # Fallen and removes its the Divine effect"). Only once it landed --
+                # an application an immunity blocked must not strip anything.
+                for dead in (_status.remove_named(tgt, e["removes"])
+                             if apply_damage and e.get("removes") else []):
+                    out.statuses.append(StatusEvent(
+                        target=tgt.order, status_id=dead.status_id, name=dead.name,
+                        applied=False))
                 out.statuses.append(ev)
         elif op == "remove_status":
             cat = e.get("category") or (e.get("status") or {}).get("category")
             for tgt in targets:
-                for name in _status.remove_category(tgt, cat):
+                for dead in _status.remove_category(tgt, cat):
+                    # The id, not just the name -- a removal reaches the client as a
+                    # status row with that id and a round of 0.
                     out.statuses.append(StatusEvent(
-                        target=tgt.order, status_id=None, name=name, applied=False))
+                        target=tgt.order, status_id=dead.status_id, name=dead.name,
+                        applied=False))
         elif op == "heal":
             pct = e.get("percent")
             if pct is None:
@@ -479,11 +513,18 @@ def _damage_hooks(caster, targets, out, units, rng):
     for tgt in targets:
         if tgt.order not in struck:
             continue
-        back = _status.reflect_amount(tgt, caster)
-        if back:
-            caster.hp = max(0, caster.hp - back)
-            out.strikes.append(Strike(swing=0, target=caster.order, amount=back,
-                                      detail={"reflect": tgt.order}))
+        extra = _status.on_hit_extra_damage(tgt)
+        if extra:
+            # Lands on the TARGET, not the attacker: `Return` is a debuff Michael puts
+            # on enemies, so it adds to what they take. Indexed past the last swing so
+            # it does not collide with the target's existing row in swing 0 -- the wire
+            # allows one row per unit per group. wire.py then CLAMPS it back into the
+            # final swing and sums it there, which is the right outcome: the client
+            # shows one number per swing, and the extra rides the last hit.
+            tgt.hp = max(0, tgt.hp - extra)
+            swing = max((s.swing for s in out.strikes), default=0) + 1
+            out.strikes.append(Strike(swing=swing, target=tgt.order, amount=extra,
+                                      detail={"on_hit_extra": True}))
         _passives.fire_all(_passives.ON_DAMAGE_TAKEN, [tgt], units,
                            ctx={"attacker": caster, "rng": rng},
                            fired=getattr(caster, "_passives_fired", None))

@@ -20,6 +20,7 @@ otherwise; the status IDS are read out of the passive's own effect list by name,
 rule never invents a status the skill does not actually reference.
 """
 import dataclasses
+import re
 from typing import Callable, Optional
 
 from . import specs, status as _status
@@ -228,11 +229,12 @@ PASSIVES = {
         Rule(TURN_START, "Incarnation of Order I", SELF, when=holds("Commendation"),
              note="1. Maintain Order: at the start of the turn, if you have a "
                   "Commendation, you gain CC Immunity"),
-        Rule(TURN_START, "Hold On Classmates (SPD)", SELF, when=hp_at_least(0.70),
+        Rule(TURN_START, "Hold On, Classmates (SPD)", SELF, when=hp_at_least(0.70),
              kind="stat_mod", stat="SPD", magnitude=10.0, duration=1,
              note="2. Hold On, Classmates: when HP >= 70%, SPD +10% before action. "
-                  "SYNTHESISED -- the pack has no status row for this clause"),
-        Rule(TURN_START, "Hold On Classmates (ATK)", SELF, when=hp_at_least(0.70),
+                  "Rows 2645/2646 -- kept as a rule rather than a nested script because "
+                  "the gate is an HP threshold, not holding a marker"),
+        Rule(TURN_START, "Hold On, Classmates (ATK)", SELF, when=hp_at_least(0.70),
              kind="stat_mod", stat="ATK", magnitude=35.0, duration=1,
              note="...and ATK +35%"),
         Rule(ON_DAMAGE_TAKEN, "Major Merit", SELF, when=hp_at_most(0.30),
@@ -286,16 +288,11 @@ PASSIVES = {
     2080131: [
         Rule(BATTLE_START, "The Divine", SELF, permanent=True,
              note="Angel Blood: grant the caster The Divine for the entire battle"),
-        Rule(TURN_START, "CC Immunity", SELF, when=holds("Divine"), duration=1,
-             note="Throughout Heaven and Earth: if affected by The Divine, grants CC "
-                  "Immunity for one turn at start of a turn"),
-        Rule(TURN_START, "Keen", SELF, when=holds("Fallen"), duration=2,
-             kind="stat_mod", stat="CRI", magnitude=35.0,
-             note="I alone am honored: if affected by The Fallen, grants Keen "
-                  "(CRT+35%) for two turns at each start of a turn. SYNTHESISED"),
-        Rule(TURN_START, "Teardown", SELF, when=holds("Fallen"), duration=2,
-             kind="damage_mod", magnitude=75.0,
-             note="...and Teardown (Crit. DMG +75%)"),
+        # "Throughout Heaven and Earth" (CC Immunity while Divine), "I alone am honored"
+        # (Keen) and Teardown are NOT rules any more: The Divine's own row is
+        # `apply 701 CC Immunity` and The Fallen's is `apply 2007 Keen, apply 2009
+        # Teardown`, and status.run_nested fires those every turn the marker is held.
+        # Keeping the hand-written copies would refresh each one twice a turn.
     ],
 
     # MICHAEL -- Solar Prime
@@ -352,9 +349,9 @@ UNMODELLED = {
     1100131: [],
     2080131: ["Stay Low: if affected by The Fallen, strip the target's unstackable "
               "buffs BEFORE dealing damage -- needs a pre-damage hook"],
-    2090131: ["Return's reflect lives in status.REFLECT -- it is a status the ENEMY "
-              "holds, so it cannot be a rule in MICHAEL's table: fire_all runs a "
-              "passive for its own holder"],
+    2090131: ["Return's on-hit damage lives in status.ON_HIT_EXTRA -- it is a status "
+              "the ENEMY holds, so it cannot be a rule in MICHAEL's table: fire_all "
+              "runs a passive for its own holder"],
     100001431: [],
 }
 
@@ -399,6 +396,51 @@ def _status_ids(spec, holder=None):
     for name, val in _CAST_STATUS_CACHE[key].items():
         out.setdefault(name, val)
     return out
+
+
+_REGISTRY_BY_NAME = None
+
+
+def _name_key(name):
+    """Join key for a status name: punctuation-insensitive, qualifier-preserving."""
+    n = (name or "").strip().lower()
+    n = re.sub(r"[,'\u2019.!?\u3001]", "", n)
+    n = re.sub(r"\s*\(\s*", "(", n)
+    n = re.sub(r"\s*\)", ")", n)
+    return " ".join(n.split())
+
+
+def registry_id(name):
+    """-> the status row id whose name is exactly `name`, or None.
+
+    Tier 3, added after the synthesised ids turned out to be unnecessary for almost
+    every rule that used them. A status is a GLOBAL entity, not a per-cast one: Lucifer's
+    passive grants "Keen", and Keen is row 2007 -- in fact The Fallen's own row applies
+    2007 and 2009 through its nested opcodes, so the rows were always the right answer
+    and the hand-written rules were duplicating them under invented ids. A synthesised id
+    has no design row, which costs the status its icon and its tooltip on the client.
+
+    Matched on a key that normalises punctuation and spacing but KEEPS the parenthetical
+    qualifier. The two halves matter:
+
+      * loose matching folds "Keen", "Keen UL", "Keen(SP)" and "Keen(SP2)" together, and
+        picking one of four arbitrarily is how a rule silently gets the wrong magnitude;
+      * exact matching is too strict to survive transcription. The pack writes
+        "Hold On, Classmates (ATK)" and this table wrote it without the comma, so the
+        only rules left synthesising ids were the ones with a typo -- which is precisely
+        the failure this lookup exists to prevent.
+
+    An ambiguous name resolves to nothing and falls through to synthesising, as before.
+    """
+    global _REGISTRY_BY_NAME
+    if _REGISTRY_BY_NAME is None:
+        seen = {}
+        for sid, row in (specs.statuses() or {}).items():
+            nm = _name_key(row.get("name"))
+            if nm:
+                seen.setdefault(nm, []).append(int(sid))
+        _REGISTRY_BY_NAME = {n: v[0] for n, v in seen.items() if len(v) == 1}
+    return _REGISTRY_BY_NAME.get(_name_key(name))
 
 
 def rules_for(skill_id):
@@ -488,6 +530,11 @@ def fire(trigger, holder, passive_skill_id, units, ctx=None, fired=None):
             continue
 
         found = ids.get(rule.status)
+        if not found:
+            # The cast's own kit did not name it, but the pack may still HAVE the row.
+            reg = registry_id(rule.status)
+            if reg is not None:
+                found = (reg, {})
         if not found and not rule.kind:
             continue          # not in the cast's kit, and the rule does not synthesise
         sid, numbers = found if found else (None, {})
