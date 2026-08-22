@@ -20,7 +20,32 @@ Body is a protobuf-net `titan.Client`:
 import socket, threading, time, os, sys, json
 import player_state as ps
 import battle as bt
-import battle_inspector as binspect
+try:
+    import battle_inspector as binspect
+except ImportError:                                                    # noqa: BLE001
+    # DEV-ONLY TOOL, deliberately not shipped to the phone: it can rewrite live battle
+    # traffic, and it is for this machine only. The import has to be optional rather
+    # than assumed, or a hot update lands a server that dies at import on the device --
+    # the module simply is not in the zip. The stub keeps every call site below
+    # unchanged and leaves the battle path exactly as it is when disarmed.
+    class _NoInspector:
+        @staticmethod
+        def armed():
+            return False
+
+        @staticmethod
+        def intercept(*_a, **_kw):
+            return False
+
+        @staticmethod
+        def set_rebuilder(_fn):
+            pass
+
+        @staticmethod
+        def serve_background(*_a, **_kw):
+            raise OSError("battle_inspector is not installed")
+
+    binspect = _NoInspector()
 # The pure transport layer -- RC4, framing, protobuf and RPC packing -- lives in
 # wire.py. `import *` is scoped by wire's __all__, so this pulls exactly the named
 # primitives (make_rpc, rpc_pack, pb_field_bytes, RC4, ...) and nothing else, which

@@ -1,22 +1,23 @@
 {
-    "_comment": "Single source of truth for which server/ files are CODE (ship in the APK's stageServer task AND in a hot-update zip from tools/build_hostapp_update.py). Keeping one list keyed off this file, instead of a hardcoded list in build.gradle, is what stopped `battle_effects`/`battle_data` from silently going stale here after the Phase 0 engine-package split -- see memory sevensins-hostapp-updater. `data_files` are single files copied verbatim (save_editor_ui.html is the editor's whole UI); without it the editor serves a 500 and the page is blank.",
-    "modules": [
-        "titan_server.py",
-        "wire.py",
-        "battle.py",
-        "design_data.py",
-        "settings.py",
-        "bundle_server.py",
-        "save_editor.py"
-    ],
-    "packages": [
-        "player_state",
-        "battle_effects"
-    ],
-    "data_dirs": [
-        "battle_data"
-    ],
-    "data_files": [
-        "save_editor_ui.html"
-    ]
+  "_comment": "Single source of truth for which server/ files are CODE (ship in the APK's stageServer task AND in a hot-update zip from tools/build_hostapp_update.py). Keeping one list keyed off this file, instead of a hardcoded list in build.gradle, is what stopped `battle_effects`/`battle_data` from silently going stale here after the Phase 0 engine-package split -- see memory sevensins-hostapp-updater. `data_files` are single files copied verbatim (save_editor_ui.html is the editor's whole UI); without it the editor serves a 500 and the page is blank. `engine` is the battle engine battle.py imports at module scope; it was missing here from the start, so any hot update carrying the new battle.py would have landed a server that cannot import on the phone -- the same failure this file exists to prevent, one package later.",
+  "modules": [
+    "titan_server.py",
+    "wire.py",
+    "battle.py",
+    "design_data.py",
+    "settings.py",
+    "bundle_server.py",
+    "save_editor.py"
+  ],
+  "packages": [
+    "player_state",
+    "battle_effects",
+    "engine"
+  ],
+  "data_dirs": [
+    "battle_data"
+  ],
+  "data_files": [
+    "save_editor_ui.html"
+  ]
 }

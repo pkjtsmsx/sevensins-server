@@ -30,6 +30,7 @@ import hashlib
 import json
 import os
 import sys
+import ast
 import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -71,6 +72,81 @@ def _iter_files(base, rel):
             yield os.path.relpath(os.path.join(dirpath, name), base)
 
 
+def _local_top_levels():
+    """-> the top-level module/package names that live in server/."""
+    out = set()
+    for name in os.listdir(SERVER):
+        full = os.path.join(SERVER, name)
+        if os.path.isdir(full) and os.path.isfile(os.path.join(full, "__init__.py")):
+            out.add(name)
+        elif name.endswith(".py"):
+            out.add(name[:-3])
+    return out
+
+
+def _catches_import_error(handler):
+    names = handler.type
+    if names is None:                       # bare except
+        return True
+    targets = names.elts if isinstance(names, ast.Tuple) else [names]
+    return any(getattr(t, "id", None) in ("ImportError", "ModuleNotFoundError")
+               for t in targets)
+
+
+def _check_imports_covered(rels):
+    """Refuse to build a zip whose own code cannot import on the device.
+
+    server_files.json is hand-maintained, and the failure mode when it falls behind is
+    the worst kind: the zip builds, uploads and applies cleanly, then the server dies on
+    the phone at import time with nothing in the local logs. `engine` was missing from
+    `packages` from the day it was created -- battle.py imports it at module scope, so
+    the first hot update carrying the new battle.py would have bricked the server.
+    `battle_effects` had already gone stale the same way once before.
+
+    Tests are excluded: they import things (pytest and friends) the device never needs,
+    and so is anything wrapped in `try: import x / except ImportError`, which is how a
+    module declares itself optional. battle_inspector is the case: a dev-only tool that
+    can rewrite live battle traffic, deliberately kept off the phone, so titan_server
+    falls back to a stub rather than the build demanding it be shipped.
+    """
+    shipped = {r.replace(os.sep, "/") for r in rels}
+    have = {n.split("/")[0].removesuffix(".py") for n in shipped}
+    local = _local_top_levels()
+    missing = {}
+    for rel in sorted(shipped):
+        if not rel.endswith(".py") or os.path.basename(rel).startswith("test_"):
+            continue
+        try:
+            tree = ast.parse(open(os.path.join(SERVER, rel), encoding="utf-8").read())
+        except SyntaxError as exc:
+            sys.exit(f"{rel}: {exc}")
+        optional = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Try) and any(
+                    _catches_import_error(h) for h in node.handlers):
+                for sub in node.body:
+                    for inner in ast.walk(sub):
+                        optional.add(id(inner))
+        for node in ast.walk(tree):
+            if id(node) in optional:
+                continue
+            if isinstance(node, ast.Import):
+                names = [a.name.split(".")[0] for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [(node.module or "").split(".")[0]] if not node.level else []
+            else:
+                continue
+            for name in names:
+                if name and name in local and name not in have:
+                    missing.setdefault(name, set()).add(rel)
+    if missing:
+        lines = [f"  {name}  (imported by {', '.join(sorted(who))})"
+                 for name, who in sorted(missing.items())]
+        sys.exit("server_files.json does not ship everything the shipped code imports:\n"
+                 + "\n".join(lines)
+                 + "\nadd the missing name to `packages` or `modules`.")
+
+
 def build(out_dir):
     with open(FILE_LIST, encoding="utf-8") as f:
         spec = json.load(f)
@@ -86,6 +162,8 @@ def build(out_dir):
         if not os.path.isdir(os.path.join(SERVER, p)):
             sys.exit(f"missing {os.path.join(SERVER, p)} -- update server_files.json?")
         rels.extend(_iter_files(SERVER, p))
+
+    _check_imports_covered(rels)
 
     os.makedirs(out_dir, exist_ok=True)
     zip_path = os.path.join(out_dir, "server_update.zip")
