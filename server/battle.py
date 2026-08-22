@@ -495,6 +495,13 @@ DROP_POOL_WEIGHTS = (
     (MINION_SUMMON_ORB, 2),
 ) + KARMA_GIFT_WEIGHTS          # 401 x3, 486 x2, 487 x1 -- design choice, see above
 
+# On the 18 stages a "Starshards Hunter" quest names, that stage's ★1 shard joins the
+# pool at this weight. Tuned for "farm, but not forever": on a 2-wave stage it is
+# 8/52 a slot, so about 28% a clear -- three or four runs on average, which is a visible
+# grind without being a wall. It has to be reachable: the same shards feed the goal-chain
+# quest that wants a full Endearment set equipped, so six of them gate a later step.
+STORY_SHARD_WEIGHT = 8
+
 # ---- items whose note names SPECIFIC main-story stages ----------------------
 #
 # Two items do not merely say "Main Story" -- they name the stages, so they are placed
@@ -533,31 +540,161 @@ def story_chapter(stage_id):
     return dmap, int(row.get("_sort") or 0)
 
 
-def story_special_drop(stage_id, rng):
-    """[(item, count)] for a stage a note names by id, else [].
+def story_special_item(stage_id):
+    """The item a note names for this stage by id, or None.
 
     Limbo Legacy on any Normal main-story stage and on the Hard chapter finales from
     chapter 5; Stardust of Inferno on the Nightmare finales from chapter 5. Straight
     off the two item notes -- nothing here is extrapolated beyond the "etc.".
+
+    Split from the roll so the Drop Info preview can ask "CAN this stage pay it?"
+    without rolling, which is a different question from "did it this time".
     """
     where = story_chapter(stage_id)
     if where is None:
-        return []
+        return None
     dmap, sort = where
+    # BOTH items are chapter-finale only. Read the CHINESE note, not the English one:
+    #
+    #   TC 1400009  可在主線普通、困難的5-10、6-10、7-10...關卡中獲得
+    #               "Main Story NORMAL AND HARD, stages 5-10, 6-10, 7-10..."
+    #   EN 1400009  "Main Story Normal stages, Hard 5-10, 6-10, 7-10, etc."
+    #
+    # `普通、困難的` is ONE possessive phrase governing the stage list, so the numbers
+    # qualify both difficulties. The EN comma-splice drops the shared qualifier and makes
+    # "Normal stages" read as unrestricted -- which had this granting Limbo Legacy on
+    # every Normal main-story stage in the game. Same translation-loss class as the
+    # Gremlin Pieces and the Manga/Poster karma values.
+    #
+    # (The JP note on both rows is unrelated text about a different gacha banner, so it
+    # is no help here; TC and SC agree with each other.)
+    if sort != CHAPTER_FINALE_SORT or dmap < FINALE_DROP_MIN_CHAPTER:
+        return None
     difficulty = stage_difficulty(stage_id)
-    finale = sort == CHAPTER_FINALE_SORT and dmap >= FINALE_DROP_MIN_CHAPTER
+    if difficulty in (DIFFICULTY_NORMAL, DIFFICULTY_HARD):
+        return LIMBO_LEGACY_ITEM
+    if difficulty == DIFFICULTY_NIGHTMARE:
+        return STARDUST_OF_INFERNO_ITEM
+    return None
 
-    item = None
-    if difficulty == DIFFICULTY_NORMAL:
-        item = LIMBO_LEGACY_ITEM
-    elif difficulty == DIFFICULTY_HARD and finale:
-        item = LIMBO_LEGACY_ITEM
-    elif difficulty == DIFFICULTY_NIGHTMARE and finale:
-        item = STARDUST_OF_INFERNO_ITEM
+
+def story_special_drop(stage_id, rng):
+    """[(item, count)] for a stage a note names by id, else [] -- rolled."""
+    item = story_special_item(stage_id)
     if item is None or rng.random() >= FINALE_DROP_CHANCE:
         return []
     return [(item, _roll(STORY_SPECIAL_SPAN, rng,
-                         difficulty_multiplier(difficulty)))]
+                         difficulty_multiplier(stage_difficulty(stage_id))))]
+
+
+# ---- the ★1 starshards main story drops -------------------------------------
+#
+# **The quest table states this outright, one stage at a time.** The 18 "Starshards
+# Hunter" quests each name a stage and a shard in their own text -- "Clear main story
+# 2-1 and get ★1 Endearment Starshard ①" -- so this is read, not inferred:
+#
+#     chapter 2, stages 1-6  ->  Endearment slots 1-6   (201101..201601)
+#     chapter 3, stages 1-6  ->  Defender   slots 1-6   (207101..207601)
+#     chapter 4, stages 1-6  ->  Devotee    slots 1-6   (208101..208601)
+#
+# The slot always equals the stage number, and every one is ★1 rank 0 -- the three
+# starter sets, which is what a new player is being walked through collecting.
+#
+# A shard is a POOL MEMBER on its stage, not a guaranteed drop. Two clears of 2-1 are on
+# record and NEITHER paid a shard: one shows coin 250 twice, the other (STAGE_DROPS, from
+# earlier footage) an orb and a trainer. The quest says "get", and a player is expected to
+# farm for it -- which is also the only reading compatible with one stack per wave.
+#
+# Derived from the quest rows rather than typed out, so it cannot drift from them. The
+# stage is only in the display text, so it is parsed -- but from the COLOUR-TAGGED number
+# pair, which is identical in every language, not from English prose.
+_STORY_SHARD_QUEST_CASE = 1             # `_case_type` 1 is the obtain-item counter
+_story_shard_cache = None
+_SHARD_STAGE_RE = re.compile(r"\[00FFFF\](\d+)-(\d+)\[-\]")
+
+
+def story_shard_stages():
+    """{stage id: ★1 shard item id} read off the "Starshards Hunter" quests."""
+    global _story_shard_cache
+    if _story_shard_cache is not None:
+        return _story_shard_cache
+    out = {}
+    try:
+        normal = {}
+        for stage_id, row in dd.rows("stage").items():
+            dmap = int(row.get("_dmap_id") or 0)
+            if 0 < dmap < STORY_DMAP_MAX and int(row.get("_difficulty") or 0) == DIFFICULTY_NORMAL:
+                normal[(dmap, int(row.get("_sort") or 0))] = int(stage_id)
+        for _qid, quest in dd.rows("quest").items():
+            if int(quest.get("_case_type") or 0) != _STORY_SHARD_QUEST_CASE:
+                continue
+            item_id = int(quest.get("_case_v1") or 0)
+            if not starshard_slot(item_id):
+                continue
+            text = str(quest.get("_content_en") or quest.get("_content") or "")
+            hit = _SHARD_STAGE_RE.search(text)
+            if not hit:
+                continue
+            stage_id = normal.get((int(hit.group(1)), int(hit.group(2))))
+            if stage_id:
+                out[stage_id] = item_id
+    except Exception:                       # noqa: BLE001 -- never break a clear
+        out = {}
+    _story_shard_cache = out
+    return out
+
+
+def starshard_slot(item_id):
+    """The equipment slot a starshard item sits in (1..6), or 0 when it is not one.
+
+    Ids encode ELEMENT*1000 + slot*100 + rank*10 + star, and `_action` is 110 + slot, so
+    the row's own action is the check rather than a number range -- an id that merely
+    looks like a shard but is not routed as one must not be treated as a drop.
+    """
+    action = int((dd.row("item", int(item_id)) or {}).get("_action") or 0)
+    slot = action - 110
+    return slot if 1 <= slot <= 6 else 0
+
+
+def story_shard_drop(stage_id):
+    """A RuneDrop for this stage's quest shard, or None."""
+    item_id = story_shard_stages().get(int(stage_id))
+    if not item_id:
+        return None
+    slot = starshard_slot(item_id)
+    if not slot:
+        return None
+    return RuneDrop(display_item=item_id, item_id=item_id, slot=slot)
+
+
+def generated_drop_pool(stage_id):
+    """Every item id an ordinary stage CAN drop -> [item ids], in weight order.
+
+    **This is the POOL, not a sample of it.** The Drop Info panel asks what a stage can
+    pay, and answering it by rolling generated_drops once -- which is what this used to
+    do -- shows only the two or three members that one roll happened to pick, so a stage
+    whose pool has nine possibilities advertised two. That is the same "the panel starts
+    lying" failure the preview already documents, arrived at from the other direction.
+
+    One entry per possibility, which is the convention the Temple preview and the
+    storefronts already use for anything random.
+    """
+    star, _span = drop_rung(stage_ap(stage_id))
+    out = [COIN_ITEM_ID]
+    for member, _weight in DROP_POOL_WEIGHTS:
+        if member == "trainer":
+            out.append(TRAINER_ITEMS[star])
+        elif member == "gremlin":
+            out.append(GREMLIN_PIECE_TIERS[star])
+        else:
+            out.append(member)
+    shard = story_shard_stages().get(int(stage_id))
+    if shard:
+        out.append(shard)
+    special = story_special_item(stage_id)
+    if special is not None:
+        out.append(special)
+    return out
 
 
 # `_difficulty` 1/2/3 = Normal/Hard/Nightmare -- confirmed by the same content existing
@@ -777,11 +914,18 @@ def kizuna_drops(stage_id, rng=None):
 # and Evolution Gem drops there in four separate observed clears. The gate would have
 # blocked precisely what the game actually paid, so it is gone rather than retuned.
 
-def _pool_roll(rng, ap, mult):
-    """One drop slot -> (item id, count), drawn from DROP_POOL_WEIGHTS by frequency."""
+def _pool_roll(rng, stage_id, ap, mult):
+    """One drop slot -> (item id, count) or a RuneDrop, drawn from the pool by weight."""
     star, span = drop_rung(ap)
+    shard = story_shard_drop(stage_id)
     total = DROP_POOL_COIN + sum(w for _m, w in DROP_POOL_WEIGHTS)
+    if shard is not None:
+        total += STORY_SHARD_WEIGHT
     roll = rng.random() * total
+    if shard is not None:
+        if roll < STORY_SHARD_WEIGHT:
+            return shard
+        roll -= STORY_SHARD_WEIGHT
     if roll < DROP_POOL_COIN:
         # An ap-0 stage floors at the flat rate rather than paying nothing. 250 at ap 5
         # is the observed anchor and every observed coin stack in main story is 250.
@@ -818,7 +962,7 @@ def generated_drops(stage_id, waves=1, rng=None):
     rng = rng or _r
     ap = stage_ap(stage_id)
     mult = difficulty_multiplier(stage_difficulty(stage_id))
-    out = [_pool_roll(rng, ap, mult) for _ in range(max(1, int(waves)))]
+    out = [_pool_roll(rng, stage_id, ap, mult) for _ in range(max(1, int(waves)))]
     out.extend(story_special_drop(stage_id, rng))
     return out
 
@@ -1222,19 +1366,26 @@ STAGE_DROPS = {
     # item name rather than the picture.)
     1400001: [(102, 6)],
 
-    # Main story chapter 2. Both stages pay a ★1 Trainer alongside a stage-specific
-    # material, which is the shape to expect elsewhere: a per-stage item plus a common
-    # trainer, one drop icon per wave (2-1 and 2-2 are both 2-wave).
-    2101: [(210, 10), (101, 1)],        # ★3 Minion Summon Orb x10 + ★1 Trainer
-    # 2-2 drops a REAL Endearment starshard. Footage shows a specific set piece -- the
-    # one for part 2 -- not the random box we used to hand out.
-    # 2-2 drops a real Endearment starshard for part 2 (what the footage shows), not the
-    # random box. WARNING: a malformed storage-2 entry makes PlayerBackpack's login sync
-    # throw partway through; the sync never signals completion, so the client hangs
-    # forever on `Subsystem 'PlayerBackpack' still in syncing...` AND, because the entry
-    # is persisted, so does every later login until it is deleted by hand. `attr` must
-    # always carry `lv`. See player_state.make_rune.
-    2102: [RuneDrop(display_item=201201, item_id=201201, slot=2), (101, 1)],
+    # **2-1 and 2-2 USED to be pinned here and no longer are.** Their observations are
+    # kept as a note rather than a table because the pool now covers both, and because
+    # two clears of 2-1 disagree with each other:
+    #
+    #     2101   observed once as ★3 Minion Summon Orb x10 + ★1 Trainer
+    #            observed again (footage) as coin 250 + coin 250
+    #     2102   observed as ★1 Endearment II + ★1 Trainer
+    #
+    # Neither 2-1 result contains the other, so these are POOL ROLLS, not a fixed table
+    # -- every item in them is a pool member, and the Endearment shard is exactly what
+    # story_shard_stages() reads off quest 20062 for that stage. Pinning them here did
+    # real harm: STAGE_DROPS short-circuits before the pool runs, so 2-1 could never pay
+    # the ★1 Endearment I its own "Starshards Hunter" quest requires, and that quest was
+    # uncompletable no matter how many times it was cleared.
+    #
+    # WARNING for whatever goes here next: a malformed storage-2 entry makes
+    # PlayerBackpack's login sync throw partway through; the sync never signals
+    # completion, so the client hangs forever on `Subsystem 'PlayerBackpack' still in
+    # syncing...` AND, because the entry is persisted, so does every later login until it
+    # is deleted by hand. `attr` must always carry `lv`. See player_state.make_rune.
 }
 # Corrects an earlier note here: items 1001-1005 are NOT "one per piece". They differ by
 # RANK -- zh 普通/優良/稀有/史詩/傳說 = N/R/SR/UR/LR -- and every one of them is a
@@ -1315,7 +1466,8 @@ def stage_drop_preview(stage_id):
     Starshard Temple learned to pay shards and this still advertised coins.
 
     A temple clear rolls its ELEMENT, so the preview lists the whole pool -- one entry
-    per possibility, the same convention the storefronts use for a random box.
+    per possibility, the same convention the storefronts use for a random box, and the
+    rule every branch below follows: **list what CAN drop, never a sample of it.**
     """
     known = STAGE_DROPS.get(int(stage_id))
     if known is not None:
@@ -1326,24 +1478,21 @@ def stage_drop_preview(stage_id):
     gremlins = transcend_corridor_pool(stage_id)
     if gremlins:
         return list(gremlins)
-    row = dd.row("stage", int(stage_id)) or {}
-    waves = len(dd.csv_ints(row.get("_mobGroup_datas"))) or 1
-    # Preview EXACTLY what a clear pays, deduped -- the panel lists each item id once,
-    # not once per stack. Both sides read the same generators so the panel cannot drift
-    # from the payout, which is the failure the docstring above describes.
-    #
-    # Fixed seed: only the ID SET is read here and that does not depend on the roll, so
-    # this must not consume from -- or reseed -- a caller's generator.
-    import random as _r
-    preview_rng = _r.Random(0)
-    karma = kizuna_drops(stage_id, preview_rng)
+    # A bond stage and a farm dungeon each pay exactly ONE item, named by the stage's own
+    # Stage Clear row, so their preview is that item -- read, not rolled.
+    karma = kizuna_karma_item(stage_id)
     if karma is not None:
-        return [item_id for item_id, _count in karma]
-    farmed = material_dungeon_drops(stage_id, waves, preview_rng)
-    if farmed is not None:
-        return sorted({item_id for item_id, _count in farmed})
+        return [karma]
+    row = dd.row("stage", int(stage_id)) or {}
+    if int(row.get("_dmap_id") or 0) in MATERIAL_DUNGEON_DMAPS:
+        reward = stage_clear_reward(stage_id)
+        if reward and reward[1]:
+            return [reward[0]]
+    # An ordinary stage rolls each wave slot from the pool, so the panel lists the whole
+    # pool. Rolling generated_drops once and previewing the result -- which this used to
+    # do -- advertised only the two or three members that one roll picked.
     seen, out = set(), []
-    for item_id, _count in generated_drops(stage_id, waves, preview_rng):
+    for item_id in generated_drop_pool(stage_id):
         if item_id not in seen:
             seen.add(item_id)
             out.append(item_id)
