@@ -68,7 +68,15 @@ tasks.register('stageServer', Copy) {
         // A runtime package is code only. Desktop runs leave __pycache__ next to it, and
         // player_state's STATE_DIR default would drop an accounts/ dir inside the package
         // if its anchor were ever wrong again -- neither belongs in the shipped app.
-        exclude '**/__pycache__/**', '**/*.pyc', '**/accounts/**'
+        //
+        // `*.bak*` covers editing backups kept beside the module they shadow --
+        // player_state/core.py.bak-refactor alone is 225 KB of dead weight in every APK.
+        // The hot-update path already skipped these (build_hostapp_update._is_stray drops
+        // any multi-dot name that is not .py/.json/.html); this is the same rule for the
+        // APK path, which was the only consumer still shipping them. The two builds share
+        // server_files.json but NOT their exclusions, so a filter added to one has to be
+        // added to the other by hand -- which is exactly how this drifted.
+        exclude '**/__pycache__/**', '**/*.pyc', '**/accounts/**', '**/*.bak*'
     }
     // Pre-built design tables: shipping these is what keeps the app free of UnityPy and
     // TypeTreeGenerator, which design_data imports ONLY when it has to reparse the pack.

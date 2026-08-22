@@ -13,11 +13,18 @@ import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import com.chaquo.python.PyObject;
+
+import org.json.JSONObject;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /**
  * One screen: start/stop the server, grant the battery exemption, import assets, launch
@@ -75,6 +82,19 @@ public class MainActivity extends android.app.Activity {
         editSave.setText("Edit save");
         editSave.setOnClickListener(v -> openSaveEditor());
         root.addView(editSave);
+
+        // Server-WIDE, unlike "Edit save" right above it, which is per-account. That is
+        // why rates live here on the main screen instead of inside the editor: they are
+        // not a property of any one save.
+        Button rates = new Button(this);
+        rates.setText("Server rates");
+        rates.setOnClickListener(v -> openRateSettings());
+        root.addView(rates);
+
+        Button crashLog = new Button(this);
+        crashLog.setText("View crash log");
+        crashLog.setOnClickListener(v -> openCrashLog());
+        root.addView(crashLog);
 
         Button update = new Button(this);
         update.setText("Check for updates");
@@ -181,6 +201,175 @@ public class MainActivity extends android.app.Activity {
         startActivity(new Intent(
                 Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
                 Uri.parse("package:" + getPackageName())));
+    }
+
+    /**
+     * Server-wide reward rates.
+     *
+     * These are MULTIPLIERS against the reconstructed values, never absolute amounts:
+     * 1.0 means "what the retail game paid", and the evidence tables in the server stay
+     * untouched as the record of what that was. A rate change is therefore always a
+     * visible, deliberate departure rather than something that can arrive disguised as
+     * a bug fix.
+     *
+     * The dialog is built from whatever `settings.RATES` contains rather than a fixed
+     * list of fields, so ADDING A RATE NEEDS NO APK REBUILD -- settings.py is
+     * hot-updatable and this screen picks the new name up on its own. That is also why
+     * the Java side only ever passes JSON around and knows none of the rules.
+     *
+     * Works with the server stopped: rates are a file beside the accounts.
+     */
+    private void openRateSettings() {
+        String json;
+        try {
+            json = ServerService.python(this).getModule("main")
+                                .callAttr("rates_json", getFilesDir().getAbsolutePath())
+                                .toString();
+        } catch (Throwable t) {
+            Toast.makeText(this, "Could not read rates: " + t, Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        int pad = (int) (16 * getResources().getDisplayMetrics().density);
+        box.setPadding(pad, pad, pad, pad);
+
+        TextView blurb = new TextView(this);
+        blurb.setText("Multipliers on the original game's values. 1.0 = retail. "
+                    + "Takes effect immediately -- no restart.");
+        box.addView(blurb);
+
+        final Map<String, EditText> fields = new LinkedHashMap<>();
+        try {
+            JSONObject parsed = new JSONObject(json);
+            if (parsed.has("error")) {
+                Toast.makeText(this, "Rates error: " + parsed.getString("error"),
+                               Toast.LENGTH_LONG).show();
+                return;
+            }
+            JSONObject values = parsed.getJSONObject("rates");
+            java.util.Iterator<String> names = values.keys();
+            while (names.hasNext()) {
+                String name = names.next();
+                TextView label = new TextView(this);
+                label.setText(name);
+                box.addView(label);
+                EditText field = new EditText(this);
+                field.setInputType(android.text.InputType.TYPE_CLASS_NUMBER
+                                 | android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL);
+                field.setText(String.valueOf(values.getDouble(name)));
+                box.addView(field);
+                fields.put(name, field);
+            }
+        } catch (Throwable t) {
+            Toast.makeText(this, "Could not parse rates: " + t, Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(box);
+
+        new AlertDialog.Builder(this)
+                .setTitle("Server rates")
+                .setView(scroll)
+                .setPositiveButton("Save", (d, w) -> {
+                    JSONObject out = new JSONObject();
+                    for (Map.Entry<String, EditText> e : fields.entrySet()) {
+                        String raw = e.getValue().getText().toString().trim();
+                        if (raw.isEmpty()) {
+                            continue;           // left blank = leave that rate alone
+                        }
+                        try {
+                            out.put(e.getKey(), Double.parseDouble(raw));
+                        } catch (Throwable ignored) {
+                            // A field that will not parse is skipped rather than
+                            // failing the whole save -- settings.write_rates ignores
+                            // anything it cannot read anyway.
+                        }
+                    }
+                    applyRates("set_rates_json", out.toString());
+                })
+                // Recovery, and the reason to keep it one tap away: getting back to a
+                // faithful build must never require remembering what the defaults were.
+                .setNeutralButton("Reset to retail", (d, w) -> applyRates("reset_rates_json", null))
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    /** Call one of the rate-writing entry points and report what the server ended up with. */
+    private void applyRates(String function, String payload) {
+        try {
+            PyObject main = ServerService.python(this).getModule("main");
+            String dir = getFilesDir().getAbsolutePath();
+            String json = (payload == null ? main.callAttr(function, dir)
+                                           : main.callAttr(function, dir, payload)).toString();
+            JSONObject parsed = new JSONObject(json);
+            if (parsed.has("error")) {
+                Toast.makeText(this, "Rates error: " + parsed.getString("error"),
+                               Toast.LENGTH_LONG).show();
+                return;
+            }
+            JSONObject changed = parsed.getJSONObject("changed");
+            Toast.makeText(this, changed.length() == 0
+                                 ? "Rates: retail (all 1.0)"
+                                 : "Rates changed: " + changed.toString(),
+                           Toast.LENGTH_LONG).show();
+        } catch (Throwable t) {
+            Toast.makeText(this, "Could not save rates: " + t, Toast.LENGTH_LONG).show();
+        }
+    }
+
+    /**
+     * Show the crash log.
+     *
+     * Under Chaquopy a traceback goes to logcat and nowhere else, and a phone hosting a
+     * session is not attached to adb -- so before this, any crash during actual play was
+     * unreadable by the time anyone thought to look. main.record_exception mirrors every
+     * traceback to <filesDir>/sevensins/crash.log, including the per-connection threads
+     * that previously failed completely silently.
+     *
+     * Deliberately does NOT require the server to be running: the case this matters most
+     * for is the server having died, when it is by definition not running.
+     */
+    private void openCrashLog() {
+        String text;
+        try {
+            text = ServerService.python(this).getModule("main")
+                                .callAttr("crash_log_text", getFilesDir().getAbsolutePath())
+                                .toString();
+        } catch (Throwable t) {
+            text = "Could not read the crash log: " + t;
+        }
+
+        TextView body = new TextView(this);
+        body.setText(text);
+        body.setTextIsSelectable(true);         // so a traceback can be copied out
+        body.setTypeface(android.graphics.Typeface.MONOSPACE);
+        body.setTextSize(11);
+        int pad = (int) (12 * getResources().getDisplayMetrics().density);
+        body.setPadding(pad, pad, pad, pad);
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(body);
+        // Horizontal scrolling too: a traceback's paths are long and wrapping them makes
+        // the file much harder to read on a phone.
+        android.widget.HorizontalScrollView wide = new android.widget.HorizontalScrollView(this);
+        wide.addView(scroll);
+
+        new AlertDialog.Builder(this)
+                .setTitle("Crash log")
+                .setView(wide)
+                .setPositiveButton("Close", null)
+                .setNeutralButton("Clear", (d, w) -> {
+                    try {
+                        ServerService.python(this).getModule("main").callAttr("clear_crash_log");
+                        Toast.makeText(this, "Crash log cleared", Toast.LENGTH_SHORT).show();
+                    } catch (Throwable t) {
+                        Toast.makeText(this, "Could not clear: " + t, Toast.LENGTH_LONG).show();
+                    }
+                })
+                .show();
     }
 
     /**

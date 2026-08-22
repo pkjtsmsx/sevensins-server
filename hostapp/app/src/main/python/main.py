@@ -48,6 +48,126 @@ _pkg_dir = None
 _state = {"titan": None, "bundles": None, "editor": None, "started": False}
 
 
+# --------------------------------------------------------------------- crash log
+#
+# Every failure path used to end at traceback.print_exc(), which under Chaquopy goes to
+# Android's logcat and nowhere else. A phone hosting a session is not attached to adb, so
+# any crash that happened during actual play was unreadable by the time anyone looked.
+# These write the same tracebacks to <base>/crash.log as well, and keep printing to
+# stderr so logcat behaviour is unchanged when a PC *is* attached.
+#
+# Two hooks are needed and they cover different things:
+#   * record_exception() -- for the run_* wrappers below, which catch Exception
+#     themselves. A caught exception never reaches an excepthook, so those call sites
+#     have to log explicitly.
+#   * threading.excepthook -- for the per-connection threads titan_server spawns (one per
+#     client). Those bodies do NOT catch, so an error mid-session unwinds straight past
+#     every wrapper here and was previously invisible to all of them. This is the most
+#     likely home of an unexplained in-game disconnect.
+
+CRASH_LOG_NAME = "crash.log"
+_CRASH_LOG_MAX = 256 * 1024             # rotate at 256K; a phone should not grow a log
+_crash_log_path = None
+_crash_lock = threading.Lock()
+
+
+def crash_log_path():
+    """Absolute path of the crash log, or None before configure_runtime_env has run."""
+    return _crash_log_path
+
+
+def _rotate_if_large(path):
+    try:
+        if os.path.getsize(path) > _CRASH_LOG_MAX:
+            os.replace(path, path + ".1")
+    except OSError:
+        pass
+
+
+def record_exception(where, exc_info=None):
+    """Append one traceback to the crash log and to stderr. Never raises.
+
+    `where` is a short label naming the thread or operation, so a log with several
+    entries can be read without guessing which server produced which failure.
+    """
+    import datetime
+    import traceback
+
+    if exc_info is None:
+        exc_info = sys.exc_info()
+    traceback.print_exception(*exc_info)            # unchanged logcat behaviour
+
+    path = _crash_log_path
+    if not path:
+        return
+    try:
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with _crash_lock:
+            _rotate_if_large(path)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"\n=== {stamp}  [{where}] ===\n")
+                traceback.print_exception(*exc_info, file=f)
+                f.flush()
+    except Exception:                               # noqa: BLE001
+        pass                    # logging a crash must never itself take the server down
+
+
+def crash_log_text(data_dir, limit=64 * 1024):
+    """The crash log for the UI's "View crash log" button, WITHOUT needing the server.
+
+    read_crash_log() alone returns "not initialised yet" until configure_runtime_env has
+    run, which would make the button useless in exactly the case it matters most -- the
+    server crashed on startup, so it is not running when you go looking. Pointing the
+    path at the same place start_server would costs nothing and never creates the file.
+    """
+    if _crash_log_path is None:
+        _install_crash_log(os.path.join(data_dir, "sevensins"))
+    return read_crash_log(limit)
+
+
+def read_crash_log(limit=64 * 1024):
+    """The tail of the crash log as text, for a "View crash log" button. Never raises."""
+    path = _crash_log_path
+    if not path:
+        return "crash log not initialised yet"
+    try:
+        size = os.path.getsize(path)
+        with open(path, encoding="utf-8", errors="replace") as f:
+            if size > limit:
+                f.seek(size - limit)
+                f.readline()                        # drop the partial first line
+            return f.read() or "(empty)"
+    except FileNotFoundError:
+        return "(no crashes recorded)"
+    except OSError as e:
+        return f"(could not read crash log: {e})"
+
+
+def clear_crash_log():
+    """Delete the crash log. Never raises."""
+    for suffix in ("", ".1"):
+        try:
+            os.remove((_crash_log_path or "") + suffix)
+        except OSError:
+            pass
+    return "cleared"
+
+
+def _install_crash_log(base):
+    """Point the crash log at <base>/crash.log and route stray thread errors into it."""
+    global _crash_log_path
+    _crash_log_path = os.path.join(base, CRASH_LOG_NAME)
+
+    def _thread_hook(args):
+        name = args.thread.name if args.thread is not None else "thread"
+        if args.exc_type is SystemExit:
+            return
+        record_exception(name, (args.exc_type, args.exc_value, args.exc_traceback))
+
+    threading.excepthook = _thread_hook
+    sys.excepthook = lambda t, e, tb: record_exception("main", (t, e, tb))
+
+
 def _package_dir():
     """Absolute path of the extracted `sevensins` package (real files, not the bundle)."""
     global _pkg_dir
@@ -74,6 +194,11 @@ def configure_runtime_env(data_dir):
     patch_root = os.path.join(base, "patch_root")
     for d in (accounts, cache, os.path.join(patch_root, "bundles")):
         os.makedirs(d, exist_ok=True)
+
+    # Earliest point at which a writable directory is guaranteed. Installed here rather
+    # than in start_server so a failure during the imports or path setup that follow is
+    # captured too.
+    _install_crash_log(base)
 
     pkg = _package_dir()
     # The design cache must be WRITABLE: design_data._ensure_stamp creates the stamp file
@@ -159,22 +284,19 @@ def start_server(data_dir):
         try:
             titan_server.main(TITAN_PORT)
         except Exception:                       # noqa: BLE001 -- surface, never die silent
-            import traceback
-            traceback.print_exc()
+            record_exception("titan")
 
     def run_bundles():
         try:
             bundle_server.serve(BUNDLE_PORT, os.environ["SEVENSINS_PATCH_ROOT"])
         except Exception:                       # noqa: BLE001
-            import traceback
-            traceback.print_exc()
+            record_exception("bundles")
 
     def run_editor():
         try:
             save_editor.serve(EDITOR_PORT, "127.0.0.1")
         except Exception:                       # noqa: BLE001 -- never take the game down
-            import traceback                    # for a failure in the optional editor
-            traceback.print_exc()
+            record_exception("editor")
 
     _state["titan"] = threading.Thread(target=run_titan, name="titan", daemon=True)
     _state["bundles"] = threading.Thread(target=run_bundles, name="bundles", daemon=True)
@@ -199,8 +321,7 @@ def stop_server():
         bundle_server.shutdown()
         save_editor.shutdown()
     except Exception:                           # noqa: BLE001
-        import traceback
-        traceback.print_exc()
+        record_exception("shutdown")
     for key in ("titan", "bundles", "editor"):
         t = _state[key]
         if t is not None:
@@ -217,6 +338,71 @@ def is_running():
 def editor_url():
     """The address the Edit-save button opens. Loopback: only this phone can reach it."""
     return f"http://127.0.0.1:{EDITOR_PORT}/"
+
+
+# ---- server rates ----------------------------------------------------------------
+#
+# Deliberately THIN passthroughs. This file is the one thing a hot update cannot reach
+# (Chaquopy loads main.py directly; active_update_dir only affects the package dir on
+# sys.path), so every rule about what a rate is, what it defaults to and how it is
+# validated lives in `settings` -- which IS hot-updatable -- and the only thing frozen
+# into the APK is "hand a JSON blob back and forth". Adding a rate needs no rebuild.
+#
+# These work with the server STOPPED: rates are just a file next to the accounts, and
+# the UI should be usable before anything is running.
+
+
+def _settings_module(data_dir):
+    """Import `settings` with the account dir pointed at the same place the server uses.
+
+    Not configure_runtime_env(): that seeds accounts and copies the design cache, which
+    is a lot of work to do just to read five numbers. This sets only what settings reads
+    and leaves the full bootstrap to start_server.
+    """
+    accounts = os.path.join(data_dir, "sevensins", "accounts")
+    os.environ.setdefault("SEVENSINS_ACCOUNTS", accounts)
+    pkg = _package_dir()
+    if pkg not in sys.path:
+        sys.path.insert(0, pkg)
+    import settings
+    return settings
+
+
+def rates_json(data_dir):
+    """-> JSON {"rates": {...}, "defaults": {...}, "changed": {...}} for the UI."""
+    import json
+    try:
+        settings = _settings_module(data_dir)
+        return json.dumps({"rates": settings.all_rates(),
+                           "defaults": dict(settings.RATES),
+                           "changed": settings.non_default_rates()})
+    except Exception as exc:                    # noqa: BLE001 -- the UI shows the error
+        record_exception("rates_json")
+        return json.dumps({"error": str(exc)})
+
+
+def set_rates_json(data_dir, payload):
+    """Apply a JSON {name: multiplier} map. -> the same shape rates_json returns."""
+    import json
+    try:
+        settings = _settings_module(data_dir)
+        settings.write_rates(json.loads(payload or "{}"))
+    except Exception as exc:                    # noqa: BLE001
+        record_exception("set_rates_json")
+        return json.dumps({"error": str(exc)})
+    return rates_json(data_dir)
+
+
+def reset_rates_json(data_dir):
+    """Put every rate back to 1.0 -- the retail-faithful build."""
+    import json
+    try:
+        settings = _settings_module(data_dir)
+        settings.write_rates({name: settings.RATES[name] for name in settings.RATES})
+    except Exception as exc:                    # noqa: BLE001
+        record_exception("reset_rates_json")
+        return json.dumps({"error": str(exc)})
+    return rates_json(data_dir)
 
 
 def status(data_dir):
