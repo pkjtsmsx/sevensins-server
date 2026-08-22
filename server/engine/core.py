@@ -417,11 +417,27 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
                 # unendable. Unknown recipient is skipped, not guessed.
                 recip = _heal_recipients(e.get("target"), caster, targets, units, out,
                                          op, skill_id)
+                # WHAT the percentage is a percentage OF. The pack writes heals both
+                # ways -- "recovers the caster's Max HP by 15%" and "restores HP of all
+                # allies by 250% ATK" -- and the two differ by an order of magnitude.
+                # Reading every heal as max-HP made Michael's zero-cooldown skill heal
+                # each ally for 250% of their own max HP, i.e. a guaranteed full-party
+                # heal every turn. An ATK heal scales off the CASTER, a max-HP heal off
+                # the unit being healed.
+                basis = e.get("basis") or "max_hp"
+                # Three bases, and only the last one scales per recipient.
+                fixed = None
+                if basis == "atk":
+                    fixed = formula.effective_atk(caster)
+                elif basis == "caster_max_hp":
+                    fixed = float(caster.max_hp)
                 for tgt in recip:
-                    amount = int(tgt.max_hp * pct / 100.0)
+                    pool = fixed if fixed is not None else float(tgt.max_hp)
+                    amount = int(pool * pct / 100.0)
                     if apply_damage:
                         tgt.hp = min(tgt.max_hp, tgt.hp + amount)
-                    out.heals.append({"target": tgt.order, "amount": amount})
+                    out.heals.append({"target": tgt.order, "amount": amount,
+                                      "basis": basis})
         elif op == "modify_gauge":
             pct = e.get("percent")
             if pct is None:
@@ -567,7 +583,10 @@ def _rider(caster, eff, targets, out, rng, apply_damage, skill_id):
                             "skill": skill_id})
         return
     if kind == "heal":
-        amount = int(caster.atk * pct / 100.0)
+        # Always ATK-based -- the rider's prose is "deals N% ATK as damage and recovers
+        # the caster's HP" -- but read through the same effective_atk as the main heal
+        # path, so a buffed caster heals for more in both.
+        amount = int(formula.effective_atk(caster) * pct / 100.0)
         if apply_damage:
             caster.hp = min(caster.max_hp, caster.hp + amount)
         out.heals.append({"target": caster.order, "amount": amount, "from": "rider"})

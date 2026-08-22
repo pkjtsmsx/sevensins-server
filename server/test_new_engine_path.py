@@ -620,6 +620,51 @@ def check_nested_status_scripts():
           not b._pending_status_rows, str(b._pending_status_rows))
 
 
+def check_heal_basis():
+    """A heal's percentage is a percentage OF something, and the pack states which.
+
+    Reading every heal as a fraction of the recipient's max HP made Michael's
+    zero-cooldown "restores HP of all allies by 250% ATK" a guaranteed full-party heal
+    each turn -- it looked like a balance decision rather than a unit bug.
+    """
+    b, _ = a_battle(1000005, party=[20901, 20801])
+    mic = next((u for u in b.units.values() if u.char_id == 20901), None)
+    check("Michael is in the fixture party", mic is not None)
+    if mic is None:
+        return
+    spec = specs.skill(2090102) or {}
+    heal = next((e for e in spec.get("effects", []) if e["op"] == "heal"), None)
+    check("Gate of Judgement's heal is ATK-based",
+          (heal or {}).get("basis") == "atk", str(heal))
+    check("  ...and goes to allies, not the enemy it attacks",
+          (heal or {}).get("target") == "allies", str(heal))
+
+    for u in b.units.values():
+        if u.team == bt.TEAM_PLAYER:
+            u.hp = max(1, u.max_hp // 10)
+    boss = next(u for u in b.units.values() if u.team == bt.TEAM_ENEMY)
+    out = core.execute(mic, spec, list(b.units.values()), random.Random(3),
+                       chosen=[boss])
+    healed = [h for h in out.heals if h.get("basis") == "atk"]
+    check("the party is healed", bool(healed), str(out.heals))
+    for h in healed:
+        # The whole point: an ATK heal is a flat number, so it must NOT scale with the
+        # recipient's max HP, and must not be anywhere near a full heal.
+        check(f"  heal {h['amount']} is 250% of Michael's ATK, not of a max HP bar",
+              h["amount"] < b.units[h["target"]].max_hp,
+              f"{h['amount']} vs max_hp {b.units[h['target']].max_hp}")
+
+    # "20% of the CASTER's Max HP" is a third basis, and the possessive is not a
+    # recipient: Rainbow Wheel was read as a caster-only heal because "caster" appears.
+    rw = specs.skill(151002521) or {}
+    rwh = next((e for e in rw.get("effects", []) if e["op"] == "heal"), None)
+    if rwh:
+        check("a caster-max-HP heal is its own basis",
+              rwh.get("basis") == "caster_max_hp", str(rwh))
+        check("  ...and still goes to all allies",
+              rwh.get("target") == "allies", str(rwh))
+
+
 def main():
     was = bt.NEW_ENGINE
     bt.NEW_ENGINE = True                     # the whole point of this file
@@ -637,7 +682,8 @@ def main():
                    check_divine_fallen_toggle,
                    check_passive_statuses_resolve,
                    check_no_unsendable_ids_on_the_wire,
-                   check_nested_status_scripts):
+                   check_nested_status_scripts,
+                   check_heal_basis):
             print(f"\n{fn.__name__}:")
             fn()
     finally:

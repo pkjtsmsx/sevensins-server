@@ -139,7 +139,12 @@ def attack_rider(r):
 #   revive  "Revive 2 random dead allies and restore 25% of their HP"
 EFFECT_WORD = {
     "modify_gauge": re.compile(r"move gauge|行動值", re.I),
-    "heal": re.compile(r"restores?|recovers?|heals?|回復|恢復|補血", re.I),
+    # WORD-BOUNDED. Without \b, `heals?` matches inside "Healthy Strike IV: ... ATK+35%",
+    # so a stat buff's clause was being read as a heal clause -- and since that clause
+    # says ATK, it dragged the heal's magnitude, recipient AND basis off a line that
+    # has nothing to do with healing. 365 rows were landing in the ATK bucket that way.
+    "heal": re.compile(r"(?:\b(?:restores?|recovers?|heals?|healing)\b|回復|恢復|補血)",
+                       re.I),
     "revive": re.compile(r"reviv|resurrect|復活", re.I),
 }
 
@@ -148,8 +153,63 @@ _GAUGE_PCT = re.compile(r"(\d+(?:\.\d+)?)\s*%")
 _GAUGE_SELF = re.compile(r"caster|self|its own|自身|我方自身", re.I)
 _GAUGE_ALLY = re.compile(r"\ball(y|ies)\b|我方", re.I)
 _GAUGE_ENEMY = re.compile(r"enem|敵方|对方", re.I)
+# "the caster's Max HP", "its own ATK", "the target's SPD" -- the owner of a STAT the
+# magnitude is computed from, which is not the same thing as the recipient.
+_POSSESSIVE_SOURCE = re.compile(
+    r"\b(?:the\s+)?(?:caster|self|its\s+own|target|enemy|ally)'?s?\s+"
+    r"(?:max(?:imum)?\s*)?(?:HP|ATK|DEF|SPD|CRI|CRT)\b", re.I)
+
 _GAUGE_DOWN = re.compile(r"reduc|decreas|lower|lose|下降|減少|降低", re.I)
 _GAUGE_UP = re.compile(r"increas|rise|gain|restor|提升|增加|上升", re.I)
+
+
+# What the heal's percentage is a percentage OF. The engine treated every heal as a
+# fraction of the recipient's MAX HP, so Michael's "restores HP of all allies by 250%
+# ATK" healed each ally for 250% of their own max HP -- a guaranteed full-party heal on
+# a zero-cooldown skill, which is what made it look like a design mistake rather than
+# ours. The two bases differ by an order of magnitude, so guessing is not an option.
+_HEAL_ATK = re.compile(r"\bATK\b|攻擊力", re.I)
+_HEAL_CASTER_HP = re.compile(
+    r"\b(?:the\s+)?(?:caster|self|its\s+own)'?s?\s+(?:max(?:imum)?\s*)?HP\b", re.I)
+_HEAL_HP = re.compile(r"\b(max(?:imum)?\s*HP|HP)\b|生命|血量", re.I)
+
+
+def heal_basis(r):
+    """-> "atk" or "max_hp" for a heal's percentage, from its own clause.
+
+    Decided by what the percentage ATTACHES to, because the pack writes it both ways
+    round: "by 250% ATK" puts the noun after the number, "recovers the caster's Max HP
+    by 15%" puts it before. Looking forward first and only then behind is what keeps
+    those apart. `max_hp` is the fallback -- it is the overwhelmingly common form, and
+    it is the conservative one: reading an ATK heal as max-HP over-heals, but reading a
+    max-HP heal as ATK would silently nerf every heal in the game.
+    """
+    note = r.get("_note1_en") or ""
+    m = EFFECT_WORD["heal"].search(note)
+    if not m:
+        return "max_hp"
+    # The clause runs from the heal verb to the end of its sentence, so a LATER
+    # sentence's "% ATK" damage line cannot be read as this heal's basis.
+    clause = re.split(r"(?<=[.!?])\s", note[m.start():])[0][:180]
+    pm = re.search(r"(\d+(?:\.\d+)?)\s*%", clause)
+    if not pm:
+        return "max_hp"
+    # WHOSE max HP, checked before the generic HP form: "restores HP to all allies by
+    # 20% of the caster's Max HP" scales off the CASTER once, not off each recipient --
+    # a party heal from a tanky healer is a flat number, not a fraction of whoever
+    # receives it. Asking "is this HP-based?" first swallowed the distinction.
+    def hp_kind():
+        return "caster_max_hp" if _HEAL_CASTER_HP.search(clause) else "max_hp"
+
+    after = clause[pm.end():pm.end() + 40]
+    if _HEAL_ATK.search(after):
+        return "atk"
+    if _HEAL_HP.search(after):
+        return hp_kind()
+    before = clause[:pm.start()]
+    if _HEAL_ATK.search(before) and not _HEAL_HP.search(before):
+        return "atk"
+    return hp_kind()
 
 
 def clause_percent(r, op):
@@ -194,12 +254,18 @@ def clause_target(r, op):
     if not m:
         return None
     clause = note[max(0, m.start() - 45):m.end() + 80]
-    if _GAUGE_SELF.search(clause):
-        return "caster"
-    if _GAUGE_ALLY.search(clause):
-        return "allies"
-    if _GAUGE_ENEMY.search(clause):
-        return "targets"
+    # A POSSESSIVE names the source of the number, not the recipient. Rainbow Wheel
+    # "restores HP to all allies by 20% of the caster's Max HP" was being read as a
+    # caster-only heal purely because the word "caster" appears in it -- so a full party
+    # heal landed on one unit. Strip the possessives before asking who it acts on.
+    stripped = _POSSESSIVE_SOURCE.sub(" ", clause)
+    for probe in (stripped, clause):
+        if _GAUGE_ALLY.search(probe):
+            return "allies"
+        if _GAUGE_SELF.search(probe):
+            return "caster"
+        if _GAUGE_ENEMY.search(probe):
+            return "targets"
     return None
 
 
@@ -510,6 +576,8 @@ def effects(rows, r):
                 # Same recipient problem as the gauge: a heal on an attack skill goes to
                 # allies, not to the enemy being hit.
                 entry["target"] = clause_target(r, name)
+                if name == "heal":
+                    entry["basis"] = heal_basis(r)
             out.append(entry)
         else:
             # Not decoded. Kept OUT of `effects` on purpose: the engine executes
