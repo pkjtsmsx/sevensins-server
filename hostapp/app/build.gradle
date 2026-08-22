@@ -32,6 +32,16 @@ def runtimeDataFiles = fileList.data_files ?: []
 
 tasks.register('stageServer', Copy) {
     description = 'Stage the Seven Sins server package into the Chaquopy python source dir.'
+    // **server_files.json is read at CONFIGURATION time**, above, into the include
+    // patterns below -- so Gradle cannot infer it as an input, and editing the list
+    // leaves this task UP-TO-DATE while the newly-listed package is silently never
+    // staged. Declaring it explicitly is what forces a re-stage when the list changes.
+    //
+    // Not hypothetical: `engine` was added to `packages` and stageServer went on
+    // reporting UP-TO-DATE, so an APK was built, installed and verified with no
+    // engine/ in it at all. Every module imported fine except battle.py, which would
+    // have died on `from engine import core` the moment the server started.
+    inputs.file(file("${rootDir}/server_files.json"))
     doFirst {
         runtimeModules.each { m ->
             if (!file("${serverDir}/${m}").exists()) {

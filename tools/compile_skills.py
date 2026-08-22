@@ -269,6 +269,66 @@ def clause_target(r, op):
     return None
 
 
+# --- op 115's delta and recipient ---------------------------------------------------
+#
+# All 1,012 sites carried no delta and no recipient, so the engine could not run any of
+# them (`modify_cd` was a `pass`) and `CD Reduction Block` had nothing to block. Same
+# shape as the gauge: the number sits next to the words "Skill CD"/"cooldown", and a
+# turn count is a small integer, not a percentage.
+_CD_WORD = re.compile(r"skill\s*cd|cooldown|冷卻", re.I)
+_NUM_WORD = r"(\d+|" + "|".join(sp.WORD_NUM) + r")"
+
+
+def _num_token(tok):
+    tok = (tok or "").strip().lower()
+    return int(tok) if tok.isdigit() else sp.WORD_NUM.get(tok)
+
+
+_CD_TURNS = re.compile(r"\bby\s+" + _NUM_WORD + r"\b|\b" + _NUM_WORD +
+                       r"\s*turns?\b|[+\-]\s*(\d+)", re.I)
+_CD_DOWN = re.compile(r"reduc|decreas|refresh|lower|shorten|減少|降低", re.I)
+_CD_UP = re.compile(r"increas|delay|extend|\+|增加", re.I)
+
+
+def cd_effect(r):
+    """-> {turns, target} for op 115, read from the cooldown clause only.
+
+    `turns` is SIGNED: negative refreshes (shortens), positive delays. Unstated stays
+    None and the engine skips the effect rather than guessing a direction -- a sign
+    error here silently hands a cast a free turn.
+    """
+    note = r.get("_note1_en") or ""
+    m = _CD_WORD.search(note)
+    if not m:
+        return {"turns": None, "target": None}
+    clause = note[max(0, m.start() - 60):m.end() + 80]
+    turns = None
+    tm = _CD_TURNS.search(note[m.end():m.end() + 60]) or \
+        _CD_TURNS.search(note[max(0, m.start() - 40):m.start()])
+    if tm:
+        tok = next((g for g in tm.groups() if g), None)
+        turns = _num_token(tok)
+    if turns is not None:
+        # "increase" wins a tie, same rule as the gauge: an unrelated "removes"/"reduces"
+        # in the same sentence must not flip a delay into a refresh.
+        if _CD_DOWN.search(clause) and not _CD_UP.search(clause):
+            turns = -turns
+    return {"turns": turns, "target": clause_target_in(clause)}
+
+
+def clause_target_in(clause):
+    """clause_target's decision, for a clause the caller already located."""
+    stripped = _POSSESSIVE_SOURCE.sub(" ", clause)
+    for probe in (stripped, clause):
+        if _GAUGE_ALLY.search(probe):
+            return "allies"
+        if _GAUGE_SELF.search(probe):
+            return "caster"
+        if _GAUGE_ENEMY.search(probe):
+            return "targets"
+    return None
+
+
 def gauge_effect(r):
     """-> {percent, target, source} for op 116, read from the gauge CLAUSE only.
 
@@ -547,7 +607,9 @@ def effects(rows, r):
                         "name": (rows.get(aid) or {}).get("_name_en")
                                 or (rows.get(aid) or {}).get("_name")})
         elif op == OP_MODIFY_CD:
-            out.append({"op": "modify_cd", "slot": i})
+            entry = {"op": "modify_cd", "slot": i}
+            entry.update(cd_effect(r))
+            out.append(entry)
         elif op == OP_ATTACK_RIDER and attack_rider(r):
             out.append({"op": "attack_rider", "slot": i, **attack_rider(r)})
         elif op in OP_EFFECT_NO_OPERAND:

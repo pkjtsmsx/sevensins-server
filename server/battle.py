@@ -21,6 +21,7 @@ import dataclasses
 import json
 from typing import NamedTuple
 import os
+import random
 import re
 
 import design_data as dd
@@ -2072,16 +2073,30 @@ class Battle:
         (checked first: a unit can be both taunted-by-an-enemy and charmed at once, and
         losing control of your target trumps being drawn to a specific one). forced_target
         (Taunt) redirects to whoever inflicted it, if that unit is still alive."""
+        if NEW_ENGINE:
+            # THREE redirects, not one flag -- see engine/status.redirect. The registry
+            # states each exactly: Taunt "can only attack the taunt caster", Charm/
+            # Enchant "will attack allies", Confuse "will attack both allies and
+            # enemies". The old single `confused_targeting` flag could not express the
+            # difference, and on this path never fired at all.
+            got = _engine_status.redirect(attacker)
+            if not got:
+                return None
+            kind, source = got
+            live = [u for u in self.units.values() if u.alive and u is not attacker]
+            if kind == "taunt":
+                src = self.units.get(source)
+                return src if (src and src.alive) else None
+            pool = [u for u in live if u.team == attacker.team] if kind == "allies" \
+                else live
+            # Random, not first: "attacks allies" is a scramble, and always picking the
+            # same slot makes a control effect look deterministic to the player.
+            return random.choice(pool) if pool else None
         if fx.has_flag(attacker, "confused_targeting"):
             own = [u for u in self.units.values()
                   if u.team == attacker.team and u is not attacker and u.alive]
             if own:
                 return own[0]
-            return None
-        # Taunt/forced targeting is legacy-only for now: the engine records the status
-        # but has no redirect rule yet, so on the new path nothing forces a target. That
-        # is a KNOWN gap rather than a silent one -- see the plan's phase list.
-        if NEW_ENGINE:
             return None
         for st in attacker.statuses:
             if st.taunt_source and "forced_target" in st.definition.get("flags", []):

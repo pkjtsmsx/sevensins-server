@@ -111,6 +111,10 @@ class Outcome:
     heals: List[dict] = dataclasses.field(default_factory=list)
     gauge: List[dict] = dataclasses.field(default_factory=list)
     revives: List[dict] = dataclasses.field(default_factory=list)
+    # Signed cooldown changes: negative refreshes, positive delays. The gauge and the
+    # cooldown are both server-authoritative and travel in `sync`/`skill_list`, not as
+    # DamageInfo rows -- see wire.py on why mode 4 is never emitted.
+    cooldowns: List[dict] = dataclasses.field(default_factory=list)
     # Effects the compiled spec flagged as not executable, carried through so a caller
     # can log or assert on them instead of silently running a partial skill.
     skipped: List[dict] = dataclasses.field(default_factory=list)
@@ -504,7 +508,19 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
                     chosen=(targets[0].order if targets else None),
                     depth=depth + 1, apply_damage=apply_damage))
         elif op == "modify_cd":
-            pass                                  # cooldown bookkeeping is the caller's
+            turns = e.get("turns")
+            if turns is None:
+                out.skipped.append({"op": op, "why": "delta unknown", "skill": skill_id})
+            else:
+                # Recipient read from the clause like everything else -- a CD change is
+                # as often "the ally with the highest ATK" as it is the unit being hit.
+                for tgt in _status_recipients(e.get("target"), caster, targets, units):
+                    if turns < 0 and _status.blocks_cd_reduction(tgt):
+                        # A refresh is refused; a DELAY still lands.
+                        out.skipped.append({"op": op, "why": "cd reduction blocked",
+                                            "skill": skill_id, "target": tgt.order})
+                        continue
+                    out.cooldowns.append({"target": tgt.order, "turns": int(turns)})
         else:
             out.skipped.append({"op": op, "why": "unhandled", "skill": skill_id})
 
@@ -524,6 +540,31 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
         out.skipped.append({"op": f"raw_{u.get('opcode')}", "why": "undecoded opcode",
                             "skill": skill_id})
     return out
+
+
+def _report(out, applied):
+    """Put a passive's damage and healing on the WIRE, not just on the unit.
+
+    `fire()` mutates HP and returns what it did; every caller discarded that, so a
+    counter-attack, a retaliation or an on-death heal changed the server's numbers and
+    the client was never told -- no damage popup, and the HP bar only caught up at the
+    next `sync`. This is the hook counters ride: a counter is
+    `Rule(ON_DAMAGE_TAKEN, effect=DAMAGE, to=ATTACKER, ...)`, which the rule table
+    already expresses.
+    """
+    for target, effect, amount in applied or []:
+        if not amount:
+            continue
+        if effect == _passives.DAMAGE:
+            # Past the last swing, same as the on-hit extra: wire.py clamps it into the
+            # final group, so a counter shows as part of the last hit rather than
+            # colliding with a row the unit already has in swing 0.
+            swing = max((s.swing for s in out.strikes), default=0) + 1
+            out.strikes.append(Strike(swing=swing, target=target.order,
+                                      amount=int(amount), detail={"counter": True}))
+        elif effect == _passives.HEAL:
+            out.heals.append({"target": target.order, "amount": int(amount),
+                              "basis": "passive"})
 
 
 def _damage_hooks(caster, targets, out, units, rng):
@@ -548,20 +589,23 @@ def _damage_hooks(caster, targets, out, units, rng):
             swing = max((s.swing for s in out.strikes), default=0) + 1
             out.strikes.append(Strike(swing=swing, target=tgt.order, amount=extra,
                                       detail={"on_hit_extra": True}))
-        _passives.fire_all(_passives.ON_DAMAGE_TAKEN, [tgt], units,
-                           ctx={"attacker": caster, "rng": rng},
-                           fired=getattr(caster, "_passives_fired", None))
+        _report(out, _passives.fire_all(
+            _passives.ON_DAMAGE_TAKEN, [tgt], units,
+            ctx={"attacker": caster, "rng": rng},
+            fired=getattr(caster, "_passives_fired", None)))
 
-    _passives.fire_all(_passives.ON_DAMAGE_DEALT, [caster], units, ctx=ctx,
-                       fired=getattr(caster, "_passives_fired", None))
+    _report(out, _passives.fire_all(
+        _passives.ON_DAMAGE_DEALT, [caster], units, ctx=ctx,
+        fired=getattr(caster, "_passives_fired", None)))
 
     # Deaths this skill caused. Fired for every unit's passive, not just the killer's:
     # Metatron revives on an ALLY's death, and she may not be the one who acted.
     for tgt in targets:
         if not tgt.alive:
-            _passives.fire_all(_passives.ON_DEATH, list(units), units,
-                               ctx={"victim": tgt, "attacker": caster, "rng": rng},
-                               fired=getattr(caster, "_passives_fired", None))
+            _report(out, _passives.fire_all(
+                _passives.ON_DEATH, list(units), units,
+                ctx={"victim": tgt, "attacker": caster, "rng": rng},
+                fired=getattr(caster, "_passives_fired", None)))
 
 
 def _flag_deaths(out, targets):

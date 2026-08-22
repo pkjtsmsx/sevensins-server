@@ -71,6 +71,9 @@ class Active:
     stack_cap: Optional[int] = None
     unremovable: bool = False
     source_atk: Optional[int] = None
+    # WHO inflicted it. Needed by Taunt, which redirects to "the taunt caster" -- a
+    # magnitude cannot express that. Defaults to None so an older save restores cleanly.
+    source_order: Optional[str] = None
     shield_hp: int = 0
 
     @property
@@ -183,6 +186,7 @@ def apply_event(unit, event, caster=None):
         magnitude=event.magnitude, stack_cap=cap,
         unremovable=bool(row.get("unremovable")),
         source_atk=int(getattr(caster, "atk", 0) or 0) if caster is not None else None,
+        source_order=getattr(caster, "order", None) if caster is not None else None,
     )
     unit.statuses.append(active)
     return active
@@ -571,6 +575,21 @@ _HEAL_BLOCK = re.compile(r"cannot be (?:healed|cured)", re.I)
 _HEAL_BLOCK_NOT = re.compile(r"immunit|immune|removes", re.I)
 
 
+# 4230 "CD Reduction Block": "cannot receive Skill CD reduction effect". It blocks a
+# REFRESH only -- a delay still lands, which is why the check is on the sign rather than
+# on the op.
+_CD_BLOCK = re.compile(r"cannot receive[^.]{0,30}cd reduction|cannot[^.]{0,20}reduce"
+                       r"[^.]{0,20}(?:skill\s*)?cd", re.I)
+
+
+def blocks_cd_reduction(unit):
+    for st in _actives(unit):
+        text = (_registry(st.status_id) or {}).get("description") or ""
+        if _CD_BLOCK.search(text):
+            return True
+    return False
+
+
 def blocks_heal(unit):
     """Does a status stop this unit being healed outright? (`Block Heal`.)
 
@@ -582,6 +601,61 @@ def blocks_heal(unit):
         if _HEAL_BLOCK.search(text) and not _HEAL_BLOCK_NOT.search(text):
             return True
     return False
+
+
+# --- forced / scrambled targeting ----------------------------------------------------
+#
+# THREE different redirects, which the old engine's single `confused_targeting` flag
+# could not tell apart. Each states itself exactly in the registry:
+#
+#   608/674 Taunt    "can only attack the taunt caster before the effect wears off"
+#   612 Enchant,     "they will attack allies before the effect wears off"
+#   619 Charm        (Charm adds "using normal attacks")
+#   611/615 Confuse  "will attack both allies and enemies"
+#
+# Precedence: losing control of your target beats being drawn to a specific one, so
+# Confuse/Charm outrank Taunt.
+_REDIRECT_TAUNT = re.compile(r"only attack the taunt caster", re.I)
+_REDIRECT_ALLIES = re.compile(r"will attack allies", re.I)
+_REDIRECT_ANY = re.compile(r"attack both allies and enemies", re.I)
+_REDIRECT_NOT = re.compile(r"immunit|immune", re.I)
+_REDIRECT_IDS = None
+
+
+def _redirect_ids():
+    """-> {status_id: "taunt" | "allies" | "any"}."""
+    global _REDIRECT_IDS
+    if _REDIRECT_IDS is None:
+        _REDIRECT_IDS = {}
+        for sid, row in (specs.statuses() or {}).items():
+            text = row.get("description") or ""
+            if not text or _REDIRECT_NOT.search(text):
+                continue
+            if _REDIRECT_ANY.search(text):
+                _REDIRECT_IDS[int(sid)] = "any"
+            elif _REDIRECT_ALLIES.search(text):
+                _REDIRECT_IDS[int(sid)] = "allies"
+            elif _REDIRECT_TAUNT.search(text):
+                _REDIRECT_IDS[int(sid)] = "taunt"
+    return _REDIRECT_IDS
+
+
+def redirect(unit):
+    """-> ("any"|"allies"|"taunt", source_order) for this unit's control statuses.
+
+    None when nothing redirects it. Returns the KIND rather than a target so the caller
+    can apply it against the live field -- the taunt source may have died since.
+    """
+    table = _redirect_ids()
+    found = {}
+    for st in _actives(unit):
+        kind = table.get(st.status_id)
+        if kind:
+            found.setdefault(kind, st.source_order)
+    for kind in ("any", "allies", "taunt"):        # precedence, see above
+        if kind in found:
+            return kind, found[kind]
+    return None
 
 
 def blocks_gauge_gain(unit):

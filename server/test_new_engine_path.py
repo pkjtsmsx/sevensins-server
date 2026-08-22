@@ -700,6 +700,53 @@ def check_seals_and_heal_block():
     check("  ...but Block Heal does", est.blocks_heal(victim))
 
 
+def check_control_redirects_and_cooldowns():
+    """Taunt / Charm / Confuse are THREE redirects, and cooldown changes now run."""
+    b, _ = a_battle(1000005)
+    a = next(u for u in b.units.values() if u.team == bt.TEAM_PLAYER)
+    boss = next(u for u in b.units.values() if u.team == bt.TEAM_ENEMY)
+    a.statuses = [x for x in a.statuses if getattr(x, "status_id", 0) not in
+                  (608, 611, 619)]
+    check("with no control status nothing is forced", b._forced_target(a) is None)
+
+    a.statuses.append(est.Active(status_id=608, name="Taunt", kind="control",
+                                 category="misc", remaining=2,
+                                 source_order=boss.order))
+    check("Taunt redirects to whoever inflicted it",
+          getattr(b._forced_target(a), "order", None) == boss.order)
+
+    a.statuses.append(est.Active(status_id=619, name="Charm", kind="control",
+                                 category="misc", remaining=2, source_order=boss.order))
+    t = b._forced_target(a)
+    check("Charm turns the attack on the attacker's OWN side, outranking Taunt",
+          t is not None and t.team == a.team, getattr(t, "order", None))
+
+    a.statuses.append(est.Active(status_id=611, name="Confuse", kind="control",
+                                 category="misc", remaining=2, source_order=boss.order))
+    sides = {b._forced_target(a).team for _ in range(60)}
+    check("Confuse can hit either side", len(sides) == 2, str(sides))
+
+    # Cooldowns: op 115 was a `pass`, and every one of its 1,012 sites carried no delta.
+    for u in b.units.values():
+        u.cooldowns = [3, 3, 3, 0]
+    spec = {"id": 1, "swings": 1, "type": "skill",
+            "effects": [{"op": "modify_cd", "turns": -1, "target": "allies"}]}
+    out = core.execute(a, spec, list(b.units.values()), random.Random(1), chosen=[boss])
+    check("a cooldown refresh is produced", bool(out.cooldowns), str(out.cooldowns))
+    ally = next(u for u in b.units.values()
+                if u.team == a.team and u.order != a.order)
+    ally.statuses.append(est.Active(status_id=4230, name="CD Reduction Block",
+                                    kind="other", category="misc", remaining=2))
+    out = core.execute(a, spec, list(b.units.values()), random.Random(1), chosen=[boss])
+    check("  ...and CD Reduction Block refuses it",
+          any(s.get("why") == "cd reduction blocked" for s in out.skipped),
+          str(out.skipped))
+    spec["effects"][0]["turns"] = 1
+    out = core.execute(a, spec, list(b.units.values()), random.Random(1), chosen=[boss])
+    check("  ...but a DELAY still lands on the blocked unit",
+          any(c["target"] == ally.order for c in out.cooldowns), str(out.cooldowns))
+
+
 def main():
     was = bt.NEW_ENGINE
     bt.NEW_ENGINE = True                     # the whole point of this file
@@ -719,7 +766,8 @@ def main():
                    check_no_unsendable_ids_on_the_wire,
                    check_nested_status_scripts,
                    check_heal_basis,
-                   check_seals_and_heal_block):
+                   check_seals_and_heal_block,
+                   check_control_redirects_and_cooldowns):
             print(f"\n{fn.__name__}:")
             fn()
     finally:

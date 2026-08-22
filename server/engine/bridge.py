@@ -38,6 +38,16 @@ def _write_back(battle, outcome):
     still has to happen here is the OLD engine's own accounting: the clear-rating stars
     read the damage tallies, so skipping them would silently change star awards.
     """
+    # Cooldowns, like the gauge, are server-authoritative and reach the client through
+    # the skill-list payload rather than as a DamageInfo row. Clamped at 0 -- a refresh
+    # cannot make a skill "more than ready".
+    for c in _flat_cooldowns(outcome):
+        u = battle.units.get(c["target"])
+        if u is None or not getattr(u, "cooldowns", None):
+            continue
+        for i in range(len(u.cooldowns)):
+            u.cooldowns[i] = max(0, u.cooldowns[i] + int(c["turns"]))
+
     # The move gauge travels in `sync`, NOT as a mode-4 DamageInfo row (see wire.py).
     # Applied here so the next BattleCmd carries the new Scv.
     for g in _flat_gauge(outcome):
@@ -78,6 +88,13 @@ def _flat_gauge(outcome):
     for ch in outcome.children:
         out.extend(_flat_gauge(ch))
     return out
+
+def _flat_cooldowns(outcome):
+    out = list(outcome.cooldowns)
+    for child in outcome.children:
+        out += _flat_cooldowns(child)
+    return out
+
 
 
 def _flat_strikes(outcome):
