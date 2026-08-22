@@ -192,6 +192,58 @@ def test_malformed_save_fails_loudly():
     check("a malformed saved-battle dict raises instead of silently degrading", ok)
 
 
+def test_legacy_statuses_migrate_to_the_engine():
+    """A battle saved by the OLD path restores onto the NEW engine.
+
+    Battles are persisted on every message, so at any moment there are live saves whose
+    units carry `battle_effects.Status` dicts. A deploy that flipped the engine without
+    this would either crash the restore or silently keep statuses the engine cannot
+    read -- and an in-progress raid is not a thing to throw away on a deploy.
+    """
+    import battle_effects as fx
+    from engine import status as est
+
+    was = bt.NEW_ENGINE
+    try:
+        bt.NEW_ENGINE = False                       # save it the old way
+        state = fresh_state("legacy_migrate")
+        battle = bt.Battle(1101, ps.battle_team(state), 10, None, 0, 0)
+        unit = next(iter(battle.units.values()))
+        foe = next(u for u in battle.units.values() if u.team != unit.team)
+        fx.apply_status(unit, "Taunt", source=foe)
+        fx.apply_status(unit, "Shield", source=foe)
+        saved = json.loads(json.dumps(battle.to_state()))
+        raw = saved["units"][unit.order]["statuses"]
+        check("the save really is in the OLD format",
+              all(not s.get("_engine") for s in raw), str(raw)[:120])
+
+        bt.NEW_ENGINE = True                        # ...and restore it the new way
+        restored = bt.restore_battle(saved)
+        got = restored.units[unit.order].statuses
+        check("every legacy status came back as an engine status",
+              got and all(isinstance(s, est.Active) for s in got),
+              str([type(s).__name__ for s in got]))
+        by_name = {s.name: s for s in got}
+        check("  ...Taunt keeps who inflicted it",
+              by_name["Taunt"].source_order == foe.order,
+              str(by_name["Taunt"].source_order))
+        check("  ...and still redirects after the restart",
+              getattr(restored._forced_target(restored.units[unit.order]), "order",
+                      None) == foe.order)
+        check("  ...Shield keeps its remaining absorb",
+              by_name["Shield"].shield_hp > 0, str(by_name["Shield"].shield_hp))
+        check("  ...and a turn runs on the restored battle",
+              restored.end_turn() is not False)
+
+        # An unknown name is DROPPED, never given an invented id: the client feeds every
+        # id to GetRow and that throws (contract 3.8).
+        check("an unresolvable legacy status is dropped, not invented",
+              bt._status_from_state({"name": "Not A Real Status", "remaining": 2})
+              is None)
+    finally:
+        bt.NEW_ENGINE = was
+
+
 def main():
     test_round_trip()
     test_statuses_and_shield_survive()
@@ -201,6 +253,7 @@ def main():
     shutil.rmtree(_TMP, ignore_errors=True)
     test_finished_battle_is_not_resaved()
     test_new_engine_statuses_survive_a_restart()
+    test_legacy_statuses_migrate_to_the_engine()
     print(f"\n{'ALL PASSED' if not _fail else f'{_fail} CHECK(S) FAILED'}")
     sys.exit(1 if _fail else 0)
 

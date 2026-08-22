@@ -1675,7 +1675,11 @@ class Unit(_engine_core.Unit):
         self.dmg_done = saved.get("dmg_done", 0)
         self.dmg_taken = saved.get("dmg_taken", 0)
         self.healed = saved.get("healed", 0)
-        self.statuses = [_status_from_state(s) for s in saved.get("statuses", [])]
+        # None = a legacy status the registry could not name; dropped, see
+        # _migrate_legacy_status.
+        self.statuses = [st for st in
+                         (_status_from_state(s) for s in saved.get("statuses", []))
+                         if st is not None]
 
 
 def _status_to_state(st):
@@ -1705,7 +1709,13 @@ def _status_to_state(st):
 
 def _status_from_state(d):
     if d.get("_engine"):
-        return _engine_status.Active(**{k: v for k, v in d.items() if k != "_engine"})
+        # Unknown keys are DROPPED rather than passed through: a save written by a newer
+        # build must not crash an older one on a field its dataclass has never heard of.
+        fields = {f.name for f in dataclasses.fields(_engine_status.Active)}
+        return _engine_status.Active(**{k: v for k, v in d.items()
+                                        if k != "_engine" and k in fields})
+    if NEW_ENGINE:
+        return _migrate_legacy_status(d)
     definition = d.get("definition")
     if definition is None:
         definition = fx.catalog().get(d["name"], {})
@@ -1715,6 +1725,43 @@ def _status_from_state(d):
     st.dot_atk = d.get("dot_atk")
     st.taunt_source = d.get("taunt_source")
     return st
+
+
+def _migrate_legacy_status(d):
+    """A saved `battle_effects.Status` -> the engine's `Active`, or None to drop it.
+
+    Battles are persisted on EVERY message, so at any moment there are live saves whose
+    units carry old-format statuses. Without this they would either crash the restore or
+    silently keep a status the engine cannot read -- and an in-progress raid is not a
+    thing to throw away on a deploy.
+
+    The fields line up better than they look, because both models store the same runtime
+    facts under different names:
+
+        remaining "battle" -> None (the engine's permanent)
+        dot_atk            -> source_atk   (inflicter's ATK, snapshotted at apply time)
+        taunt_source       -> source_order (who this status forces you to attack)
+
+    A name the registry does not know is dropped, not invented. That loses a buff on one
+    restore, which is recoverable; a status with a made-up id is not -- the client feeds
+    every id to GetRow and that throws (contract 3.8).
+    """
+    name = d.get("name")
+    sid = _engine_passives.registry_id(name) if name else None
+    if sid is None:
+        return None
+    row = _engine_specs.status(sid) or {}
+    remaining = d.get("remaining")
+    return _engine_status.Active(
+        status_id=sid, name=row.get("name") or name,
+        kind=row.get("kind"), category=row.get("category"), stat=row.get("stat"),
+        remaining=None if remaining in ("battle", None) else int(remaining),
+        stacks=int(d.get("stacks") or 1),
+        stack_cap=row.get("stack_cap"),
+        unremovable=bool(row.get("unremovable")),
+        source_atk=d.get("dot_atk"),
+        source_order=d.get("taunt_source"),
+        shield_hp=int(d.get("shield_hp") or 0))
 
 
 def _char_job(char_id):
