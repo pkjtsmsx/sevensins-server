@@ -665,6 +665,41 @@ def check_heal_basis():
               rwh.get("target") == "allies", str(rwh))
 
 
+def check_seals_and_heal_block():
+    """Status flags the new path silently ignored, because the old check reads
+    `st.definition` and an engine status does not have one -- so `has_flag` returned
+    False for everything and the boss's opening seals were decorative.
+    """
+    b, _ = a_battle(1000005)
+    unit = next(u for u in b.units.values() if u.team == bt.TEAM_PLAYER)
+    unit.statuses = [x for x in unit.statuses
+                     if not (isinstance(x, est.Active) and x.status_id in (605, 606, 607))]
+    unit.cooldowns = [0] * len(unit.cooldowns)
+    check("with no seal, more than the basic is usable",
+          len(b.usable_slots(unit)) > 1, str(b.usable_slots(unit)))
+
+    unit.statuses.append(est.Active(status_id=605, name="Power Attack Seal",
+                                    kind="control", category="misc", remaining=2))
+    check("Power Attack Seal locks slot 1 only",
+          1 not in b.usable_slots(unit) and 0 in b.usable_slots(unit),
+          str(b.usable_slots(unit)))
+    unit.statuses.append(est.Active(status_id=606, name="Special Move Seal",
+                                    kind="control", category="misc", remaining=2))
+    check("  ...and Special Move Seal locks the ultimate too",
+          b.usable_slots(unit) == [0], str(b.usable_slots(unit)))
+
+    # `kind` is unusable for heal-block: the bucket also holds healing INCREASES,
+    # healing reductions, an immunity, and Field Shield. Trusting it blocked every heal.
+    shielded = b.units[unit.order]
+    shielded.statuses.append(est.Active(status_id=4011, name="Field Shield",
+                                        kind="block_heal", category="misc", remaining=3))
+    check("Field Shield does NOT block healing", not est.blocks_heal(shielded))
+    victim = b.units[unit.order]
+    victim.statuses.append(est.Active(status_id=4203, name="Block Heal", kind="block_heal",
+                                      category="misc", remaining=2))
+    check("  ...but Block Heal does", est.blocks_heal(victim))
+
+
 def main():
     was = bt.NEW_ENGINE
     bt.NEW_ENGINE = True                     # the whole point of this file
@@ -683,7 +718,8 @@ def main():
                    check_passive_statuses_resolve,
                    check_no_unsendable_ids_on_the_wire,
                    check_nested_status_scripts,
-                   check_heal_basis):
+                   check_heal_basis,
+                   check_seals_and_heal_block):
             print(f"\n{fn.__name__}:")
             fn()
     finally:

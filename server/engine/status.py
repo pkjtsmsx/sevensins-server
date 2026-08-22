@@ -505,6 +505,85 @@ def _gauge_block_ids():
     return _gauge_block_cache
 
 
+# --- action seals -------------------------------------------------------------------
+#
+# Which SKILL SLOTS a status forbids, derived from the registry's own wording rather
+# than a hand list -- the same approach as the gauge blocks above, and for the same
+# reason: `kind` cannot tell them apart (605/606/607 are all `control`) while the
+# description states each one exactly.
+#
+#   605 Power Attack Seal  "cannot cast Power Attack until the effect wears off"
+#   606 Special Move Seal  "cannot use their Special Move skills"
+#   607 Skill Seal         "cannot cast ANY skills"
+#
+# Slots are com_attack / skill / sp_skill, so the basic attack is slot 0 and is never
+# sealed -- which matches the old engine's `ability_seal`, whose whole effect was to
+# reduce the usable list to [0].
+_SEAL_POWER = re.compile(r"cannot (?:cast|use)[^.]{0,30}power attack", re.I)
+_SEAL_SPECIAL = re.compile(r"cannot (?:cast|use)[^.]{0,30}special move", re.I)
+_SEAL_ALL = re.compile(r"cannot (?:cast|use)[^.]{0,20}any skill", re.I)
+_SEAL_SLOTS = None
+
+
+def _seal_slots():
+    """-> {status_id: frozenset(blocked slot indices)}."""
+    global _SEAL_SLOTS
+    if _SEAL_SLOTS is None:
+        _SEAL_SLOTS = {}
+        for sid, row in (specs.statuses() or {}).items():
+            text = row.get("description") or ""
+            if not text:
+                continue
+            if _SEAL_ALL.search(text):
+                blocked = (1, 2)
+            elif _SEAL_POWER.search(text):
+                blocked = (1,)
+            elif _SEAL_SPECIAL.search(text):
+                blocked = (2,)
+            else:
+                continue
+            _SEAL_SLOTS[int(sid)] = frozenset(blocked)
+    return _SEAL_SLOTS
+
+
+def sealed_slots(unit):
+    """-> the set of skill slots this unit may not use right now.
+
+    Nothing enforced these on the new path: the boss opens every raid by sealing the
+    party's Power Attack and Special Move, the icons appeared, the trace showed the
+    statuses -- and every button stayed live, because the old engine's check reads
+    `st.definition`, which an engine status does not have, so it silently returned False.
+    """
+    table = _seal_slots()
+    out = set()
+    for st in _actives(unit):
+        out |= table.get(st.status_id, frozenset())
+    return out
+
+
+# `kind` is NOT usable for this one. The `block_heal` bucket holds 18 rows and only two
+# of them block anything: it also collects healing INCREASES ("Increases healing
+# received" -- Concentrate, Blessing), healing REDUCTIONS ("reduces the caster's healing
+# received" -- Injured, Deterioration), an immunity (802), and Field Shield, which is a
+# shield that grants immunity to Block Heal rather than inflicting it. Trusting the kind
+# blocked every heal in the game, since the party carries Field Shield from turn one.
+_HEAL_BLOCK = re.compile(r"cannot be (?:healed|cured)", re.I)
+_HEAL_BLOCK_NOT = re.compile(r"immunit|immune|removes", re.I)
+
+
+def blocks_heal(unit):
+    """Does a status stop this unit being healed outright? (`Block Heal`.)
+
+    Only a flat block. "Reduces healing received" is a magnitude, not a veto, and is
+    left to the stat path rather than silently rounded up to zero.
+    """
+    for st in _actives(unit):
+        text = (_registry(st.status_id) or {}).get("description") or ""
+        if _HEAL_BLOCK.search(text) and not _HEAL_BLOCK_NOT.search(text):
+            return True
+    return False
+
+
 def blocks_gauge_gain(unit):
     """Headwind and friends: this unit's move gauge does not fill."""
     ids, _ = _gauge_block_ids()

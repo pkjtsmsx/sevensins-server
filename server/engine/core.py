@@ -432,6 +432,13 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
                 elif basis == "caster_max_hp":
                     fixed = float(caster.max_hp)
                 for tgt in recip:
+                    if _status.blocks_heal(tgt):
+                        # `Block Heal` / `Heal Block`. Nothing enforced this on the new
+                        # path -- the old check reads `st.definition`, which an engine
+                        # status does not have -- so the boss's heal-block was decorative.
+                        out.skipped.append({"op": op, "why": "heal blocked",
+                                            "skill": skill_id, "target": tgt.order})
+                        continue
                     pool = fixed if fixed is not None else float(tgt.max_hp)
                     amount = int(pool * pct / 100.0)
                     if apply_damage:

@@ -2565,7 +2565,11 @@ class Battle:
         unit = self.acting_unit()
         cds = list(unit.cooldowns) if unit else []
         cd = [cds[i] if i < len(cds) else 0 for i in (1, 2, 3)]
-        sealed = bool(unit and fx.has_flag(unit, "ability_seal"))
+        sealed_set = (_engine_status.sealed_slots(unit) if (NEW_ENGINE and unit)
+                      else (set((1, 2)) if unit and fx.has_flag(unit, "ability_seal")
+                            else set()))
+        seal_skill = 1 in sealed_set          # Power Attack Seal / Skill Seal
+        seal_ult = 2 in sealed_set            # Special Move Seal / Skill Seal
         # Button 3 is the ultimate, and it is gated by CHARGE as well as by cooldown.
         # The button has exactly one number -- UISkillBtn.LeftCD, drawn from
         # SkillList[i][1] and only when it is > 0 (PanelBattle._setBtnState 0x176B6BC)
@@ -2575,8 +2579,8 @@ class Battle:
         # and no longer doubles as the charge readout.
         charge_left = max(0, unit.ultimate_charge() - unit.charge) if unit else 0
         cd[1] = max(cd[1], charge_left)
-        ult_locked = sealed or bool(cd[1])
-        return [0, 1 if (sealed or cd[0]) else 0, 1 if ult_locked else 0,
+        ult_locked = seal_ult or bool(cd[1])
+        return [0, 1 if (seal_skill or cd[0]) else 0, 1 if ult_locked else 0,
                 cd[0], cd[1], cd[2]]
 
     def end_turn(self):
@@ -2903,10 +2907,16 @@ class Battle:
         """Skill buttons currently legal for a unit: off cooldown, and for the
         ultimate slot only with a full gauge. The basic is always available -- UNLESS
         ability_seal (Silence/Skill Seal/...) is active, which locks everything else."""
-        if fx.has_flag(unit, "ability_seal"):
-            return [0]
+        # The seals are per-SLOT, not all-or-nothing: Power Attack Seal locks slot 1,
+        # Special Move Seal locks the ultimate, Skill Seal locks both. The old flag
+        # collapsed all three into "basic only" -- and on the new path it never fired at
+        # all, because it reads `st.definition`, which an engine status does not have.
+        sealed = (_engine_status.sealed_slots(unit) if NEW_ENGINE
+                  else ((1, 2) if fx.has_flag(unit, "ability_seal") else ()))
         slots = []
         for i in range(min(len(unit.skills), ULTIMATE_SLOT + 1)):
+            if i in sealed:
+                continue
             if unit.cooldowns[i] > 0:
                 continue
             if i == ULTIMATE_SLOT and not unit.ultimate_ready():

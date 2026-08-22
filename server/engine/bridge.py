@@ -105,7 +105,8 @@ def attack_combo(battle, attacker_order, defender_order, skill_id, rng=None):
 
     outcome = core.execute(caster, spec, list(battle.units.values()),
                            rng or random.Random(), chosen=defender_order)
-    if not (outcome.strikes or outcome.heals or outcome.gauge or outcome.revives):
+    if not (outcome.strikes or outcome.heals or outcome.gauge or outcome.revives
+            or outcome.statuses):
         return None
 
     payload = wire.attack_json(outcome, caster_order=attacker_order, skill_id=skill_id)
