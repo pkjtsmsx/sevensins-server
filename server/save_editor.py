@@ -219,6 +219,14 @@ def account_view(pid):
             iid = rec.get("iid")
             if iid is None:
                 continue
+            # **Starshards and Soulmirrors are omitted entirely**, not shown-but-locked.
+            # Nothing can be done with them here -- the editor cannot build one the
+            # client accepts, and a malformed instance hangs the backpack sync on every
+            # login -- so listing them is noise in a list that already runs to 250+ rows
+            # on a real save. The write path refuses them independently, so a caller
+            # hand-posting an id it never saw is still blocked.
+            if _instance_storage(_num(iid, 0)):
+                continue
             items.append({"storage": stype, "slot": sid, "iid": _num(iid, 0),
                           "name": item_name(iid), "amount": _num(rec.get("amount"), 0),
                           "uid": rec.get("uid") or ""})
@@ -475,29 +483,29 @@ def _instance_storage(iid):
 
 
 def _set_instances(state, iid, want):
-    """Bring the number of owned instances of `iid` to `want`, granting or deleting.
+    """**Refused.** Starshards and Soulmirrors are not editable here, by design.
 
-    **Instances cannot be written as a stack.** The editor used to add
-    `{"amount": n, "attr": {}, "iid": iid, "uid": ""}` to storage 1 for everything,
-    which for a starshard or soulmirror is wrong in three ways at once: wrong storage,
-    no uid, and no rolled attributes. The client then failed to file the row and the
-    WHOLE list went blank -- "No Available Soulmirror", Owned -/- -- until the bad entry
-    was removed again. Granting goes through the same path drops use, so an edited piece
-    is indistinguishable from an earned one.
+    They are INSTANCES, not stacks: each is its own slot with a uid and a rolled `attr`
+    block, and the editor cannot produce one that is indistinguishable from an earned
+    piece. What it produced instead locked the game up.
+
+    The failure is not cosmetic and not recoverable from inside the game. A malformed
+    storage-2/3 entry makes PlayerBackpack's login sync throw PARTWAY THROUGH, so the
+    sync never signals completion and the client hangs forever on
+    `Subsystem 'PlayerBackpack' still in syncing...`. Because the entry is persisted, it
+    hangs again on every later login -- the save has to be repaired by hand before the
+    account can be played at all. Opening a cast that has one equipped locks up the same
+    way, and the Soulmirror list goes blank ("No Available Soulmirror", Owned -/-).
+
+    Removing the feature rather than fixing it: a correct piece needs the real roll path
+    (element, slot, rank, star, sub-stats and their enhance counters -- see
+    player_state.make_rune), and a hand-entered one that is merely PLAUSIBLE still bricks
+    a login. Earn them, or grant them through the game's own drop path.
     """
-    storage = _instance_storage(iid)
-    bag = state.setdefault("backpack", {}).setdefault(storage, {})
-    owned = [sid for sid, rec in bag.items() if int(rec.get("iid", -1)) == iid]
-    want = _clamp(int(want), 0, 200)
-    if want > len(owned):
-        for _ in range(want - len(owned)):
-            ps.grant_reward(state, iid, 1)
-    else:
-        # Drop the highest slots first; a lower slot is more likely to be equipped and
-        # referenced by a cast, and deleting one of those leaves a dangling reference.
-        for sid in sorted(owned, key=lambda x: -int(x))[:len(owned) - want]:
-            bag.pop(sid, None)
-    return want
+    raise ValueError(
+        f"{item_name(iid)} is a Starshard or Soulmirror and cannot be edited here -- "
+        "a hand-made instance hangs the client's backpack sync on every login. "
+        "These are earned in-game only.")
 
 
 def _set_item(state, row):
@@ -512,6 +520,7 @@ def _set_item(state, row):
     """
     iid = int(row["iid"])
     if _instance_storage(iid):
+        # Refuses. Reached only if a caller hand-posts an id the search hides.
         return _set_instances(state, iid, row.get("amount", 0))
     amount = _clamp(int(row.get("amount", 0)), 0, 999_999)
     storage = str(row.get("storage") or "1")
@@ -536,6 +545,11 @@ def search_items(q, limit=50):
     out = []
     for iid, name in item_names().items():
         if q in name.lower():
+            # Starshards and Soulmirrors are deliberately UNSEARCHABLE: they cannot be
+            # created correctly here and a malformed one hangs the client's login sync.
+            # Hidden rather than offered-then-rejected, so the option never appears.
+            if _instance_storage(iid):
+                continue
             out.append({"iid": iid, "name": name})
             if len(out) >= limit:
                 break

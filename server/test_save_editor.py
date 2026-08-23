@@ -16,6 +16,7 @@ and 3 respectively, with a uid and the mandatory `lv`/`ts` attributes. Exactly t
 
     python3 test_save_editor.py
 """
+import json
 import os
 import sys
 import tempfile
@@ -57,61 +58,58 @@ def _sample_ids():
     return soulmirror, starshard
 
 
-def check_instances_go_to_their_own_storage():
+def check_instances_cannot_be_edited():
+    """Starshards and Soulmirrors were REMOVED from the editor. Guard the removal.
+
+    They are instances, not stacks, and the editor could not build one the client
+    accepts. A malformed storage-2/3 entry makes PlayerBackpack's login sync throw
+    partway through, so the client hangs on `Subsystem 'PlayerBackpack' still in
+    syncing...` -- on every login thereafter, because the entry persists, and again
+    whenever a cast holding one is opened. The save then needs repairing by hand.
+
+    Three independent surfaces have to stay closed, because closing only one leaves a
+    route back in: the search that offers an id, the view that lists an owned one, and
+    the write that accepts a hand-posted edit.
+    """
     soulmirror, starshard = _sample_ids()
     check("the design data has a Soulmirror item", bool(soulmirror))
     check("  ...and a Starshard item", bool(starshard))
 
-    for iid, label, storage in ((soulmirror, "Soulmirror", str(ps.BP_STORAGE_SOULFRAG)),
-                                (starshard, "Starshard", str(ps.BP_STORAGE_EQUIPMENT))):
+    for iid, label in ((soulmirror, "Soulmirror"), (starshard, "Starshard")):
         st = ps.load(1000070 + iid % 100)
-        se._set_item(st, {"iid": iid, "amount": 2})
+        before = json.dumps(st.get("backpack") or {}, sort_keys=True)
+        try:
+            se._set_item(st, {"iid": iid, "amount": 2})
+            check(f"{label}: the write is refused", False, "no exception raised")
+        except ValueError as exc:
+            check(f"{label}: the write is refused", True)
+            check("  ...with a message naming the item",
+                  se.item_name(iid) in str(exc), str(exc)[:80])
+        check("  ...and the backpack is untouched",
+              json.dumps(st.get("backpack") or {}, sort_keys=True) == before)
 
-        check(f"{label} lands in storage {storage}",
-              str(se._instance_storage(iid)) == storage, str(se._instance_storage(iid)))
-        bag = st["backpack"].get(storage, {})
-        rows = [r for r in bag.values() if int(r.get("iid", -1)) == iid]
-        check(f"  ...as TWO separate instances, not one stack of 2",
-              len(rows) == 2, str(len(rows)))
-        # The bug: a stack in Normal storage. Nothing of the sort may appear.
-        normal = st["backpack"].get("1", {})
-        check("  ...and nothing is written to Normal storage",
-              not any(int(r.get("iid", -1)) == iid for r in normal.values()))
-
-        rec = rows[0]
-        check("  ...carrying a real uid", bool(rec.get("uid")), repr(rec.get("uid")))
-        check("    ...that is unique across the instances",
-              len({r["uid"] for r in rows}) == len(rows),
-              str([r["uid"] for r in rows]))
-        attr = rec.get("attr") or {}
-        # `lv` and `ts` are mandatory: without them the piece does not render.
-        check("  ...and a rolled attr block with lv/ts",
-              "lv" in attr and "ts" in attr, str(sorted(attr)))
-        check("    ...plus at least one stat roll",
-              any(k.startswith(("be_", "bid_")) for k in attr), str(sorted(attr)))
+        # The search must not OFFER one -- rejecting after the fact would still show it.
+        name = se.item_name(iid)
+        offered = [r for r in se.search_items(name) if r["iid"] == iid]
+        check(f"  ...and search never offers the {label}", not offered, str(offered[:2]))
 
 
-def check_counts_go_up_and_down():
-    soulmirror, _ = _sample_ids()
-    storage = str(ps.BP_STORAGE_SOULFRAG)
-    st = ps.load(1000061)
+def check_owned_instances_are_hidden():
+    """An already-owned piece is omitted from the view entirely, not shown-and-locked.
 
-    def owned():
-        return sum(1 for r in st["backpack"].get(storage, {}).values()
-                   if int(r.get("iid", -1)) == soulmirror)
-
-    se._set_item(st, {"iid": soulmirror, "amount": 3})
-    check("asking for 3 gives 3 instances", owned() == 3, str(owned()))
-    se._set_item(st, {"iid": soulmirror, "amount": 1})
-    check("  ...lowering the count deletes instances", owned() == 1, str(owned()))
-    se._set_item(st, {"iid": soulmirror, "amount": 0})
-    check("  ...and 0 removes them all", owned() == 0, str(owned()))
-    # Re-adding after a full clear must still produce a usable uid.
-    se._set_item(st, {"iid": soulmirror, "amount": 1})
-    rec = next(r for r in st["backpack"][storage].values()
-               if int(r.get("iid", -1)) == soulmirror)
-    check("re-adding after clearing still yields a uid", bool(rec.get("uid")),
-          repr(rec.get("uid")))
+    Nothing can be done with it here, and the item list already runs to 250+ rows on a
+    real save -- a row that cannot be touched is noise.
+    """
+    _sm, starshard = _sample_ids()
+    pid = "1000079"
+    st = ps.load(int(pid))
+    ps.grant_rune(st, starshard, 1)          # the REAL path, so the piece is well-formed
+    ps.save(st)
+    view = se.account_view(pid)
+    shown = [i for i in view["items"] if int(i["iid"]) == int(starshard)]
+    check("an owned Starshard is hidden from the item list", not shown, str(shown[:1]))
+    check("  ...while ordinary items still list",
+          all("iid" in i for i in view["items"]))
 
 
 def check_ordinary_items_are_still_stacks():
@@ -173,8 +171,8 @@ def check_every_account_opens():
 
 
 def main():
-    for fn in (check_instances_go_to_their_own_storage,
-               check_counts_go_up_and_down,
+    for fn in (check_instances_cannot_be_edited,
+               check_owned_instances_are_hidden,
                check_ordinary_items_are_still_stacks,
                check_every_account_opens):
         print(f"\n{fn.__name__}:")
