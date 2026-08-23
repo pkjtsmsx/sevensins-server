@@ -275,6 +275,9 @@ def char_json(state):
     # _char_id_json, which kept the best-copy rule but left `kset`/`klv` empty, so the
     # LOGIN charIDDic carried no Kizuna state at all.
     id_tbl = char_id_table(state)
+    # Computed ONCE: book_progress -> book_sum_xp walks every cast in charIDDic and
+    # scores it, so reading it per field would re-score the whole roster twice.
+    book_rank, book_xp, _left = book_progress(state)
     return json.dumps({
         "pro_chars": pro_chars,
         "group_tbl": {}, "id_tbl": id_tbl,
@@ -292,7 +295,24 @@ def char_json(state):
         # `helper uid error` warning that repeated once per login. The helper is the
         # cast lent to friends, so the lead of the first formation is the sane default.
         "helper": helper_uid(state),
-        "book_rank": 0, "book_xp": 0,
+        # The real Soul Link rank and score, NOT zeros.
+        #
+        # These drive the RANK bar at the foot of the Soulpedia AND the flat stat every
+        # cast carries: `soulbook_reward` rank N pays atk 5N / def 2N / hp 35N,
+        # cumulative, reaching +1500 / +600 / +10500 at rank 300.
+        #
+        # The BATTLE side already honoured it -- titan_server passes state["book_rank"]
+        # into bt.Battle, which builds self.book_bonus from battle.soulbook_bonus. So the
+        # bonus was genuinely applied in a fight and invisible in the menu, because the
+        # cast's stat panel reads THIS payload and this payload said rank 0.
+        #
+        # book_progress() is the same helper the five other sync sites already use (the
+        # Soulpedia request 567, the rank-up reply, and the two post-battle pushes), so
+        # login now agrees with them instead of being the one caller that hardcodes.
+        # `EMPTY_CHAR_JSON` in titan_server keeps its zeros on purpose: that payload has
+        # no roster to score.
+        "book_rank": book_rank,
+        "book_xp": book_xp,
         "orgArenaTeam": [],
         "sort_list": char_sort_list(state),
         "act_collection": [],
