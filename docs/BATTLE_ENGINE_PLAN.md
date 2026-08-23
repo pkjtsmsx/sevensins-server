@@ -709,10 +709,46 @@ ratings, drops and rewards) touches `battle_effects` **zero times**. AI selectio
 never the old engine's: `auto_move` is `usable_slots` + `skill_ratio` + first live
 target; `design_enemy_targets`/`aoe_damage` live in the old ATTACK path.
 
-What remains is mechanical: the fallback attack path, `hit_count`/`is_complete`/
-`status_skill_id`/`_status_wire`/`_defend_reduce`, `passives()` switching to
-`specs.skill(...).type == "passive"`, the flag itself, the package, and
-`test_battle_effects.py`.
+### Done — 2,540 lines removed (2026-08-22)
+
+Gone: the fallback attack path, `_defend_reduce`, `_status_wire`,
+`_legacy_statuses`, every `NEW_ENGINE` branch, the flag, the package and its suite.
+`passives()` now reads `specs.skill(sid).type == "passive"`.
+
+Three things changed shape rather than disappearing, and each is the interesting part:
+
+**A skill the engine cannot run ships a ZERO-DAMAGE combo entry** instead of falling
+back. The 15 rows that reach it are boss phase scripts (`即死`, "HP Changed to 50%",
+`boss轉階段`), not castable skills — inventing a basic attack for a script whose effect
+we cannot read is worse than doing nothing, and the client still needs an entry to drive
+the animation and yield the turn (an empty combo is not valid).
+
+**`_status_to_state` still tags its output `_engine`** although that is now the only kind
+written, because `_status_from_state` must keep reading saves written before the cutover.
+An untagged dict is a legacy status and takes the migration path. The tag is not
+redundant; it is the format discriminator.
+
+**Two suites were testing the deleted engine**, and were re-pointed rather than deleted:
+
+* the shield round-trip now asserts the same PROPERTIES — per-instance `shield_hp` and
+  the inflicter's snapshotted ATK surviving a save — against engine statuses. What
+  mattered was the property, never the class;
+* the legacy-migration test now writes the old on-disk shape BY HAND. That is stronger
+  than producing it with the old engine: what has to keep working is reading a save some
+  phone wrote weeks ago, so pinning the exact on-disk form beats pinning whatever a live
+  object happened to serialise to — and it does not need the old engine to exist;
+* `check_legacy_and_engine_statuses_coexist` asserted an invariant that no longer exists
+  (two representations sharing a unit without either reader choking). It now pins the
+  replacement: that no second representation comes back, which is how the
+  `'Active' object has no attribute 'dot_atk'` drop started.
+
+### The check that actually cleared it
+
+Not "grep the call sites". `tools/battle_fuzz.py` reports **2,411 attacks, 2,411 through
+the engine, 0 through the legacy builder** across 40 randomised fights, and a recording
+proxy over `fx` driving AI-vs-AI play touched the package zero times. Deleting on the
+strength of a proxy that never fires is a much smaller leap than deleting on the strength
+of having read every branch.
 
 ---
 
