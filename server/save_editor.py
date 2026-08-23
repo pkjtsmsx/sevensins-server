@@ -35,6 +35,24 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # Currency ids are CurrencyType enum values, not item ids -- the client's own
 # `Balance(CurrencyType.Cash)` sums 1 and 32 (see player_state.core). They have no row
 # in the item table, so they are named here or they show up as bare numbers.
+# **The client reads balances as SIGNED 32-BIT.** Past 2,147,483,647 a balance wraps
+# negative, and the game then refuses to spend it -- "diamonds insufficient, go to the
+# shop?" against a bar reading -294,967,296.
+#
+# The trap is that the DIAMOND total is two balances added together:
+#     Balance(Cash) = BalanceDetailed(1) + BalanceDetailed_RealCash()   (type 32)
+# so clamping each one to something that fits is not enough. Two edits that are each
+# perfectly legal -- 2,000,000,000 free and 2,000,000,000 paid -- sum to 4,000,000,000,
+# which is precisely the -294,967,296 above. Reported from a real save.
+#
+# So the cap is on the PAIR, not the field, and it leaves an order of magnitude of
+# headroom below the wrap point: the client keeps adding to this number after the edit
+# (rewards, refunds, a login bonus), and a balance parked just under the limit would
+# overflow on the next thing the player earned.
+INT32_MAX = 2 ** 31 - 1
+CURRENCY_MAX = 1_000_000_000
+CASH_CURRENCIES = ("1", "32")           # summed by the client into one Diamond total
+
 CURRENCIES = {
     "1": "Diamonds (free)",
     "32": "Diamonds (paid)",
@@ -412,9 +430,17 @@ def apply_edits(pid, edits):
     changed = []
 
     for cid, amount in (edits.get("currencies") or {}).items():
-        amount = _clamp(int(amount), 0, 2_000_000_000)
-        state.setdefault("currency", {})[str(cid)] = amount
-        changed.append(f"{CURRENCIES.get(str(cid), cid)}={amount}")
+        cid = str(cid)
+        amount = _clamp(int(amount), 0, CURRENCY_MAX)
+        bag = state.setdefault("currency", {})
+        if cid in CASH_CURRENCIES:
+            # Cap the PAIR: the client shows 1 + 32 as one number and overflows on the
+            # sum, not on either field. Trim against whatever the OTHER half already
+            # holds, so raising one can never push the visible total over.
+            other = sum(int(bag.get(o) or 0) for o in CASH_CURRENCIES if o != cid)
+            amount = min(amount, max(0, CURRENCY_MAX - other))
+        bag[cid] = amount
+        changed.append(f"{CURRENCIES.get(cid, cid)}={amount}")
 
     for eid, row in (edits.get("energies") or {}).items():
         e = state.setdefault("energy", {}).setdefault(str(eid), {"cap": 0, "energy": 0})

@@ -112,6 +112,37 @@ def check_owned_instances_are_hidden():
           all("iid" in i for i in view["items"]))
 
 
+def check_diamonds_cannot_overflow_int32():
+    """The client reads balances as SIGNED 32-BIT, and shows diamonds as 1 + 32.
+
+    Reported from a real save: both halves set to 2,000,000,000 -- each individually
+    legal -- summed to 4,000,000,000 and wrapped to -294,967,296, at which point the
+    game refuses to spend them ("diamonds insufficient, go to the shop?" against a
+    negative bar). The cap has to be on the PAIR, not the field.
+    """
+    int32_max = 2 ** 31 - 1
+    for order in (("1", "32"), ("32", "1")):
+        pid = "1000096" if order[0] == "1" else "1000097"
+        ps.save(ps.load(int(pid)))
+        for cid in order:
+            se.apply_edits(pid, {"currencies": {cid: 2_000_000_000}})
+        cur = se._read(pid).get("currency") or {}
+        total = int(cur.get("1") or 0) + int(cur.get("32") or 0)
+        check(f"raising {order[0]} then {order[1]}: the diamond total fits in int32",
+              total <= int32_max, f"{total:,}")
+        check("  ...with headroom for what the player earns next",
+              total <= se.CURRENCY_MAX, f"{total:,}")
+
+    # A normal edit must not be collateral damage.
+    pid = "1000098"
+    ps.save(ps.load(int(pid)))
+    se.apply_edits(pid, {"currencies": {"1": 50_000, "32": 1_200}})
+    cur = se._read(pid).get("currency") or {}
+    check("ordinary diamond amounts pass through untouched",
+          int(cur.get("1")) == 50_000 and int(cur.get("32")) == 1_200,
+          f"{cur.get('1')}/{cur.get('32')}")
+
+
 def check_ordinary_items_are_still_stacks():
     """The instance path must not swallow normal consumables."""
     st = ps.load(1000062)
@@ -171,7 +202,8 @@ def check_every_account_opens():
 
 
 def main():
-    for fn in (check_instances_cannot_be_edited,
+    for fn in (check_diamonds_cannot_overflow_int32,
+               check_instances_cannot_be_edited,
                check_owned_instances_are_hidden,
                check_ordinary_items_are_still_stacks,
                check_every_account_opens):
