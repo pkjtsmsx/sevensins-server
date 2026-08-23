@@ -166,7 +166,20 @@ def attack_json(outcome, *, caster_order=None, skill_id=None):
     for rv in outcome.revives:
         # Mode 2 returns early in OnDamage, so it must be its OWN row -- merging a
         # revive into an HP row would drop whichever effect lost the merge.
-        lead.append(_row(rv["target"], MODE_REVIVE, int(rv.get("hp") or 0)))
+        #
+        # ...and for the same reason it cannot SHARE group 0 with that unit's HP row.
+        # `PlayStart` keys its dictionary on `c` ALONE, so two rows naming one unit hang
+        # the fight no matter how their modes differ -- which the invariant below missed
+        # for as long as it keyed on (c, md). Reached the moment passives started being
+        # derived from the pack: a skill that revives an ally while a passive heals the
+        # whole party now names that ally twice, and the fuzzer found it in 2,000 fights.
+        # The revive wins because it is the effect the client cannot infer -- HP itself
+        # is server-authoritative and arrives on the next `sync` regardless.
+        target = rv["target"]
+        dropped = [r for r in lead if r["c"] == target]
+        for r in dropped:
+            lead.remove(r)
+        lead.append(_row(target, MODE_REVIVE, int(rv.get("hp") or 0)))
 
     # A skill whose only effect was the move gauge now produces no rows at all (the
     # gauge left the payload -- see above). The client still needs a combo entry to drive
@@ -210,10 +223,17 @@ def _assert_invariants(groups, swings):
     for i, g in enumerate(groups):
         seen = set()
         for r in g:
-            key = (r["c"], r["md"])
+            # Group 0 is keyed on the UNIT, not on (unit, mode). `AttackBehavior.
+            # PlayStart` does an unguarded `Dictionary.Add(row.c, ...)` over DmgInfo[0]
+            # only, so a second row naming the same unit throws inside a handler that
+            # swallows it -- before any damage is animated, so the attacker never yields
+            # its turn. The mode is not part of that key, and keying this check on
+            # (c, md) let exactly that payload through: an ally healed by a passive and
+            # revived by the skill, one row each, modes 1 and 2.
+            key = r["c"] if i == 0 else (r["c"], r["md"])
             if key in seen:
                 raise WireError(
-                    f"unit {r['c']} appears twice in group {i} with mode {r['md']}; "
+                    f"unit {r['c']} appears twice in group {i} (mode {r['md']}); "
                     f"the client's dictionary insert throws and the fight stalls")
             seen.add(key)
 
