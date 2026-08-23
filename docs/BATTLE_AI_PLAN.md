@@ -422,7 +422,10 @@ accident, so the fuzzer was built deliberately: random fields, real payloads, in
 checked on every attack. It lives in `docs/BATTLE_ENGINE_PLAN.md` phase 9 because what it
 tests is the engine and the wire, not the chooser — but it reuses this tool's team sampling
 and runs all four choosers, so a bad move choice that only crashes on some field shows up
-there too. Current sweep: 2,000 fights, 144k attacks, 0 findings.
+there too. Current sweep: 3,000 fights, 242k attacks, 0 findings — and it has since grown
+a starvation invariant (a living unit that never acts with its gauge still blocked), which
+is what catches a passive that removes a unit from the fight rather than corrupting a
+payload. See `BATTLE_ENGINE_PLAN.md` phase 10.
 
 ## Where this can be wrong
 

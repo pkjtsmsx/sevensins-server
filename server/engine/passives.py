@@ -1,18 +1,29 @@
-"""Hand-written passive skills, as a declarative rule table.
+"""Passive skills, as a declarative rule table -- mostly DERIVED, a few hand-written.
 
-**Why these cannot be derived.** A passive's opcodes say only WHICH statuses exist; the
-logic is in prose and nowhere else. Gabriel's Campus Correction is four numbered clauses
--- "at the start of the turn, if you have a Commendation, you gain CC Immunity", "when HP
->= 70%, SPD +10% and ATK +35% before action", "when HP <= 30%, after taking damage,
-forcibly gain a Major Merit and inflict a Major Demerit on the attacker" -- with trigger
-timings, HP thresholds and promotion chains that `_action` does not encode at all.
+Every passive has the same shape: *at TRIGGER, if CONDITION, apply STATUS to SELECTION*.
 
-**So this is a table, not a pile of special cases.** Every passive in the game has the
-same shape: *at TRIGGER, if CONDITION, apply STATUS to SELECTION*. Writing that shape
-once means the next cast is a few lines of data rather than new code, which matters --
-Gabriel is not unusual, she is just the one we read first.
+**A passive's opcodes carry only WHICH statuses exist**; the logic is in prose. This file
+used to conclude from that "so they cannot be derived" and hand-write the shape per cast.
+Six got written, against 1,516 passive groups in the game -- so `rules_for` returned an
+empty list 1,510 times and a raid boss holding `CC Immunity (SP)` in its own effect list
+was chain-frozen 19 times in one fight on a real device.
 
-What a rule cannot express yet is stated in `UNMODELLED` per cast, so the gap is visible
+The conclusion was wrong in a specific way. Four fields of the five were ALREADY compiled
+per effect off the clause naming the status -- the status, the recipient, the condition
+and the numbers. Only the TRIGGER was never read, and it is stated in that same sentence
+("When a battle starts, inflict Diligence on the 1 ally with the highest DEF"). So
+`tools/compile_skills.py:annotate_passive` reads it, and `_compiled_rules` below builds
+the same `Rule` objects this table holds: 936 groups, 1,953 rules. See
+docs/BATTLE_ENGINE_PLAN.md phase 10 for the traps that came with it.
+
+**The hand table still wins where it exists**, and is where the genuinely underivable
+clauses live -- Gabriel's Campus Correction is HP thresholds and a promotion chain ("if
+the target has three stacks of Admonition, additionally give a Minor Demerit") that no
+single sentence states. Six entries is now a floor, not a ceiling: add one when the prose
+defeats the compiler, not when the compiler merely has not been checked.
+
+What a rule cannot express yet is stated in `UNMODELLED` per cast, and what the compiler
+refused to derive is in the spec's own `unmodelled` list -- so both gaps are visible
 rather than silently missing.
 
 Numbers come from the compiled spec where the effect carries them, and from the prose

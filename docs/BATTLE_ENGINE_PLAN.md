@@ -894,6 +894,178 @@ Two honest limits on that number:
 
 ---
 
+## Phase 10 — passives, derived from the pack (2026-08-23)
+
+`engine/passives.py` opens by explaining why passives **cannot** be derived: "a passive's
+opcodes say only WHICH statuses exist; the logic is in prose and nowhere else." That is
+true, and it was read as a reason to hand-write a rule table. Six casts got written. The
+game has **1,516 passive groups**, so 1,510 of them silently did nothing — `rules_for`
+returned `[]` and `fire_all` dutifully applied it, every trigger, every fight.
+
+What that cost, in one example: a raid boss whose own effect list contains
+`CC Immunity (SP)` was **chain-frozen 19 times in an 84-turn fight** on a real device. The
+immunity was in the data, the status registry classified it correctly, and
+`status.is_immune` would have blocked the freeze. Nothing ever granted it.
+
+### The prose is not the obstacle; the missing field was
+
+A passive is *at TRIGGER, if CONDITION, apply STATUS to SELECTION*. Four of those five
+were already compiled per effect, off the same clause:
+
+| field | where it already came from |
+|---|---|
+| status | `_actID[]` → `status_meta` |
+| recipient | `status_target`, from the sentence naming the status |
+| condition | `condition_requires` / `is_conditional` |
+| numbers | `status_numbers`, per (skill, status) |
+| **trigger** | **never read** |
+
+And the trigger is stated in that same sentence — "When a battle starts, inflict Diligence
+on the 1 ally with the highest DEF"; "After taking damage from an attack, inflicts Crack
+Down on the attacker". `_note1_*` carries prose for **99.6%** of passive groups (98.6% in
+Chinese even where the English is absent), and the vocabulary is small and repetitive:
+~720 clauses say "when a battle starts" in ten spellings.
+
+So `annotate_passive` in `tools/compile_skills.py` emits `trigger`, `trigger_source` and
+`select` per effect, and `passives._compiled_rules` turns those into the same `Rule`
+objects the hand table holds. **936 groups now derive 1,953 rules.** The hand table still
+wins where it exists — it encodes HP thresholds, promotion chains and `once` semantics
+that no clause states.
+
+### The validation, and why it is the only one that counts
+
+Zero Cal (`100001431`) was the single raid boss someone had already read by hand. The
+derived rules are **identical — all five, same triggers, same selections**. The other five
+hand entries come out as strict supersets of what is derived.
+
+That is what separates this from a plausible-looking parser: there was exactly one place
+where a human's reading and the compiler's could be compared, and they agree.
+
+### Five rules, each of which cost a bug
+
+* **The trigger word IS the "when".** `is_conditional` flags any clause containing
+  if/when/while, so *every* derived rule inherited a spurious conditional and fired at
+  `CONDITIONAL_POLICY`'s 50% roll — a boss's permanent trait became a coin flip. Cleared
+  when a trigger is found and no evaluatable `requires` exists.
+* **An undocumented status is an always-on trait.** `Elite`, `CC Immunity (SP)` and
+  `Revive Block Immunity` are described in the prose of no boss that carries them; they
+  are simply what a raid boss IS. Applied to the holder at battle start, permanently —
+  and the duration is **dropped**, because any duration on an unnamed status came from
+  `corpus_default`, i.e. the average of what *other* skills say. `CC Immunity (SP)`
+  defaults to 2 turns off 36 player skills, and two turns of immunity in an 84-turn fight
+  is not what "the boss is immune to crowd control" means. Evidence about other skills is
+  not evidence about this one.
+* **...but never a trait that denies its holder turns.** Nothing "is" permanently stunned
+  or permanently unable to fill its gauge. `Zero Cal V` carries an undescribed `Headwind`;
+  defaulting it sat the holder out of every fight — permanently, so even the battle-clock
+  ageing below could not free it. Guarded by `_denies_turns` (gauge-gain blockers plus
+  `control` kind). This is **not** a rule against a passive harming its caster: authored
+  self-cost is real (Metatron's passive is called *Sacrifice* and triggers on her own
+  defeat) and reaches the engine through the prose path untouched. The guard refuses only
+  to **invent** one.
+* **Ambiguity beats a default.** A status unnamed while some clause is still unclaimed is
+  left unmodelled, not defaulted. Dark Sanction forces this: its `Duel of the Fates` row
+  is described under the clause name "Destiny", conditional on a mark the party may never
+  carry, so a trait default would hand the boss a permanent ATK buff the prose gates.
+* **A weak name match is not evidence about timing.** Jacqueline's rows are named `Body
+  Strike II` while her prose calls the clause `Healthy Strike II`, so the fallback match
+  landed on an unrelated sentence and derived `battle_start` for a rule keyed on "before
+  the action". A missing rule is a gap; a wrong one is a bug, so only a match with a
+  granting verb in front of it is trusted — searching past the clause's own **label**,
+  and only past that (scanning every occurrence instead re-breaks Lucifer's Divine/Fallen
+  toggle, which this file already warns about).
+
+### The recipient is per status, and the English cannot be trusted alone
+
+`status_target` reads the recipient from the *sentence*. One sentence routinely grants two
+statuses to two different sides — "grant the caster CC Immunity for two turns and inflict
+Headwind on all enemies" — and both then got the first one's answer. `passive_who` narrows
+to the fragment governing each status, splitting on `,` / `and` / `;` / `並`.
+
+Worse, the pack's English is a **translation with real errors**. Beelzebub's passive:
+
+```
+EN:  ...and inflict Headwind on all allies.
+TC:  並對敵方全體附加逆風              ← "on all ENEMIES"
+```
+
+Headwind stops a unit's move gauge, so believing the English gave her a self-inflicted
+gauge block: **zero turns taken in a 62-attack fight** on a real phone. `_note1` is the
+ORIGINAL, so it wins outright on a disagreement rather than merely being consulted. There
+are **20** such disagreements corpus-wide, each recorded in the spec's `unmodelled` list
+so the count is a thing that can be looked at rather than assumed small.
+
+Two related readings, same class:
+
+* **A bare minus is a direction word.** "the Move Gauge of all enemies -30%" carries no
+  verb, so the verb-based sign test left it **+30** — a gauge cut on the enemy team
+  compiled as a gauge gift to it.
+* **"(excluding the caster)" is the one name in a clause that is definitely not the
+  recipient.** Stripped before any recipient test, never after.
+
+### The move gauge has no category to read a side off
+
+A status carries `category`, so a debuff defaults to the enemy and a buff to the holder. A
+`modify_gauge` effect carries nothing of the sort, and passing a stand-in category into
+the selector resolved **58 of 91** derived gauge rules to ENEMIES — including *Racing
+Angel*'s "after the action, +75%". Every unit holding such a passive handed the opposition
+three quarters of a turn, every turn. It was reported from a device as units acting on a
+bar that was not full, and bars filling after their owner had already gone.
+
+`_gauge_to` reads the clause first, and where the clause is silent the **sign** decides: a
+gain goes to the caster's own side, a cut to the other one. Nothing in this game hands the
+enemy free gauge or drains its own.
+
+### Two engine bugs this surfaced, both independent of the compiler
+
+* **`wire`'s group-0 invariant was weaker than the client's.** It keyed on (unit, mode);
+  `AttackBehavior.PlayStart` keys on the **unit alone**, so a skill that revives an ally
+  while a passive heals the party named that ally twice and hung the fight before any
+  damage animated. Unreachable while six passives existed. Found by the fuzzer in 2,000
+  fights.
+* **A gauge block never expired.** Statuses age on their holder's own turn, and
+  `tick_duration` explains why that is right even for a skipped one — a stun still lets
+  the bar fill, so the turn is reached and skipped there. A gauge block does not, so its
+  own duration never ticked and a two-turn debuff was permanent.
+  `Battle._age_gauge_blocks` ages it on the **battle's** clock, the only clock it leaves
+  running. Pinned by `check_gauge_block_expires_without_a_turn`.
+
+### What the fuzzer was missing
+
+Every invariant in `tools/battle_fuzz.py` was about the shape of a payload or an
+exception. A unit silently doing nothing produces neither — so **164,801 fuzzed attacks
+said nothing** while a human watched Beelzebub sit out a fight on a phone.
+
+It now checks for starvation. The first version fired 57 times and every one was a
+legitimately slow unit whose bar climbs 0.1 in ten turns, so the signal is not "took no
+turns" but "took no turns **and its gauge is still blocked**" — a bar that cannot rise has
+no innocent reading. Retightened, it immediately caught the permanent `Zero Cal V`
+Headwind that the sweep before it had missed.
+
+### Result
+
+**3,000 fights, 241,596 attacks, 22,973 deaths, 670,329 status rows, 913 wave advances,
+767 save/restore cycles, 3,058 distinct casts — 0 findings.** All eight battle suites
+green. Status rows per sweep rose from 341k to 670k, which is the passives actually
+firing.
+
+### Where this can be wrong
+
+* **936 groups are validated against exactly one human-read ground truth.** Zero Cal
+  agreeing is real evidence; 3,000 clean fights is real evidence of not crashing. Neither
+  says the other 935 have the right triggers. Four wrong-recipient bugs surfaced in a
+  single evening of play, and more will.
+* **580 groups still derive nothing** — no English prose, or a status the prose never
+  names while a clause is unaccounted for. They are inert exactly as before, and visible
+  in `unmodelled` rather than silent.
+* **A hand entry shadows derived rules entirely.** Lucifer's compiled set includes a
+  prose-stated "recovers the caster's Max HP by 25% after dealing attack" that her hand
+  entry does not have, and the hand entry wins, so it does not fire. Merging the two would
+  risk double-application; shadowing is predictable. Worth revisiting if the hand table
+  outlives its six entries.
+
+---
+
 ## Risks
 
 * **Trigger timing is the weakest link.** The no-operand opcodes are prose inference, not
