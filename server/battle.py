@@ -2937,6 +2937,22 @@ class Battle:
         # field; the party's already fired at battle open and does not re-trigger.
         self._apply_battle_start([u for u in self.units.values()
                                   if u.team == TEAM_ENEMY])
+        # THE MOVE GAUGE RESTARTS WITH THE WAVE, for both sides.
+        #
+        # A wave's enemies are freshly built `Unit`s and so began at zero already; the
+        # party carried whatever it had banked when the last enemy fell. That is not
+        # symmetric and it is not what the game does -- a survivor sitting at 90% opened
+        # the new wave with a free turn before anything on the other side could move, and
+        # `next_wave_strargs` sends `sync()` (which carries scv), so the client drew the
+        # carried bar rather than a reset one.
+        #
+        # Cooldowns and ultimate charge deliberately do NOT reset: carrying those forward
+        # is the whole point of a multi-wave stage. Only the gauge restarts, exactly as it
+        # does at battle open, where every unit starts at zero and the queue is decided by
+        # SPD alone.
+        for unit in self.units.values():
+            unit.scv = 0.0
+            unit.pending_scv = 0.0
         self._roll_turn_order()
         # Every wave needs its own WaveBegin: BattleUnitManager.SetAllCollider() runs
         # only in HandleWaveBegin, and BattleUnit.InitBattleUnit does NOT add a

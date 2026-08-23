@@ -147,6 +147,50 @@ def check_a_whole_fight():
     print(f"        ({turns} turns played, {payloads} attack payloads validated)")
 
 
+def check_wave_resets_the_move_gauge():
+    """A new wave restarts the ATB for BOTH sides, and carries cooldowns forward.
+
+    Reported from play. A wave's enemies are freshly built units and so began at zero
+    already, while the party carried whatever it had banked when the last enemy fell --
+    so a survivor sitting at 90% opened the next wave with a free turn before anything
+    on the other side could move. `next_wave_strargs` sends `sync()`, which carries scv,
+    so the client drew the carried bar too.
+
+    Cooldowns and ultimate charge must NOT reset with it: carrying those across waves is
+    the whole point of a multi-wave stage, and zeroing the lot would be the easy wrong
+    fix for this.
+    """
+    battle, _state = a_battle()
+    if battle.wave_max < 2:
+        check("the fixture stage is multi-wave", False, f"wave_max={battle.wave_max}")
+        return
+
+    party = [u for u in battle.units.values() if u.team == bt.TEAM_PLAYER]
+    survivor = min(party, key=lambda u: u.spd)          # slowest, so SPD cannot save it
+    survivor.scv = 99.0
+    survivor.cooldowns = [0, 3, 0, 0]
+    survivor.charge = 2
+    for u in battle.units.values():
+        if u.team == bt.TEAM_ENEMY:
+            u.hp = 0
+
+    battle.advance_wave()
+
+    check("no unit carries its move gauge into the new wave",
+          all(u.scv < bt.SCV_FULL for u in battle.units.values()
+              if u.order != battle.acting_unit().order),
+          str({o: round(u.scv, 1) for o, u in battle.units.items()}))
+    fastest = max(battle.units.values(), key=lambda u: u.spd)
+    check("  ...so the new wave opens on SPD, not on a banked bar",
+          battle.acting_unit().spd == fastest.spd,
+          f"{battle.acting_unit().order} acts, fastest is {fastest.order}")
+    check("  ...and the head start specifically is gone",
+          battle.acting_unit().order != survivor.order or survivor.spd == fastest.spd)
+    check("cooldowns survive the wave", survivor.cooldowns[1] == 3,
+          str(survivor.cooldowns))
+    check("  ...and so does ultimate charge", survivor.charge == 2, str(survivor.charge))
+
+
 def check_statuses_reach_the_unit():
     """A status the engine applies must be real state, not just wire decoration."""
     battle, state = a_battle()
@@ -787,6 +831,7 @@ def main():
                check_raid_boss_is_cc_immune,
                check_damage_and_after_action_hooks,
                check_passive_rule_machinery,
+               check_wave_resets_the_move_gauge,
                check_headwind_stops_the_gauge,
                check_gauge_block_expires_without_a_turn,
                check_statuses_reach_the_unit,
