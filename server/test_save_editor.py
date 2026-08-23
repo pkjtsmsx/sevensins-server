@@ -133,6 +133,26 @@ def check_diamonds_cannot_overflow_int32():
         check("  ...with headroom for what the player earns next",
               total <= se.CURRENCY_MAX, f"{total:,}")
 
+    # The GRANT paths share the same ceiling -- an editor-only cap would just move the
+    # overflow to "play for a while after editing". See player_state.core.add_currency.
+    pid = "1000099"
+    ps.save(ps.load(int(pid)))
+    st = ps.load(int(pid))
+    for _ in range(400):
+        ps.grant_reward(st, 1, 5_000_000)          # free diamonds
+        ps.grant_currency(st, 32, 5_000_000)       # paid diamonds
+        ps.grant_reward(st, 2, 14_000_000)         # Mira, one farm clear at a high rate
+        ps.grant_item(st, 101, 9_000_000)          # an ordinary stack
+    cur = st.get("currency") or {}
+    cash = int(cur.get("1") or 0) + int(cur.get("32") or 0)
+    check("granting cannot overflow the diamond pair either", cash <= int32_max,
+          f"{cash:,}")
+    check("  ...nor a single currency", int(cur.get("16") or 0) <= int32_max,
+          f"{int(cur.get('16') or 0):,}")
+    stacks = [int(e.get("amount") or 0) for b in (st.get("backpack") or {}).values()
+              for e in b.values()]
+    check("  ...nor a backpack stack", max(stacks) <= int32_max, f"{max(stacks):,}")
+
     # A normal edit must not be collateral damage.
     pid = "1000098"
     ps.save(ps.load(int(pid)))

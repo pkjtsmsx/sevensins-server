@@ -49,9 +49,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # headroom below the wrap point: the client keeps adding to this number after the edit
 # (rewards, refunds, a login bonus), and a balance parked just under the limit would
 # overflow on the next thing the player earned.
-INT32_MAX = 2 ** 31 - 1
-CURRENCY_MAX = 1_000_000_000
-CASH_CURRENCIES = ("1", "32")           # summed by the client into one Diamond total
+# Shared with the server's grant paths so there is ONE ceiling, not an editor limit and
+# a separate runtime limit that can drift apart -- see player_state.core.BALANCE_MAX.
+INT32_MAX = ps.INT32_MAX
+CURRENCY_MAX = ps.BALANCE_MAX
+CASH_CURRENCIES = ps.CASH_CURRENCY_KEYS  # summed by the client into one Diamond total
 
 CURRENCIES = {
     "1": "Diamonds (free)",
@@ -458,7 +460,7 @@ def apply_edits(pid, edits):
             node["lv"] = _clamp(int(lv["lv"]), int(node.get("lv_min", 1)),
                                 int(limits["level_max"]))
         if "xp" in lv:
-            node["xp"] = _clamp(int(lv["xp"]), 0, 2_000_000_000)
+            node["xp"] = _clamp(int(lv["xp"]), 0, CURRENCY_MAX)
         changed.append(f"level={node['lv']}")
 
     for row in (edits.get("items") or []):

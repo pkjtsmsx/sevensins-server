@@ -34,6 +34,53 @@ ENERGY_ACTION, ENERGY_ARENA, ENERGY_ARENA_SP, ENERGY_ARENA_TEAM = 1, 16, 17, 18
 # CurrencyType: Cash=1, Mira=16, RealCash=32, DMMCash=48, GuildPoints=64
 CUR_CASH, CUR_MIRA, CUR_REAL, CUR_DMM, CUR_GUILD = 1, 16, 32, 48, 64
 
+# ---- the int32 ceiling every stored balance shares -------------------------
+#
+# **The client reads these as SIGNED 32-BIT.** Past 2,147,483,647 a value wraps
+# negative, and the game then refuses to spend it -- a real save reached -294,967,296
+# diamonds and got "diamonds insufficient, go to the shop?" against a negative bar.
+#
+# Nothing on the grant paths used to bound this. That was survivable while a payout was
+# a few hundred Mira; it is not now that server rates can multiply one, and a farm rung
+# already pays six figures -- at a coin rate of 100 a single Treasure Raiders clear is
+# ~14M, so about 150 clears would wrap the balance.
+#
+# SATURATE, never wrap: a player who hits the ceiling keeps the ceiling. Losing the
+# excess is a non-event; going negative costs them everything they had.
+#
+# The cap sits an order of magnitude below the wrap because the client keeps ADDING to
+# these numbers -- a balance parked just under the limit would overflow on the next
+# reward, which reads as random corruption rather than as a limit.
+INT32_MAX = 2 ** 31 - 1
+BALANCE_MAX = 1_000_000_000
+
+# **Diamonds are TWO balances the client ADDS**, so neither can be capped on its own:
+#     Balance(Cash) = BalanceDetailed(1) + BalanceDetailed_RealCash()   (type 32)
+# 2,000,000,000 in each is individually legal and sums to 4,000,000,000, which is
+# exactly the -294,967,296 above. Anything summed for display has to be capped as a set.
+CASH_CURRENCY_KEYS = (str(CUR_CASH), str(CUR_REAL))
+
+
+def capped_balance(value, headroom=0):
+    """Clamp one stored number to the shared ceiling. Saturating, never negative."""
+    return max(0, min(int(value), BALANCE_MAX - int(headroom)))
+
+
+def add_currency(state, key, amount):
+    """Credit a currency, saturating at the ceiling. -> the new balance.
+
+    The ONE place a currency balance grows, so the cap cannot be forgotten at a call
+    site. Cash types are capped against their PARTNER's balance, since the client shows
+    their sum as one number.
+    """
+    key = str(key)
+    bag = state.setdefault("currency", {})
+    headroom = 0
+    if key in CASH_CURRENCY_KEYS:
+        headroom = sum(int(bag.get(o) or 0) for o in CASH_CURRENCY_KEYS if o != key)
+    bag[key] = capped_balance(int(bag.get(key, 0) or 0) + int(amount), headroom)
+    return bag[key]
+
 # ---- starting balances -----------------------------------------------------
 # **These were 999,999 diamonds and 999/999 stamina, and that was the whole of the
 # "gem and stamina rewards do not increase" report (2026-08-18).** The grants always
@@ -1035,12 +1082,11 @@ def grant_reward(state, item_id, amount):
             grant_soulmirror(state, item_id)
         return "equipment"
     if action == ITEM_ACTION_CURRENCY and param:
-        key = str(param)
-        state["currency"][key] = int(state["currency"].get(key, 0)) + amount
+        add_currency(state, param, amount)
         return "currency"
     if action == ITEM_ACTION_ENERGY and param:
         slot = state["energy"].setdefault(str(param), {"energy": 0, "cap": 0})
-        slot["energy"] = slot.get("energy", 0) + amount
+        slot["energy"] = capped_balance(slot.get("energy", 0) + amount)
         return "energy"
     grant_item(state, item_id, amount)
     return "backpack"
@@ -1055,7 +1101,9 @@ def grant_item(state, item_id, amount, cbp_type=BP_STORAGE_NORMAL):
     bag = state["backpack"].setdefault(str(cbp_type), {})
     for slot, entry in bag.items():
         if entry.get("iid") == item_id:
-            entry["amount"] = entry.get("amount", 0) + amount
+            # A stack is read as int32 too -- Mira-like items and trainers accumulate
+            # without limit otherwise.
+            entry["amount"] = capped_balance(entry.get("amount", 0) + amount)
             return int(slot)
     sid = (max((int(k) for k in bag), default=0) + 1)
     bag[str(sid)] = {"sid": sid, "iid": item_id, "amount": amount,

@@ -620,6 +620,5 @@ def set_avg_choice(state, avg_id, option, difficulty=1):
 def grant_currency(state, cur_type, amount):
     """Credit a CurrencyType directly. The AVG reply names a currency type rather than
     an item id, so this is the one grant path that does not go through a design row."""
-    key = str(cur_type)
-    state["currency"][key] = int(state["currency"].get(key, 0)) + amount
-    return state["currency"][key]
+    from .core import add_currency
+    return add_currency(state, cur_type, amount)
