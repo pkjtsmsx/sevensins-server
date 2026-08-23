@@ -30,6 +30,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import battle as bt                                     # noqa: E402
+import design_data as dd                                # noqa: E402
 
 _fail = 0
 MON = datetime.date(2026, 8, 17)
@@ -180,7 +181,26 @@ def check_drops_respect_the_band():
     # A Temple clear with zero shards HANGS the client (PanelBattleRuneResult is driven
     # entirely by the rune list), so this is not a cosmetic check.
     check("no clear ever pays zero shards", empty == 0, str(empty))
-    check("a clear pays the live count", bt.STARSHARD_DROPS_PER_CLEAR == 2)
+    # ONE CANDIDATE PER WAVE, the rule every stage in the game follows. This was a flat
+    # 2, read off a live panel -- which is right for the ten 2-wave floors and one short
+    # on the thirty-one 3-wave ones. Asserted per floor from the pack's own wave count,
+    # not against a constant, so a floor whose waves change cannot silently drift.
+    wrong, counts = [], set()
+    for sort in range(1, 42):
+        sid = 1600000 + sort
+        row = dd.row("stage", sid) or {}
+        waves = len(dd.csv_ints(row.get("_mobGroup_datas"))) or 1
+        got = bt.stage_drops_for(sid, waves=waves, rng=random.Random(sort))
+        counts.add(len(got))
+        if len(got) != waves:
+            wrong.append((sid, waves, len(got)))
+    check("a Temple floor offers one candidate per wave", not wrong, str(wrong[:5]))
+    # The client draws 1, 2 or 3 (`_rune3_*` is the last object PanelRuneSelect has) and
+    # indexes a 3-entry base table by count-1, so a fourth would be rolled and never
+    # rendered. See docs/STARSHARD_TEMPLE.md.
+    check("  ...and never more than the panel can lay out",
+          max(counts) <= bt.STARSHARD_PANEL_MAX, str(sorted(counts)))
+    check("  ...and both floor shapes are exercised", counts == {2, 3}, str(sorted(counts)))
 
 
 def check_depth_actually_matters():

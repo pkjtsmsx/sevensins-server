@@ -1061,6 +1061,12 @@ STARSHARD_SETS_MWF = (201, 205, 206, 208)     # Fortitude, Nightshade, Mystery, 
 STARSHARD_SETS_TTSS = (207, 202, 203, 204)    # Defender, Chaos, Hawkeye, Slayer
 STARSHARD_TEMPLE_SLOTS = tuple(range(1, 7))   # all six slots can drop
 STARSHARD_DROPS_PER_CLEAR = 2                 # what the live results panel shows
+# The candidate count is now one per wave; this is the ceiling the CLIENT imposes on
+# that. `PanelRuneSelect.OnPanelEnable` indexes a 3-entry base table by `count-1` and
+# has objects for `_rune1`/`_rune2`/`_rune3` only, so a fourth candidate would be rolled
+# server-side and never drawn. Every Temple floor is 2 or 3 waves, so this does not bind
+# today -- it is here so that a 4-wave floor could never silently lose a shard.
+STARSHARD_PANEL_MAX = 3
 STARSHARD_MAX_STAR = 6                        # ★1..★6 shard items all exist
 STARSHARD_MAX_RANK = 4                        # 0..4 = N / R / SR / UR / LR
 STARSHARD_SET_NAMES = {201: "Endearment", 202: "Chaos", 203: "Hawkeye", 204: "Slayer",
@@ -1249,13 +1255,23 @@ def _weighted(rng, pairs):
     return pairs[-1][1]
 
 
-def starshard_temple_drops(stage_id, rng=None, when=None):
-    """[RuneDrop, ...] a Temple clear actually pays: STARSHARD_DROPS_PER_CLEAR shards,
-    each rolling its own set, slot, star and rank.
+def starshard_temple_drops(stage_id, rng=None, when=None, waves=None):
+    """[RuneDrop, ...] the CANDIDATES a Temple clear offers -- one per wave.
 
-    Star AND rank both come from the stage's own `box_rank` band now; the rank used to
-    be one flat table shared by all 41 floors, which is what made deep runs feel the
-    same as shallow ones.
+    Each rolls its own set, slot, star and rank. Star AND rank both come from the
+    stage's own `box_rank` band now; the rank used to be one flat table shared by all 41
+    floors, which is what made deep runs feel the same as shallow ones.
+
+    **One per wave, like every other stage in the game** -- the Temple is unusual in that
+    the player then KEEPS one of them rather than all, but the count is the same rule.
+    This was a flat 2 for every floor, read off a live panel showing a slot I next to a
+    slot II; the 10 two-wave floors reproduce that exactly, and the 31 three-wave floors
+    were quietly offering one candidate fewer than their waves.
+
+    Three is safely inside what the client draws: `PanelRuneSelect` lays out 1, 2 or 3
+    (`_rune1_Middle_Info`, `_rune2_Left/Right_Info`, `_rune3_*`) chosen by a `count-1`
+    lookup into a base table of {1, 2, 4} -- see docs/STARSHARD_TEMPLE.md. Six slots are
+    eligible, so three distinct candidates are always available to draw.
     """
     import random as _r
     rng = rng or _r
@@ -1264,12 +1280,17 @@ def starshard_temple_drops(stage_id, rng=None, when=None):
     if not stars or not ranks:
         return []
     sets = starshard_sets_for_day(when)
-    # Distinct slots, so the two candidates are a real choice rather than near-duplicates
-    # -- the live panel shows a slot I next to a slot II.
+    if waves is None:
+        row = dd.row("stage", int(stage_id)) or {}
+        waves = len(dd.csv_ints(row.get("_mobGroup_datas"))) or STARSHARD_DROPS_PER_CLEAR
+    # Distinct slots, so the candidates are a real choice rather than near-duplicates --
+    # the live panel shows a slot I next to a slot II. Capped at what the panel can lay
+    # out; a fourth would have no object to render into.
+    count = max(1, min(int(waves), STARSHARD_PANEL_MAX, len(STARSHARD_TEMPLE_SLOTS)))
     slots = list(STARSHARD_TEMPLE_SLOTS)
     rng.shuffle(slots)
     out = []
-    for slot in slots[:STARSHARD_DROPS_PER_CLEAR]:
+    for slot in slots[:count]:
         star = _weighted(rng, stars)
         rank = _weighted(rng, ranks)
         item_id = rng.choice(sets) * 1000 + slot * 100 + rank * 10 + star
@@ -1372,8 +1393,19 @@ def transcend_corridor_pool(stage_id):
             for _w, t in sorted(gremlin_tier_weights(stage_id), key=lambda x: x[1])]
 
 
-def transcend_corridor_drops(stage_id, rng=None):
-    """[(item id, count)] of Gremlin Pieces for a clear, or [] if not the dungeon."""
+def transcend_corridor_drops(stage_id, rng=None, waves=None):
+    """[(item id, count)] of Gremlin Pieces for a clear, or [] if not the dungeon.
+
+    ONE STACK PER WAVE, which is the rule every other stage in the game follows: a
+    3-wave clear shows three drop icons. This paid the whole clear as a single stack
+    regardless, so all 80 corridor stages -- every one of them 3 waves -- drew one icon
+    where the panel has room for three.
+
+    The TOTAL is unchanged: the same `GREMLIN_PIECES_PER_CLEAR` is split across the
+    waves rather than handed over at once, and the tier is still rolled once for the
+    clear. Splitting a total nobody has re-observed is a presentation fix, and rolling a
+    fresh tier per wave would have been a balance change wearing its clothes.
+    """
     import random as _r
     rng = rng or _r
     weights = gremlin_tier_weights(stage_id)
@@ -1391,7 +1423,15 @@ def transcend_corridor_drops(stage_id, rng=None):
     dmap = dd.row("dmap", row.get("_dmap_id")) or {}
     root = int(dmap.get("_link") or row.get("_dmap_id") or 0)
     count = GREMLIN_PIECES_PER_CLEAR * (2 if root == TRANSCEND_DOUBLE_ROOT else 1)
-    return [(GREMLIN_PIECE_ITEMS[tier - 1], count)]
+    if waves is None:
+        waves = len(dd.csv_ints(row.get("_mobGroup_datas"))) or 1
+    waves = max(1, int(waves))
+    item = GREMLIN_PIECE_ITEMS[tier - 1]
+    # Spread the remainder over the EARLY waves rather than dropping it: 4 pieces over
+    # 3 waves is 2/1/1, never 1/1/1 with one piece quietly lost.
+    base, extra = divmod(count, waves)
+    return [(item, base + (1 if i < extra else 0)) for i in range(waves)
+            if base + (1 if i < extra else 0) > 0]
 
 
 STAGE_DROPS = {
@@ -1467,17 +1507,19 @@ def stage_drops_for(stage_id, waves=None, rng=None):
     known = STAGE_DROPS.get(int(stage_id))
     if known is not None:
         return list(known)
-    # **A Starshard Temple stage MUST drop starshards, or the client hangs.**
-    # See starshard_temple_drops.
-    temple = starshard_temple_drops(stage_id, rng)
-    if temple:
-        return temple
-    gremlins = transcend_corridor_drops(stage_id, rng)
-    if gremlins:
-        return gremlins
+    # Resolved BEFORE the branches below, not after: one drop per wave is the rule the
+    # whole game follows, so every branch needs the wave count, not just the last one.
     if waves is None:
         row = dd.row("stage", int(stage_id)) or {}
         waves = len(dd.csv_ints(row.get("_mobGroup_datas"))) or 1
+    # **A Starshard Temple stage MUST drop starshards, or the client hangs.**
+    # See starshard_temple_drops.
+    temple = starshard_temple_drops(stage_id, rng, waves=waves)
+    if temple:
+        return temple
+    gremlins = transcend_corridor_drops(stage_id, rng, waves=waves)
+    if gremlins:
+        return gremlins
     # A bond stage pays its karma coin INSTEAD of generic loot, and a farm dungeon pays
     # the one resource it exists for; only what neither claims falls to the generator.
     karma = kizuna_drops(stage_id, rng)
