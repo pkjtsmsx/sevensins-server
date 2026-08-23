@@ -552,7 +552,23 @@ def _report(out, applied):
     `Rule(ON_DAMAGE_TAKEN, effect=DAMAGE, to=ATTACKER, ...)`, which the rule table
     already expresses.
     """
-    for target, effect, amount in applied or []:
+    for row in applied or []:
+        # `fire()` returns a MIXED list: (target, effect, amount) for a damage or heal
+        # rule, but (target, Active) for one that grants a status. Unpacking everything as
+        # a triple crashed the fight outright -- ValueError, mid-turn -- for any passive
+        # whose damage trigger grants a status. The stage suite never fielded one; random
+        # five-cast teams in tools/ai_arena.py hit it immediately.
+        if len(row) == 2:
+            target, active = row
+            # It already landed on the unit. The client is told for exactly the reason
+            # this function exists: state the server applied and never reported leaves the
+            # icon missing until the next sync.
+            out.statuses.append(StatusEvent(
+                target=target.order, status_id=active.status_id, name=active.name,
+                applied=True, duration=active.remaining, magnitude=active.magnitude,
+                stacks=active.stacks, permanent=active.permanent))
+            continue
+        target, effect, amount = row
         if not amount:
             continue
         if effect == _passives.DAMAGE:

@@ -149,6 +149,51 @@ def check_status_state():
 
 
 
+def check_passive_report_shapes():
+    """`_report` must survive the MIXED list `passives.fire()` returns.
+
+    A damage or heal rule yields `(target, effect, amount)`; a status rule yields
+    `(target, Active)`. `_report` unpacked every row as a triple, so any passive whose
+    damage trigger GRANTS a status raised ValueError mid-fight and killed the turn. The
+    stage suites never fielded such a cast; random five-cast teams in tools/ai_arena.py
+    hit it on the first sweep -- which is exactly why it is pinned here, where the shape
+    is asserted directly, rather than left to a fuzzer to rediscover.
+    """
+    from engine import passives as pv
+
+    # 2096131 -- a passive that grants a status ON_DAMAGE_TAKEN, i.e. the 2-tuple.
+    holder = unit("200", core.TEAM_ENEMY)
+    holder.skills = [0, 0, 0, 2096131]
+    holder.hp = int(holder.max_hp * 0.2)              # its rules gate on HP <= 30%
+    # 1100131 -- a passive that HEALS ON_DAMAGE_DEALT, i.e. the triple. Seed 1 clears
+    # its 25% chance gate.
+    attacker = unit("101", core.TEAM_PLAYER)
+    attacker.skills = [0, 0, 0, 1100131]
+    attacker.hp = attacker.max_hp // 2                # so the heal has room to land
+    units = [attacker, holder]
+
+    rows = pv.fire_all(pv.ON_DAMAGE_TAKEN, [holder], units,
+                       ctx={"attacker": attacker, "rng": random.Random(1)})
+    rows += pv.fire_all(pv.ON_DAMAGE_DEALT, [attacker], units,
+                        ctx={"victim": holder, "rng": random.Random(1)}, fired=set())
+    widths = {len(r) for r in rows}
+    check("fire() really does return a mixed list", widths == {2, 3}, str(widths))
+
+    out = core.Outcome(caster="101", skill_id=0, swings=1, targets=["200"])
+    try:
+        core._report(out, rows)
+        raised = None
+    except Exception as exc:                                    # noqa: BLE001
+        raised = exc
+    check("a status row does not crash the report", raised is None, repr(raised))
+    check("...and reaches the wire, so the icon is not missing until the next sync",
+          any(s.target == "200" and s.applied for s in out.statuses),
+          str(out.statuses))
+    check("...while a heal row is still reported as a heal",
+          any(h["target"] == "101" and h["amount"] > 0 for h in out.heals),
+          str(out.heals))
+
+
 def check_effect_recipients():
     """An effect's recipient is NOT the skill's target.
 
@@ -337,6 +382,9 @@ def main():
     check("with it, the gated status lands", "Freeze" in names, str(names))
     check("...and only that one -- Stun needs The Fallen", "Stun" not in names,
           str(names))
+
+    print("\npassive reporting:")
+    check_passive_report_shapes()
 
     print("\nstatus rules:")
     caster, units = field(n_enemy=1)
