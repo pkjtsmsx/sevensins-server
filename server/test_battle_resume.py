@@ -334,7 +334,12 @@ def test_new_engine_statuses_survive_a_restart():
     restored = bt.restore_battle(json.loads(json.dumps(b.to_state())))
     got = [s for s in restored.units[foes[0].order].statuses
            if isinstance(s, est.Active)]
-    check("engine statuses survive a save/restore", len(got) == 2, str(len(got)))
+    # Counted by ID, not by length. The unit also carries whatever its own passive grants
+    # at battle start, and that count is data -- it went from 0 to 1 the day passives
+    # started being derived from the pack instead of hand-written for six casts. What
+    # this check is about is that the two Actives put on deliberately come back.
+    landed = {s.status_id for s in got}
+    check("engine statuses survive a save/restore", {602, 5011} <= landed, str(landed))
     by_name = {s.name: s for s in got}
     check("  ...with their duration", by_name["Freeze"].remaining == 2)
     check("  ...their stack count", by_name["Tinder"].stacks == 2)

@@ -487,6 +487,46 @@ def check_headwind_stops_the_gauge():
     check("  ...including the boss", boss.order in acted, str(acted))
 
 
+def check_gauge_block_expires_without_a_turn():
+    """A 2-turn gauge block must last 2 turns, not the whole fight.
+
+    Every other status ages on its holder's own turn, and a stun still lets the bar fill
+    so the holder reaches the front of the queue and its turn is skipped there. Headwind
+    stops the bar, so its holder never reaches the front, so nothing ever ticks -- and a
+    two-turn debuff removes a unit from the fight permanently.
+
+    Found on a real device, from the other end: Beelzebub's passive put a Headwind on
+    HERSELF (the pack's English says "on all allies" where the Chinese says 敵方 --
+    enemies) and she took zero turns in a 62-attack fight. The recipient was the bug; this
+    is the reason it was fatal rather than merely wrong, and it would have been just as
+    fatal applied by an enemy.
+    """
+    from engine import status as est2
+
+    battle, _ = a_battle(stage=1000005, party=PASSIVE_PARTY)
+    victim = next(u for u in battle.units.values()
+                  if u.team == bt.TEAM_PLAYER and u.scv < 99)
+    victim.statuses.append(est2.Active(status_id=4105, name="Headwind", kind="gauge",
+                                       category="shield", remaining=2))
+    check("the victim starts gauge-blocked", est2.blocks_gauge_gain(victim))
+
+    for _ in range(6):
+        battle.end_turn()
+
+    check("a 2-turn gauge block expires on the battle's clock",
+          not est2.blocks_gauge_gain(victim),
+          str([(s.name, s.remaining) for s in victim.statuses]))
+
+    acted = []
+    for _ in range(12):
+        a = battle.acting_unit()
+        if a:
+            acted.append(a.order)
+        battle.end_turn()
+    check("  ...and the unit takes turns again once it does",
+          victim.order in acted, str(acted))
+
+
 def check_divine_fallen_toggle():
     """Lucifer's marker flips on each Lamenting Starlight and never doubles up.
 
@@ -748,6 +788,7 @@ def main():
                check_damage_and_after_action_hooks,
                check_passive_rule_machinery,
                check_headwind_stops_the_gauge,
+               check_gauge_block_expires_without_a_turn,
                check_statuses_reach_the_unit,
                check_control_actually_skips_a_turn,
                check_only_engine_statuses_exist,

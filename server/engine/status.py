@@ -664,6 +664,16 @@ def blocks_gauge_gain(unit):
     return any(st.status_id in ids for st in _actives(unit))
 
 
+def blocks_gauge_gain_status(active):
+    """Is THIS status the thing stopping the bar? -> bool.
+
+    `blocks_gauge_gain` answers it for a unit; the caller ageing a block on the battle's
+    clock has to know which of the unit's statuses to age.
+    """
+    ids, _ = _gauge_block_ids()
+    return isinstance(active, Active) and active.status_id in ids
+
+
 def blocks_gauge_loss(unit):
     """Steady and friends: this unit's move gauge cannot be reduced."""
     _, ids = _gauge_block_ids()

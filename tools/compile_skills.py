@@ -159,6 +159,14 @@ _POSSESSIVE_SOURCE = re.compile(
     r"\b(?:the\s+)?(?:caster|self|its\s+own|target|enemy|ally)'?s?\s+"
     r"(?:max(?:imum)?\s*)?(?:HP|ATK|DEF|SPD|CRI|CRT)\b", re.I)
 
+_MINUS_PCT = re.compile(r"-\s*\d+(?:\.\d+)?\s*%")
+# "increases the Move Gauge of all allies (EXCLUDING THE CASTER) by 10%" -- the excluded
+# party is the one place in a clause that names somebody who is NOT the recipient, and
+# reading it as one turns an ally-wide buff into a self-buff. Stripped before any
+# recipient test, never after.
+_EXCLUSION = re.compile(
+    r"[(（]?\b(?:excluding|except(?:\s+for)?|other\s+than|but\s+not|不包[括含]|除了)\b"
+    r"[^)）,.;]{0,40}[)）]?", re.I)
 _GAUGE_DOWN = re.compile(r"reduc|decreas|lower|lose|下降|減少|降低", re.I)
 _GAUGE_UP = re.compile(r"increas|rise|gain|restor|提升|增加|上升", re.I)
 
@@ -355,9 +363,16 @@ def gauge_effect(r):
     if pct is not None and _is_damage_coefficient(r, pct):
         pct = None                      # still the coefficient -- not this effect's
 
-    clause = before + note[m.start():m.end() + 80]
+    clause = _EXCLUSION.sub(" ", before + note[m.start():m.end() + 80])
     if pct is not None and _GAUGE_DOWN.search(clause) and not _GAUGE_UP.search(clause):
         pct = -pct
+    elif pct is not None and _MINUS_PCT.search(clause) and not _GAUGE_UP.search(clause):
+        # A bare MINUS is a direction word too. "Dedication Delay I: when knocked out by
+        # direct damage, the Move Gauge of all enemies -30%" carries no verb at all, so
+        # the verb test above left it +30 -- a gauge CUT on the enemy team compiled as a
+        # gauge GIFT to it, and every unit holding such a passive handed the opposition a
+        # third of a turn. Found from a device: units acting on a bar that was not full.
+        pct = -abs(pct)
 
     if _GAUGE_SELF.search(clause):
         tgt = "caster"
@@ -733,7 +748,7 @@ def status_removes(r, status_name):
         return got
 
 
-def _clause_for(note, name):
+def _clause_for(note, name, _with_strength=False):
     """-> the sentence naming this status, or None.
 
     Tries the qualifier-stripped name too: the prose writes "Cast Serum Injection on up
@@ -742,11 +757,22 @@ def _clause_for(note, name):
     unconditional and un-retargeted -- which is how a party buff ended up on the boss.
     """
     if not note or not name:
-        return None
+        return (None, False) if _with_strength else None
     wanted = [name.lower()]
     bare = re.sub(r"\s*\([^)]*\)\s*$", "", name).strip().lower()
     if bare and bare != wanted[0]:
         wanted.append(bare)
+    # An immunity row is NAMED "Freeze Immunity" and DESCRIBED as "gains immunity to
+    # Freeze for 3 turns" -- the words are the same and the order is not, so a literal
+    # search never found the clause. Every such status then looked undocumented, and the
+    # passive compiler turned a stated 3-turn immunity into a permanent one.
+    m = re.match(r"(.*?)\s*immunity\s*(?:\([^)]*\))?$", bare or "", re.I)
+    if m and m.group(1):
+        for part in re.split(r"[/,]| and ", m.group(1)):
+            part = part.strip().lower()
+            if part:
+                wanted += [f"immunity to {part}", f"immune to {part}",
+                           f"immunes to {part}"]
 
     # A status is often named in SEVERAL sentences -- as the CONDITION in one and as the
     # thing GRANTED in another. Lucifer's Lamenting Starlight is the clean example:
@@ -759,17 +785,28 @@ def _clause_for(note, name):
     # sentence where a granting verb precedes the name; fall back to first match.
     fallback = None
     for sentence in re.split(r"(?<=[.!?])\s+", note):
+        # Search past the clause's own LABEL, and only past that. A clause is written
+        # "Diligence: When a battle starts, inflict Diligence on ...", so the name's
+        # first occurrence is the label at offset 0 -- with no text in front of it, no
+        # granting verb can precede it, and the sentence that literally says "inflict
+        # Diligence" was graded a weak match. Scanning EVERY occurrence instead fixes
+        # that and breaks something worse: Lucifer's "if the caster is affected by The
+        # Divine, grants the caster The Fallen ... removes its The Divine effect" then
+        # matches on its own trailing mention, which is exactly the first-sentence
+        # capture the comment above exists to prevent.
         low = sentence.lower()
+        label = re.match(r"[^:]{1,40}:\s*", low)
+        base = label.end() if label else 0
         for w in wanted:
-            at = low.find(w)
+            at = low.find(w, base)
             if at < 0:
                 continue
             if fallback is None:
                 fallback = sentence
             if _GRANTS.search(low[:at]):
-                return sentence
+                return (sentence, True) if _with_strength else sentence
             break
-    return fallback
+    return (fallback, False) if _with_strength else fallback
 
 
 # A condition of the form "if the caster is affected by The Divine" IS evaluatable -- it
@@ -906,6 +943,384 @@ def damage(r, targets_enemy):
             "prose_times": times, "source": source}
 
 
+# --- passives: WHEN a clause fires ---------------------------------------------------
+#
+# A passive is `at TRIGGER, if CONDITION, apply STATUS to SELECTION`. Everything but the
+# trigger was already compiled per effect -- the status, the recipient, the condition and
+# the numbers all come from the sentence naming the status. The trigger is stated in that
+# same sentence and was simply never read, which is why `engine/passives.py` had to
+# hand-write the whole tuple for six casts and every other passive in the game did
+# nothing at all.
+#
+# The patterns are anchored on the EVENT WORD rather than the whole phrase: the pack says
+# the same thing a dozen ways ("when a battle starts", "at the start of the battle",
+# "when the battle begins", "before the battle starts" are one trigger and four
+# spellings), and matching the event survives that.
+PASSIVE_TRIGGERS = [
+    # Death first: "when knocked out" also contains "when", and nothing else keys on it.
+    ("on_death", re.compile(
+        r"\b(?:when|after|upon|if)\b[^,.;]{0,40}?"
+        r"\b(?:defeated|knocked\s*out|dies|died|death)\b", re.I)),
+    # Damage TAKEN before DEALT: "when taking damage from attacks" and "while dealing
+    # damage" share every word but the verb.
+    ("on_damage_taken", re.compile(
+        r"\b(?:when|while|after|every\s+time|each\s+time|upon|if)\b[^,.;]{0,40}?"
+        r"(?:tak(?:e|es|ing)\s+(?:damage|attacks?|enemy)|damaged|受到傷害|被攻擊)", re.I)),
+    ("on_damage_dealt", re.compile(
+        r"\b(?:when|while|after|every\s+time|each\s+time|upon|if)\b[^,.;]{0,40}?"
+        r"(?:deal(?:s|ing)?\s+(?:any\s+)?(?:damage|attack)|land(?:s|ing)\s+a\s+critical"
+        r"|造成傷害)", re.I)),
+    ("battle_start", re.compile(
+        r"\b(?:when|at|before|on|upon|in)\b[^,.;]{0,30}?\bbattles?\b[^,.;]{0,20}?"
+        r"(?:start|begin)|(?:start|beginning)\s+of\s+(?:the\s+|a\s+|each\s+)?battle"
+        r"|戰鬥開始", re.I)),
+    ("after_action", re.compile(
+        r"\bafter\b[^,.;]{0,20}?\b(?:the\s+)?(?:action|attack(?:ing)?|turn|acting)\b"
+        r"|行動後", re.I)),
+    # ...and everything else keyed on the holder's own turn, which the pack writes as
+    # both "when a turn starts" and "before the action".
+    ("turn_start", re.compile(
+        r"\b(?:when|at|before|on|upon)\b[^,.;]{0,30}?"
+        r"\b(?:turns?|actions?|attacking|acting)\b[^,.;]{0,20}?(?:start|begin)?"
+        r"|before\s+(?:the\s+)?(?:action|turn|attacking)|行動前", re.I)),
+]
+
+# "When affected by this effect, SPD-100" describes what a STATUS does to whoever holds
+# it. That is the status registry's business; turning it into a rule would make the
+# holder apply its own debuff to itself every turn.
+_GLOSSARY_CLAUSE = re.compile(
+    r"\bwhen\s+affected\s+by\s+(?:this|the)\s+(?:effect|status)", re.I)
+
+# Any verb that describes an effect happening -- deliberately WIDER than `_GRANTS`. It is
+# used to decide whether a clause is still unclaimed, and an unclaimed clause SUPPRESSES
+# the implicit-trait default below. Over-matching here therefore costs coverage, never
+# correctness, which is the direction to err in.
+_DESCRIBES_EFFECT = re.compile(
+    r"\b(grants?|inflicts?|applies|apply|gives?|gains?|cast|increases?|reduces?|raises?"
+    r"|lowers?|boosts?|restores?|heals?|deals?|removes?|opens?|absorbs?|immune|immunity)\b"
+    # A stat change is often written with no verb at all -- Jacqueline's whole passive is
+    # "Before the action, if HP>90%, ATK+25%". Without this the clause read as describing
+    # nothing, so it never counted as unclaimed, so the two statuses it governs fell
+    # through to the implicit-trait default and became permanent battle-start buffs with
+    # the HP gate dropped.
+    r"|\b(?:ATK|DEF|SPD|HP|CRI|CRIT)\s*[+\-]\s*\d"
+    r"|[+\-]\s*\d+(?:\.\d+)?\s*%", re.I)
+
+# "there is a 40% fixed chance to inflict Stun" -- when the pack states a probability it
+# is always written this way, and it beats op 113's neutral 0.75 stand-in.
+_STATED_CHANCE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*%\s*(?:fixed\s+)?(?:chance|probability)"
+    r"|(?:chance|probability)\s*(?:of|is)?\s*(\d+(?:\.\d+)?)\s*%", re.I)
+
+# A permanent effect with no stated timing happens once, at battle start. "All allies
+# SPD+5% permanently" has no trigger word in it at all, and leaving it untriggered means
+# it never happens -- which is worse than the one inference being wrong.
+_ALWAYS_ON = re.compile(
+    r"\bpermanent(?:ly)?\b|\bentire\s+battle\b|\bwhole\s+battle\b|\bfull\s+battle\b"
+    r"|\balways\b|\bconstantly\b|\bfor the rest of\b|整場戰鬥|永久", re.I)
+
+_HIGHEST = re.compile(
+    r"(?:the\s+)?(\d+|one|two|three)?\s*"
+    r"(ally|allies|allied|enemy|enemies|enemy\s+targets?)\b[^,.;]{0,40}?"
+    r"\bwith\s+the\s+(?:highest|greatest)\s+(ATK|DEF|SPD|HP)", re.I)
+_ON_ATTACKER = re.compile(r"\b(?:on|to)\s+the\s+attacker\b", re.I)
+
+
+def passive_trigger(clause):
+    """-> the trigger a passive clause states, or None when it states no timing."""
+    if not clause or _GLOSSARY_CLAUSE.search(clause):
+        return None
+    for name, rx in PASSIVE_TRIGGERS:
+        if rx.search(clause):
+            return name
+    return None
+
+
+# Where one clause stops talking about one status and starts on the next. "grant the
+# caster CC Immunity for two turns AND inflict Headwind on all enemies" is two effects
+# with two different recipients in one sentence, and reading the recipient off the whole
+# sentence gives both of them the first one's answer.
+_FRAGMENT_SPLIT = re.compile(r",\s*|\s+and\s+|;\s*|、|，|並|且", re.I)
+
+
+def _fragment_for(clause, name):
+    """-> the part of `clause` that governs `name`, or the whole clause."""
+    if not clause or not name:
+        return clause
+    low, want = clause.lower(), name.lower()
+    at = low.find(want)
+    if at < 0:
+        return clause
+    start = 0
+    for m in _FRAGMENT_SPLIT.finditer(clause):
+        if m.end() <= at:
+            start = m.end()
+        else:
+            break
+    end = len(clause)
+    for m in _FRAGMENT_SPLIT.finditer(clause):
+        if m.start() >= at + len(want):
+            end = m.start()
+            break
+    return clause[start:end]
+
+
+def _who_in(text):
+    """-> "self" | "ally" | "enemy" | None for one fragment."""
+    if not text:
+        return None
+    text = _EXCLUSION.sub(" ", text)
+    stripped = _POSSESSIVE_SOURCE.sub(" ", text)
+    for probe in (stripped, text):
+        if _GAUGE_ENEMY.search(probe):
+            return "enemy"
+        if _GAUGE_SELF.search(probe):
+            return "self"
+        if _GAUGE_ALLY.search(probe):
+            return "ally"
+    return None
+
+
+def passive_who(r, name, zh_name=None):
+    """-> (who, disagreed): the side a passive's status lands on, Chinese preferred.
+
+    The pack's English is a TRANSLATION and it is not always faithful. Beelzebub's
+    passive is the case that proved it matters: the English says "inflict Headwind on all
+    allies" where the Chinese says 對敵方全體附加逆風 -- "on all ENEMIES". Headwind stops a
+    unit's move gauge, so believing the English gave her a self-inflicted gauge block and
+    she took zero turns in a 62-attack fight.
+
+    `_note1` is the ORIGINAL language, which is why it wins outright on a disagreement
+    rather than merely being consulted. The disagreement is recorded so the count of them
+    is a thing we can look at rather than a thing we assume is small.
+    """
+    en = _who_in(_fragment_for(_clause_for(r.get("_note1_en") or "", name), name))
+    zh = None
+    if zh_name:
+        zh = _who_in(_fragment_for(_clause_for(r.get("_note1") or "", zh_name), zh_name))
+    if zh and en and zh != en:
+        return zh, True
+    return (zh or en), False
+
+
+def passive_chance(clause):
+    """-> the probability the clause states, as a fraction, or None."""
+    m = _STATED_CHANCE.search(clause or "")
+    if not m:
+        return None
+    pct = float(m.group(1) or m.group(2))
+    return pct / 100.0 if 0 < pct <= 100 else None
+
+
+def passive_select(clause):
+    """-> the SELECTION a clause names, beyond the coarse recipient.
+
+    "inflict Diligence on the 1 ally with the highest DEF" is a different rule from "on
+    all allies", and the pack states it in one very regular phrasing.
+    """
+    if not clause:
+        return None
+    if _ON_ATTACKER.search(clause):
+        return {"who": "attacker"}
+    m = _HIGHEST.search(clause)
+    if m:
+        n, who, stat = m.group(1), m.group(2).lower(), m.group(3).upper()
+        return {"who": "ally" if who.startswith("all") else "enemy",
+                "top": stat, "n": sp.WORD_NUM.get((n or "").lower(), None)
+                                or (int(n) if (n or "").isdigit() else 1)}
+    return None
+
+
+def _norm_clause(text):
+    """A comparison key for a clause.
+
+    `_clause_for` searches the WHOLE note and returns "Diligence: When a battle starts,
+    ..."; `_passive_clauses` splits each line at its "Name:" label and returns "When a
+    battle starts, ...". Same sentence, two slices -- so comparing them literally left
+    every clause looking unclaimed, and the implicit-trait default never fired.
+    """
+    text = re.sub(r"^[^:]{1,40}:\s*", "", (text or "").strip())
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def _passive_clauses(note):
+    """The sentences of a passive's note that describe an effect happening.
+
+    Glossary lines (`* Name: body`) and trailing fragments ("Lasts for 1 turn.",
+    "(unremovable)") are neither rules nor evidence that a rule went unread, so they are
+    not clauses.
+    """
+    out = []
+    for line in (note or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("*"):
+            continue
+        body = line.split(":", 1)[1].strip() if ":" in line[:40] else line
+        for sentence in re.split(r"(?<=[.!?])\s+", body):
+            sentence = sentence.strip()
+            if len(sentence) >= 12 and _DESCRIBES_EFFECT.search(sentence):
+                out.append(sentence)
+    return out
+
+
+# Effects with no status to name them still have a clause: "After the action, reduces
+# the Move Gauge of the enemy with the highest HP by 30%" is Zero Cal's second rule, and
+# leaving it unlocatable made its whole clause look unaccounted for -- which in turn
+# suppressed the implicit-trait default for the two traits that boss does carry.
+_PASSIVE_EFFECT_WORD = dict(EFFECT_WORD)
+_PASSIVE_EFFECT_WORD["remove_status"] = re.compile(r"\bremoves?\b|移除|解除", re.I)
+_PASSIVE_EFFECT_WORD["damage"] = re.compile(r"\bdeals?\b[^,.;]{0,20}damage|造成.{0,6}傷害", re.I)
+_PASSIVE_EFFECT_WORD["modify_cd"] = re.compile(r"cooldown|冷卻", re.I)
+
+
+def _sentence_at(note, pos):
+    """The sentence of `note` containing offset `pos`."""
+    start = max(note.rfind(".", 0, pos), note.rfind("\n", 0, pos)) + 1
+    ends = [e for e in (note.find(".", pos), note.find("\n", pos)) if e != -1]
+    return note[start:(min(ends) + 1 if ends else len(note))].strip()
+
+
+def annotate_passive(r, spec, rows=None):
+    """Give every effect of a passive its trigger, in place.
+
+    Three outcomes per effect, and the third is the one that needed care:
+
+      * the clause naming the effect states a timing -> that trigger, source "prose".
+      * the effect is named NOWHERE in the note, and every clause in the note has
+        already been claimed by some other effect -> an undocumented always-on trait.
+        `Elite`, `CC Immunity (SP)` and `Revive Block Immunity` are never described in
+        prose on any boss that carries them; they are simply what a raid boss IS.
+        Applied to the holder at battle start, permanently, source "implicit_trait".
+      * the effect is unnamed but some clause is still unclaimed -> AMBIGUOUS, and left
+        without a trigger. Dark Sanction forces this: its `Duel of the Fates(ATK)` row is
+        described under the clause name "Destiny", so the status looks undocumented while
+        its clause -- conditional, and keyed on "before attacking" -- sits unread.
+        Defaulting that to a permanent battle-start buff would hand the boss an ATK bonus
+        the prose gates behind a mark the party may never carry.
+
+    Everything left over goes in `unmodelled`, so "which passives do we only partly
+    execute?" stays a query the harness can answer rather than a silence.
+    """
+    note = r.get("_note1_en") or ""
+    clauses = _passive_clauses(note)
+    claimed, unmodelled, deferred = set(), [], []
+
+    for e in spec.get("effects") or []:
+        op = e.get("op")
+        if op == "apply_status":
+            name = ((e.get("status") or {}).get("name")) or ""
+            clause, strong = _clause_for(note, name, _with_strength=True)
+            if not strong:
+                # A WEAK match -- the name merely appears somewhere, with no granting
+                # verb in front of it -- is not evidence about timing. Trusting it is
+                # worse than having nothing: Jacqueline's rows are named `Body Strike II`
+                # while her prose calls the clause `Healthy Strike II`, so the weak
+                # fallback landed on an unrelated sentence and derived `battle_start` for
+                # a rule the prose keys on "before the action". A missing rule is a gap;
+                # a wrong one is a bug.
+                clause = None
+        else:
+            word = _PASSIVE_EFFECT_WORD.get(op)
+            m = word.search(note) if (word and note) else None
+            clause, name = (_sentence_at(note, m.start()) if m else None), op
+        if not clause:
+            deferred.append((e, name))
+            continue
+        claimed.add(_norm_clause(clause))
+        trigger = passive_trigger(clause)
+        source = "prose"
+        if trigger is None and _ALWAYS_ON.search(clause):
+            trigger, source = "battle_start", "always_on"
+        e["trigger"] = trigger
+        e["trigger_source"] = source if trigger else None
+        sel = passive_select(clause)
+        if op == "apply_status":
+            zh_name = ((rows or {}).get((e.get("status") or {}).get("id")) or {}).get("_name")
+            who, disagreed = passive_who(r, name, zh_name)
+            if who:
+                sel = dict(sel or {})
+                sel.setdefault("who", who)
+            if disagreed:
+                e["prose_disagreed"] = True
+                unmodelled.append({"effect": name, "why": "the English and Chinese prose "
+                                   "name different recipients -- Chinese used",
+                                   "clause": clause[:160]})
+        if sel:
+            e["select"] = sel
+        stated = passive_chance(clause)
+        if stated is not None:
+            e["chance_pct"] = stated
+        if trigger is not None and not e.get("requires"):
+            # `is_conditional` flags any clause containing if/when/while, and on a
+            # passive the trigger IS that word -- "When a battle starts, inflict
+            # Diligence" is not a conditional application, it is an unconditional one
+            # with a stated timing. Left set, every derived rule fired at the
+            # CONDITIONAL_POLICY roll of 50% and a boss's permanent trait became a coin
+            # flip. A real condition still arrives as `requires`, which is evaluatable
+            # and is checked first.
+            e["conditional"] = False
+        if trigger is None:
+            unmodelled.append({"effect": name, "why": "clause states no timing",
+                               "clause": clause[:160]})
+
+    # Containment either way: a note line can hold several sentences, so the slice
+    # `_clause_for` returns and the one `_passive_clauses` yields need not be equal.
+    def _is_claimed(c):
+        key = _norm_clause(c)
+        return any(key in got or got in key for got in claimed)
+
+    unclaimed = [c for c in clauses if not _is_claimed(c)]
+    for e, name in deferred:
+        cat = ((e.get("status") or {}).get("category") or "").lower()
+        if unclaimed:
+            e["trigger"] = None
+            unmodelled.append({"effect": name, "why": "not named in prose, and a clause "
+                               "is unaccounted for", "clause": unclaimed[0][:160]})
+        elif e.get("op") != "apply_status":
+            # Only a STATUS can be an always-on trait. A bare damage or heal opcode with
+            # no prose has no recipient, no magnitude and no timing -- there is nothing
+            # to default it to.
+            e["trigger"] = None
+            unmodelled.append({"effect": name, "why": "no prose for a non-status effect"})
+        elif cat == "debuff":
+            # An undocumented DEBUFF is not a trait -- a trait is something the holder
+            # has, and a debuff is something it does to somebody else. Whom it hits is
+            # exactly what the missing prose would have said.
+            e["trigger"] = None
+            unmodelled.append({"effect": name,
+                               "why": "undocumented debuff -- no recipient stated"})
+        elif name and name.lower() in note.lower():
+            # The prose DOES mention it, just not in a sentence that grants it -- most
+            # often because the name is the clause's own label ("Jealousy Vortex:" for a
+            # status row called `Jealousy`). Something is being said about this status
+            # that this compiler cannot read, so inventing a permanent self-buff for it
+            # is a guess against evidence rather than in the absence of it.
+            e["trigger"] = None
+            unmodelled.append({"effect": name, "why": "named in prose, but never granted "
+                               "by a clause -- probably a clause label"})
+        else:
+            e["trigger"] = "battle_start"
+            e["trigger_source"] = "implicit_trait"
+            e["recipient"] = "caster"
+            # PERMANENT, and the duration is dropped rather than kept. A trait is by
+            # definition unnamed in this skill's prose, so any duration it carries came
+            # from `corpus_default` -- the average of what OTHER skills say when they
+            # grant the same status. For `CC Immunity (SP)` that default is 2 turns, read
+            # off 36 player skills; applying it to a raid boss would give the boss two
+            # turns of immunity in an 84-turn fight, which is not what "the boss is immune
+            # to crowd control" means. Evidence about other skills is not evidence about
+            # this one.
+            nums = e.setdefault("numbers", {})
+            nums["duration"] = None
+            nums["permanent"] = True
+
+    for c in unclaimed:
+        unmodelled.append({"why": "clause matched no effect in the act list",
+                           "clause": c[:160]})
+    if unmodelled:
+        spec["unmodelled"] = unmodelled
+
+
 def compile_skill(rows, sid, swings_by_act):
     r = rows.get(sid)
     if not r:
@@ -940,6 +1355,8 @@ def compile_skill(rows, sid, swings_by_act):
     spec["effects"].extend(eff)
     if unknown:
         spec["unknown"] = unknown
+    if typ == "passive":
+        annotate_passive(r, spec, rows)
     return spec
 
 

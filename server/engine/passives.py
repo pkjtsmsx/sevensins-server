@@ -77,6 +77,18 @@ def _top(pool, key, n):
     return sorted(pool, key=key, reverse=True)[:n]
 
 
+def TOP(group, stat, n):
+    """`group` allies or enemies, ranked by `stat`, top `n`.
+
+    The named helpers below are the hand table's vocabulary; this is the one the compiled
+    rules use, because "the 2 enemies with the highest SPD" is a shape the prose produces
+    in every combination and enumerating them by hand is exactly what this work removes.
+    """
+    pick = ALLIES if group == "ally" else ENEMIES
+    key = str(stat or "").lower()
+    return lambda h, u, c=None: _top(pick(h, u), lambda x: getattr(x, key, 0) or 0, n)
+
+
 def ALLIES_TOP_ATK(n):
     return lambda h, u, c=None: _top(ALLIES(h, u), lambda x: x.atk, n)
 
@@ -443,10 +455,204 @@ def registry_id(name):
     return _REGISTRY_BY_NAME.get(_name_key(name))
 
 
+# `defence` on the unit, `DEF` in the prose. Everything else spells the same.
+_STAT_ATTR = {"DEF": "defence"}
+
+_COMPILED = {}
+
+
+def _selector(eff, category):
+    """-> the selection a compiled effect acts on.
+
+    `select` is the exact phrasing the compiler recovered ("the 1 ally with the highest
+    DEF", "on the attacker"); `recipient` is the coarse fallback it has always emitted.
+    When neither says, the STATUS decides: a passive that grants a buff grants it to
+    itself, and one that inflicts a debuff inflicts it on the other side. Guessing the
+    wrong way here is the bug that put a party buff on the raid boss, so the default is
+    read off the thing being applied rather than off the skill's target.
+    """
+    sel = eff.get("select") or {}
+    if sel.get("who") == "attacker":
+        return ATTACKER
+    if sel.get("top"):
+        stat = _STAT_ATTR.get(sel["top"], sel["top"].lower())
+        return TOP("ally" if sel.get("who") == "ally" else "enemy",
+                   stat, int(sel.get("n") or 1))
+    # `select.who` is read from the fragment governing THIS status, and cross-checked
+    # against the original Chinese; `recipient` is the older sentence-wide guess. Prefer
+    # the narrower reading -- a sentence that grants one status to the caster and inflicts
+    # another on the enemy otherwise gives both of them the same answer, which is how
+    # Beelzebub came to Headwind herself.
+    #
+    # NOTE: there is deliberately no "a passive may not harm its own caster" guard here.
+    # Self-cost is a real mechanic -- Metatron's passive is called Sacrifice and triggers
+    # on her own defeat, and an entire raid-boss family is built on it -- so such a guard
+    # would silently delete correct rules to hide incorrect ones.
+    if sel.get("who") in ("self", "ally", "enemy"):
+        return {"self": SELF, "ally": ALLIES, "enemy": ENEMIES}[sel["who"]]
+    recipient = eff.get("recipient")
+    if recipient == "caster":
+        return SELF
+    if recipient == "allies":
+        return ALLIES
+    return ENEMIES if category in ("debuff", "damage_over_time") else SELF
+
+
+def _denies_turns(eff):
+    """Would this status stop its holder from taking turns? -> bool.
+
+    Read from the registry rather than from a name list: a gauge-gain blocker is derived
+    by `status._gauge_block_ids` from the rows' own wording, and `control` is the kind the
+    immobilisers carry.
+    """
+    sid = (eff.get("status") or {}).get("id")
+    if not sid:
+        return False
+    gain, _ = _status._gauge_block_ids()
+    if sid in gain:
+        return True
+    return ((_status.specs.status(sid) or {}).get("kind") or "") == "control"
+
+
+def _gauge_to(eff):
+    """Who a compiled move-gauge change lands on.
+
+    The move gauge is not a status and has no category to read a side off, and passing a
+    stand-in category to `_selector` resolved 58 of the 91 derived gauge rules to ENEMIES
+    -- including "after the action, increase the Move Gauge of all allies by 10%", which
+    became a free 10% of a turn for the opposition, every turn. Reported from a device as
+    units acting on a bar that was not full, which is exactly what an out-of-band gauge
+    gain looks like.
+
+    So the clause decides, and where the clause is silent the SIGN does: a gain goes to
+    the caster's own side and a cut to the other one. Nothing in this game hands the
+    enemy free gauge or drains its own.
+    """
+    sel = (eff.get("select") or {}).get("who")
+    if sel in ("self", "ally", "enemy"):
+        return {"self": SELF, "ally": ALLIES, "enemy": ENEMIES}[sel]
+    target = eff.get("target")
+    if target == "caster":
+        return SELF
+    if target == "allies":
+        return ALLIES
+    if target == "targets":
+        return ENEMIES
+    return ALLIES if float(eff.get("percent") or 0) > 0 else ENEMIES
+
+
+def _compiled_rules(spec):
+    """-> rules derived from the compiled spec, for a passive with no hand-written entry.
+
+    Every field but the trigger was already compiled per effect; `tools/compile_skills.py`
+    now reads the trigger out of the same clause. This is the whole reason the table
+    below stops at six casts: what it expresses, the pack already states, and stating it
+    twice means 1,510 passives that silently do nothing.
+
+    Conventions are core.execute's, deliberately -- an effect should not behave
+    differently for being on a passive:
+
+      * `chance` (op 113) rolls at the same neutral 0.75, since the pack never states a
+        probability;
+      * a `requires` clause becomes a real condition;
+      * a conditional with nothing to evaluate follows CONDITIONAL_POLICY, which rolls.
+    """
+    rules = []
+    # A status the passive already grants INDIRECTLY needs no rule of its own. Lucifer's
+    # passive lists [The Divine, CC Immunity] and The Divine's own row nests CC Immunity,
+    # which `status.run_nested` applies every turn the marker is held -- so a rule for it
+    # would apply the same immunity a second time, on a different clock. This is the one
+    # place the derived rules contradicted the hand-written table, and it is the hand
+    # table that was right.
+    nested = set()
+    for eff in (spec or {}).get("effects") or []:
+        sid = (eff.get("status") or {}).get("id")
+        for sub in ((specs.status(sid) or {}).get("nested") or []) if sid else []:
+            if sub.get("op") == "apply_status" and sub.get("status"):
+                nested.add(int(sub["status"]))
+
+    for eff in (spec or {}).get("effects") or []:
+        trigger = eff.get("trigger")
+        if trigger not in ALL_TRIGGERS:
+            continue
+        if (eff.get("status") or {}).get("id") in nested:
+            continue
+        if eff.get("trigger_source") == "implicit_trait" and _denies_turns(eff):
+            # An UNDOCUMENTED status becomes a permanent always-on trait, which is right
+            # for `Elite` and `CC Immunity (SP)` -- what a raid boss simply IS. It is
+            # never right for something that takes the holder's turns away: no unit "is"
+            # permanently stunned or permanently unable to fill its gauge. Zero Cal V
+            # carries an undescribed `Headwind`, and defaulting it made the unit sit out
+            # every fight -- permanently, so even the battle-clock ageing that catches an
+            # ordinary gauge block could not free it.
+            #
+            # This is NOT a rule against a passive harming its caster; authored self-cost
+            # is real (Metatron's passive is called Sacrifice) and reaches the engine
+            # through the prose path untouched. It is a rule against INVENTING one.
+            continue
+        nums = eff.get("numbers") or {}
+        requires = eff.get("requires") or {}
+        when = ALWAYS
+        if requires.get("status"):
+            when = holds(requires["status"],
+                         on="holder" if requires.get("on") == "caster" else "other")
+        # Imported here, not at module scope: core imports THIS module, so reading the
+        # policy at call time is what keeps the two from importing each other.
+        from . import core as _core
+        # A stated probability beats op 113's stand-in: the opcode only says "this one
+        # is chancy", while the prose says how chancy.
+        chance = eff.get("chance_pct")
+        if chance is None and eff.get("chance"):
+            chance = 0.75
+        if chance is None and eff.get("conditional") and not requires:
+            if _core.CONDITIONAL_POLICY == "skip":
+                continue
+            if _core.CONDITIONAL_POLICY == "roll":
+                chance = _core.CONDITIONAL_CHANCE
+        op = eff.get("op")
+        if op == "apply_status":
+            st = eff.get("status") or {}
+            if not st.get("name"):
+                continue
+            rules.append(Rule(
+                trigger, st["name"], _selector(eff, (st.get("category") or "").lower()),
+                when=when, chance=chance,
+                duration=nums.get("duration"),
+                permanent=bool(nums.get("permanent")),
+                magnitude=nums.get("magnitude"), stat=nums.get("stat"),
+                note=f"compiled: {eff.get('trigger_source')}"))
+        elif op == "modify_gauge" and eff.get("percent") is not None:
+            rules.append(Rule(trigger, effect=GAUGE, to=_gauge_to(eff),
+                              when=when, chance=chance,
+                              magnitude=float(eff["percent"]), note="compiled"))
+        elif op == "heal" and eff.get("percent") is not None:
+            rules.append(Rule(trigger, effect=HEAL,
+                              to=SELF if eff.get("target") == "caster" else ALLIES,
+                              when=when, chance=chance, basis=OF_SELF_MAX_HP,
+                              magnitude=float(eff["percent"]), note="compiled"))
+        elif op == "revive" and eff.get("percent") is not None:
+            rules.append(Rule(trigger, effect=REVIVE, to=RANDOM_DEAD_ALLY,
+                              when=when, chance=chance,
+                              magnitude=float(eff["percent"]), note="compiled"))
+    return rules
+
+
 def rules_for(skill_id):
-    """-> the rules for a passive, by its group (all levels share one entry)."""
+    """-> the rules for a passive, by its group (all levels share one entry).
+
+    The hand-written table wins where it exists -- it is read from prose by a human and
+    covers clauses the compiler cannot express -- and everything else is derived. Before
+    the fallback, 1,510 of 1,516 passive groups had no rules at all, which is why a raid
+    boss with `CC Immunity (SP)` in its own effect list could be chain-frozen.
+    """
     spec = specs.skill(skill_id) or {}
-    return PASSIVES.get(spec.get("group") or skill_id, [])
+    group = spec.get("group") or skill_id
+    hand = PASSIVES.get(group)
+    if hand:
+        return hand
+    if group not in _COMPILED:
+        _COMPILED[group] = _compiled_rules(spec)
+    return _COMPILED[group]
 
 
 def _amount(rule, holder, target, ctx):
@@ -472,7 +678,12 @@ def _amount(rule, holder, target, ctx):
 
 
 def fire(trigger, holder, passive_skill_id, units, ctx=None, fired=None):
-    """Run one passive's rules for one trigger. -> [(unit, Active)] actually applied.
+    """Run one passive's rules for one trigger. -> what was actually applied.
+
+    The list is MIXED, and the shape says which rule produced the row: a status rule
+    yields `(unit, Active)`, a damage/heal/gauge/revive rule yields
+    `(unit, effect, amount)`. This docstring claimed the first shape for both, which is
+    how `core._report` came to unpack every row as a triple and crash the turn.
 
     `fired` is a per-battle set the caller keeps, so `once` rules stay once.
     """

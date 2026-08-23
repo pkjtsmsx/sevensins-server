@@ -2588,10 +2588,42 @@ class Battle:
                 fired=getattr(self, "_passives_fired", None))
             # A resolved turn spends a turn of the actor's own statuses.
             _engine_status.tick_duration(acted)
+        self._age_gauge_blocks()
         self._roll_turn_order()
         self.round += 1
         self.turn_open = False
         self._start_of_turn()
+
+    def _age_gauge_blocks(self):
+        """Spend a turn off a gauge block even though its holder never gets a turn.
+
+        Every other status ages on its holder's own turn, and `tick_duration` says why
+        that is right even for a skipped one: "a skipped turn still counts against a
+        duration or a stun would never wear off." A stun still lets the bar fill, so the
+        unit reaches the front of the queue and its turn is skipped there.
+
+        Headwind does not. The bar never fills, so the unit never reaches the front, so
+        nothing ever ticks -- and a two-turn gauge block removes its holder from the
+        fight permanently. Beelzebub found this on a real device: her passive put a
+        Headwind on herself and she took zero turns in 62, which reads as a dead unit
+        rather than a debuff.
+
+        So a gauge block is aged on the BATTLE's clock instead of its holder's, which is
+        the only clock it leaves running. Only the blocking statuses age here; the rest
+        of the unit's statuses keep their own-turn timing, since those are not what is
+        denying the turns.
+        """
+        for unit in self.units.values():
+            if not unit.alive or not _engine_status.blocks_gauge_gain(unit):
+                continue
+            for st in list(unit.statuses):
+                if not isinstance(st, _engine_status.Active) or st.permanent:
+                    continue
+                if not _engine_status.blocks_gauge_gain_status(st):
+                    continue
+                st.remaining = int(st.remaining) - 1
+                if st.remaining <= 0:
+                    unit.statuses.remove(st)
 
     def _start_of_turn(self, _depth=0):
         """DoT/HoT ticks for whoever is now at the front of the queue, then skip its
