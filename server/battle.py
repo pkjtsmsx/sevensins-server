@@ -891,13 +891,23 @@ def _evolution_depth_bonus(stage_id, row):
     return 1.0 + (depth - 1.0) * (order - first) / float(max(1, last - first))
 
 
-# ---- Kizuna dungeons -------------------------------------------------------
+# ---- Department Store tower floors (NOT the bond dungeons) ------------------
 #
-# The bond dungeons hand out a category Coin spent at the Department Store on the gift
-# items that raise a cast's Karma. WHICH coin is not guessed: it is the stage's own
-# guaranteed Stage Clear reward -- `1,9511,1` on dmap 41419 is Drink Coin, through 9520
-# Weapon Coin. So the panel and the payout cannot disagree about which character's gift
-# track a run feeds.
+# **These 120 stages are not bond dungeons and the coin is not a cast's gift track.**
+# They are the Tower Base / Tower Body floors of the Skyscraper Department Store event
+# (dmap root 41416), and 9511-9520 are its ten CATEGORY tokens -- Drink, Restaurant,
+# Cosmetic, Sex Toy, Music, Festival, Gaming, Sports, Bookstore, Weapon. The item says so
+# itself: 9511 `_note1_en` is "Please exchange drink items at the Department Store".
+#
+# The actual bond dungeons are dmaps 22001-22076, one per cast, and they pay that cast's
+# FAVOURITE GIFT as a one-time Stage Clear reward (Ravinia: 4/6/8 Roses by difficulty).
+# Different subsystem, different economy -- see docs/EVENT_TOWERS.md, which also records
+# that the Department Store's exchange never shipped, so these tokens currently buy
+# nothing.
+#
+# WHICH token is not guessed: it is the stage's own guaranteed Stage Clear reward --
+# `1,9511,1` on dmap 41419 is Drink Coin, through 9520 Weapon Coin. So the panel and the
+# payout cannot disagree about which category a run feeds.
 #
 # **Exactly 120 stages qualify.** The rest of the family has a type-1 reward of item 36
 # (Soul Gem, the generic Kizuna-skill material) and is deliberately NOT treated as karma
