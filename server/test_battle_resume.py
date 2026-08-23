@@ -106,33 +106,33 @@ def test_round_trip():
 
 
 def test_statuses_and_shield_survive():
+    """Engine statuses round-trip with their per-instance runtime state.
+
+    Was an OLD-engine test (fx.apply_status + a synthesized catalog status). That engine
+    is gone, so the same properties are asserted against the engine's own statuses: the
+    thing worth protecting is that `shield_hp` and the inflicter's snapshotted ATK are
+    PER-INSTANCE and survive, not which class holds them.
+    """
+    from engine import status as est
     state = fresh_state("resume_test_2")
-    # Old-engine round-trip: pinned, because the default is the new engine now and the
-    # legacy statuses below would be migrated on restore (which
-    # test_legacy_statuses_migrate_to_the_engine covers on purpose).
-    was, bt.NEW_ENGINE = bt.NEW_ENGINE, False
     battle = bt.Battle(1101, ps.battle_team(state), 10, None, 0, 0)
-    import battle_effects as fx
     caster = next(u for u in battle.units.values() if u.team == bt.TEAM_PLAYER)
     target = next(u for u in battle.units.values() if u.team == bt.TEAM_ENEMY)
-    fx.apply_status(target, "Stun", source=caster)
-    fx.apply_status(target, "Shield", source=caster)
-    caster.statuses.append(fx.Status("ATK+30%", 2,
-                                     {"stat_mods": [{"stat": "ATK", "value": 30,
-                                                     "unit": "pct"}]}))
+    target.statuses.append(est.Active(status_id=6001, name="Stun", kind="control",
+                                      category="misc", remaining=2))
+    target.statuses.append(est.Active(status_id=4001, name="Shield", kind="shield",
+                                      category="misc", remaining=3, shield_hp=750,
+                                      source_atk=1234))
 
     restored = bt.restore_battle(json.loads(json.dumps(battle.to_state())))
-    rt, rc = restored.units[target.order], restored.units[caster.order]
-    check("catalog status (Stun) survives", any(s.name == "Stun" for s in rt.statuses))
-    shield_before = next(s.shield_hp for s in target.statuses if s.name == "Shield")
-    shield_after = next((s.shield_hp for s in rt.statuses if s.name == "Shield"), None)
-    check("Shield's remaining capacity survives", shield_after == shield_before,
-          f"{shield_after} != {shield_before}")
-    synth = next((s for s in rc.statuses if s.name == "ATK+30%"), None)
-    check("a synthesized (non-catalog) status keeps its own definition",
-          synth is not None and synth.definition.get("stat_mods") ==
-          [{"stat": "ATK", "value": 30, "unit": "pct"}])
-    bt.NEW_ENGINE = was
+    rt = restored.units[target.order]
+    check("a control status survives", any(s.name == "Stun" for s in rt.statuses))
+    shield = next((s for s in rt.statuses if s.name == "Shield"), None)
+    check("Shield's remaining capacity survives",
+          shield is not None and shield.shield_hp == 750,
+          str(getattr(shield, "shield_hp", None)))
+    check("  ...and the inflicter's snapshotted ATK",
+          shield is not None and shield.source_atk == 1234)
 
 
 def test_full_lifecycle_across_a_simulated_restart():
@@ -205,48 +205,50 @@ def test_legacy_statuses_migrate_to_the_engine():
     this would either crash the restore or silently keep statuses the engine cannot
     read -- and an in-progress raid is not a thing to throw away on a deploy.
     """
-    import battle_effects as fx
     from engine import status as est
 
-    was = bt.NEW_ENGINE
-    try:
-        bt.NEW_ENGINE = False                       # save it the old way
-        state = fresh_state("legacy_migrate")
-        battle = bt.Battle(1101, ps.battle_team(state), 10, None, 0, 0)
-        unit = next(iter(battle.units.values()))
-        foe = next(u for u in battle.units.values() if u.team != unit.team)
-        fx.apply_status(unit, "Taunt", source=foe)
-        fx.apply_status(unit, "Shield", source=foe)
-        saved = json.loads(json.dumps(battle.to_state()))
-        raw = saved["units"][unit.order]["statuses"]
-        check("the save really is in the OLD format",
-              all(not s.get("_engine") for s in raw), str(raw)[:120])
+    state = fresh_state("legacy_migrate")
+    battle = bt.Battle(1101, ps.battle_team(state), 10, None, 0, 0)
+    unit = next(iter(battle.units.values()))
+    foe = next(u for u in battle.units.values() if u.team != unit.team)
 
-        bt.NEW_ENGINE = True                        # ...and restore it the new way
-        restored = bt.restore_battle(saved)
-        got = restored.units[unit.order].statuses
-        check("every legacy status came back as an engine status",
-              got and all(isinstance(s, est.Active) for s in got),
-              str([type(s).__name__ for s in got]))
-        by_name = {s.name: s for s in got}
-        check("  ...Taunt keeps who inflicted it",
-              by_name["Taunt"].source_order == foe.order,
-              str(by_name["Taunt"].source_order))
-        check("  ...and still redirects after the restart",
-              getattr(restored._forced_target(restored.units[unit.order]), "order",
-                      None) == foe.order)
-        check("  ...Shield keeps its remaining absorb",
-              by_name["Shield"].shield_hp > 0, str(by_name["Shield"].shield_hp))
-        check("  ...and a turn runs on the restored battle",
-              restored.end_turn() is not False)
+    # The legacy shape is written by HAND rather than produced by the old engine, which
+    # no longer exists to produce it. That is the stronger test anyway: what has to keep
+    # working is reading a save some phone wrote weeks ago, and this pins the exact
+    # on-disk form rather than whatever a live object happened to serialise to.
+    saved = json.loads(json.dumps(battle.to_state()))
+    saved["units"][unit.order]["statuses"] = [
+        {"name": "Taunt", "remaining": 2, "stacks": 1, "shield_hp": 0,
+         "dot_atk": None, "taunt_source": foe.order},
+        {"name": "Shield", "remaining": 3, "stacks": 1, "shield_hp": 640,
+         "dot_atk": 1200, "taunt_source": None},
+    ]
+    check("the fixture really is in the OLD format",
+          all(not s.get("_engine") for s in saved["units"][unit.order]["statuses"]))
 
-        # An unknown name is DROPPED, never given an invented id: the client feeds every
-        # id to GetRow and that throws (contract 3.8).
-        check("an unresolvable legacy status is dropped, not invented",
-              bt._status_from_state({"name": "Not A Real Status", "remaining": 2})
-              is None)
-    finally:
-        bt.NEW_ENGINE = was
+    restored = bt.restore_battle(saved)
+    got = restored.units[unit.order].statuses
+    check("every legacy status came back as an engine status",
+          got and all(isinstance(s, est.Active) for s in got),
+          str([type(s).__name__ for s in got]))
+    by_name = {s.name: s for s in got}
+    check("  ...Taunt keeps who inflicted it",
+          by_name["Taunt"].source_order == foe.order,
+          str(by_name["Taunt"].source_order))
+    check("  ...and still redirects after the restart",
+          getattr(restored._forced_target(restored.units[unit.order]), "order",
+                  None) == foe.order)
+    check("  ...Shield keeps its remaining absorb",
+          by_name["Shield"].shield_hp == 640, str(by_name["Shield"].shield_hp))
+    check("  ...and the DoT snapshot becomes source_atk",
+          by_name["Shield"].source_atk == 1200)
+    check("  ...and a turn runs on the restored battle",
+          restored.end_turn() is not False)
+
+    # An unknown name is DROPPED, never given an invented id: the client feeds every id
+    # to GetRow and that throws (contract 3.8).
+    check("an unresolvable legacy status is dropped, not invented",
+          bt._status_from_state({"name": "Not A Real Status", "remaining": 2}) is None)
 
 
 def main():
@@ -308,43 +310,38 @@ def test_new_engine_statuses_survive_a_restart():
     `'Active' object has no attribute 'dot_atk'` -- killing the connection the moment a
     battle started.
 
-    The whole suite runs on the OLD path by default, so no Active is ever constructed and
-    the bug was invisible to all of it. Anything touching the shared unit needs a check
-    that actually runs with the flag on.
+    The whole suite ran on the OLD path by default at the time, so no Active was ever
+    constructed and the bug was invisible to all of it. That default is gone now, but the
+    lesson is not: anything touching the shared unit needs a check on the path people
+    actually play.
     """
-    import battle as bt
     from engine import status as est
 
-    was = bt.NEW_ENGINE
-    bt.NEW_ENGINE = True
-    try:
-        state = fresh_state("resume_test_engine")
-        b = bt.Battle(1101, ps.battle_team(state), 10, None, 0, 0)
-        foes = [u for u in b.units.values() if u.team == bt.TEAM_ENEMY and u.alive]
-        # Land one of each shape: a control with a duration and a DoT carrying a
-        # snapshotted ATK, since those exercise different fields.
-        foes[0].statuses.append(est.Active(
-            status_id=602, name="Freeze", kind="control", category="misc",
-            remaining=2, source_atk=1234))
-        foes[0].statuses.append(est.Active(
-            status_id=5011, name="Tinder", kind="dot", category="damage_over_time",
-            remaining=3, magnitude=30.0, stacks=2, source_atk=999))
+    state = fresh_state("resume_test_engine")
+    b = bt.Battle(1101, ps.battle_team(state), 10, None, 0, 0)
+    foes = [u for u in b.units.values() if u.team == bt.TEAM_ENEMY and u.alive]
+    # Land one of each shape: a control with a duration and a DoT carrying a
+    # snapshotted ATK, since those exercise different fields.
+    foes[0].statuses.append(est.Active(
+        status_id=602, name="Freeze", kind="control", category="misc",
+        remaining=2, source_atk=1234))
+    foes[0].statuses.append(est.Active(
+        status_id=5011, name="Tinder", kind="dot", category="damage_over_time",
+        remaining=3, magnitude=30.0, stacks=2, source_atk=999))
 
-        # Through JSON, as the real save does -- a dataclass that only round-trips
-        # in memory would still break on disk.
-        restored = bt.restore_battle(json.loads(json.dumps(b.to_state())))
-        got = [s for s in restored.units[foes[0].order].statuses
-               if isinstance(s, est.Active)]
-        check("engine statuses survive a save/restore", len(got) == 2, str(len(got)))
-        by_name = {s.name: s for s in got}
-        check("  ...with their duration", by_name["Freeze"].remaining == 2)
-        check("  ...their stack count", by_name["Tinder"].stacks == 2)
-        check("  ...and the inflicter's snapshotted ATK",
-              by_name["Tinder"].source_atk == 999)
-        check("  ...and still tick after the restart",
-              est.tick(restored.units[foes[0].order])[0] > 0)
-    finally:
-        bt.NEW_ENGINE = was
+    # Through JSON, as the real save does -- a dataclass that only round-trips
+    # in memory would still break on disk.
+    restored = bt.restore_battle(json.loads(json.dumps(b.to_state())))
+    got = [s for s in restored.units[foes[0].order].statuses
+           if isinstance(s, est.Active)]
+    check("engine statuses survive a save/restore", len(got) == 2, str(len(got)))
+    by_name = {s.name: s for s in got}
+    check("  ...with their duration", by_name["Freeze"].remaining == 2)
+    check("  ...their stack count", by_name["Tinder"].stacks == 2)
+    check("  ...and the inflicter's snapshotted ATK",
+          by_name["Tinder"].source_atk == 999)
+    check("  ...and still tick after the restart",
+          est.tick(restored.units[foes[0].order])[0] > 0)
 
 
 if __name__ == "__main__":

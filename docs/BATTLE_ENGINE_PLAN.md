@@ -716,6 +716,148 @@ What remains is mechanical: the fallback attack path, `hit_count`/`is_complete`/
 
 ---
 
+## Phase 9 — fuzzing the engine (2026-08-22)
+
+`tools/battle_fuzz.py`. The suites walk the whole skill corpus but always on a handful of
+hand-built fields; what they never produce is **combinations** — five arbitrary casts with
+all their passives live at once, statuses landing on units that already hold conflicting
+ones, revives firing into a queue that has already been pruned. Sampling teams at random
+walks straight into that space: `tools/ai_arena.py` hit a `ValueError` inside
+`engine.core._report` within eighty teams while trying to measure something else entirely.
+
+### The bug that justified building it
+
+`_passives.fire()` returns a **mixed** list — `(target, effect, amount)` for a damage or
+heal rule, but `(target, Active)` for one that grants a status. `_report` unpacked
+everything as a triple, so any passive whose damage trigger grants a status killed the
+fight mid-turn with a `ValueError`. No stage in the suite fields one. The fix reports the
+2-tuple as a `StatusEvent` rather than dropping it, for the reason `_report` exists at all:
+state the server applied and never reported leaves the icon missing until the next sync.
+
+### Two classes of finding, and the second is the dangerous one
+
+* **Crashes.** An exception mid-turn kills the fight. On a phone the player sees the battle
+  stop responding and the traceback goes to a crash log nobody reads.
+* **Silent wire violations** — this project's signature bug. The server applies everything
+  correctly, sends a payload that breaks a client contract, and the client's generic
+  handler *swallows* the error: no stack, no animation, the attacker never yields its turn,
+  and the fight hangs with nothing wrong server-side. The known instance is a duplicate `c`
+  inside one `DamageInfo` group — the client reads the group into a dictionary keyed by `c`
+  and throws "an item with the same key has already been added." Nothing server-side would
+  ever notice. So the invariants are checked on the **real payload, on every attack**,
+  rather than trusting that a fight which did not raise is a fight that works.
+
+### Fuzz the payload the client receives, not the one the bridge returns
+
+The first version checked `bridge.attack_combo`'s return value. That is not the payload,
+and the difference is exactly where a wire bug would hide. After the bridge returns,
+`attack_cmd_json` still folds queued out-of-band status changes onto the lead `DamageInfo`
+(`_drain_pending_status`), and for any skill the new engine has no spec for it discards the
+bridge entirely and **builds the groups by hand**. A fuzzer checking the bridge passes both
+of those without ever having looked at them — and the drained rows are appended
+unconditionally, which is precisely the shape of thing the duplicate-key hang is made of.
+Driving `attack_cmd_json` instead raised the status rows exercised by ~13% on an identical
+seed, all of them rows nothing had previously checked. The envelope is checked too
+(`check_cmd`): a stale order in `line` or a unit missing from `sync` is the same silent
+class — the payload parses and the handler quietly renders the wrong field.
+
+`attack_cmd_json` grew an optional `rng=None` for this. The server never passes it — crit
+and variance should be live — but the function that builds the payload is the one that has
+to be replayable, or a fuzzer can only report that a failing fight existed.
+
+### What the client actually does with a status row (read, not guessed)
+
+`AttackBehavior.updateStatus` (0x1be32d0), the consumer of `DamageInfo.status`. Each row
+is `[order, skillId, rounds]`, and the shape rules are enforced by throwing:
+
+* **Exactly three elements.** `[1]` and `[2]` are read behind `size <= 1` / `size <= 2`
+  guards that raise `ArgumentOutOfRangeException`; a **1-element row is silently skipped**
+  by an outer `size != 1` test, so a short row either kills the turn or drops the status
+  with no sign either way.
+* **Element [1] is a SKILL id, not a status id.** The client calls
+  `DesignSkillForm.GetRow(id)` and then feeds *that* row's status id to
+  `DesignStatusForm.GetRow`. Both throw on a miss. This is the contract
+  `status.wire_status_id` exists to satisfy, and the fuzzer now checks it on the emitted
+  payload rather than trusting the three call sites that build it — a synthesised negative
+  id (passives mint them for statuses with no design row of their own) reaching the wire is
+  the documented infinite-loading-screen hang. Verified by fault injection: forcing
+  `wire_status_id` to return `-175492` makes the sweep report it immediately.
+* **Element [2] gates everything.** `BattleUnit.UpdateStatus` (0x197c680) branches on it:
+  non-zero inserts, **zero removes by id**. The design lookups above sit behind the same
+  test, so a remove row never touches the design pack.
+
+### Duplicates: status rows are safe, `c` in group 0 is the hang
+
+Two different duplicates, opposite answers. First: whether `_drain_pending_status`
+appending the same `[target, sid]` twice could trigger the duplicate-key hang. It cannot.
+Every dictionary write in the *status* consumption path is duplicate-tolerant:
+
+| site | write | behaviour on a repeat |
+|---|---|---|
+| `updateStatus` `statusDic` | `ContainsKey` → `Add` | guarded; also keyed by **unit order**, not status id |
+| `BattleUnit.instantInsertStatusData` (0x197c0d4) | `ContainsKey` → remove from list → `set_Item` | replaces, re-inserts at index 0 |
+| `CollectAttackData` `CurDeathDic` (0x1be13ec) | `ContainsKey` → `set_Item` | guarded |
+| `OnDamage` `CurInjures` (0x1be2a18) | `ContainsKey` → `Add` | guarded |
+| `updateStatus` `CurFxDataDic` | `set_Item` | replaces |
+
+So no invariant was added for the *status-row* duplicate.
+
+**The duplicate-`c` throw site, located.** `AttackBehavior.PlayStart` (0x1be0298), at
+**0x1be0a2c** — the one unguarded `Dictionary.Add` keyed by an order anywhere on the path:
+
+```c
+MainDamagerDic.Clear();                    // once, before the loop
+for (row in DmgInfo[0]) {                  // ONLY the first group
+    if (row.Mode == 5) { ...; continue; }  // multi-target branch, writes no dict
+    unit = GetUnit(row.Order);             // row.Order is `c`
+    MainDamagerDic.Add(unit.Order, 1);     // <-- no ContainsKey guard
+}
+```
+
+`Mode` is at `+0x18` (confirmed against `get_HasHP`), `Order` at `+0x10`. A second row
+naming the same unit throws `An item with the same key has already been added. Key: 101`,
+which is the message logged on device. `PlayStart` runs *before* any damage is applied or
+animated, which is why the attacker never yields its turn: the throw lands at the very
+start of the attack, inside the handler that swallows it.
+
+So the original note was right about the mechanism — the client really does read a group
+into a dictionary keyed by `c`. It is just in `PlayStart`, not in the damage-application
+path; every dictionary write in `HandleAttack` -> `DoAllDamage` -> `OnDamage` is guarded,
+which is what made it look absent. **The fold in `attack_cmd_json`'s `add()` stays.**
+
+Two refinements the original note could not have:
+
+* **Only the first group can throw.** The loop reads `DmgInfo[0]` and nothing else, and
+  `PlayStart` runs once per `AttackJsonData` (we send exactly one). A duplicate in a later
+  swing's group is still malformed — the row is processed twice, so `CriCount`
+  double-counts and one swing draws two damage numbers — but it cannot hang the fight.
+* **`md == 5` rows are exempt**, taking the multi-target branch that writes no dictionary.
+
+The fuzzer keeps the stricter all-groups check (one number per target per swing is the
+intended shape regardless) but now reports a group-0 duplicate as the hang and a later-group
+one as malformedness, so a finding says which it is.
+
+### Result
+
+2,000 randomised fights (mirror and real multi-wave stages, levels 1–400, all four
+choosers, save/restore cycled mid-fight): **144,063 attacks, 15,499 deaths, 341,121 status
+rows, 565 wave advances, 489 save/restore cycles, 2,889 distinct casts — 0 findings**, in
+59 s. The coverage line is printed with the result on purpose, so "no findings" reads as
+evidence rather than as an absence of evidence; a fuzzer that never reaches an interesting
+state finds nothing either.
+
+Two honest limits on that number:
+
+* **The legacy attack builder is never exercised, because it is unreachable.** Of the 1,901
+  distinct skill ids reachable from all 3,121 playable casts, **zero** lack a compiled
+  spec. The counter reads `0 legacy` as a fact about the data, not as a gap in the sweep —
+  and it is a standing argument that the fallback path can go when the flag does.
+* **A fight involving Charm or Confuse is not reproducible from its seed.**
+  `battle._forced_target` scrambles the target with the unseeded module-level
+  `random.choice`, so the repro line printed with such a finding would not replay it.
+
+---
+
 ## Risks
 
 * **Trigger timing is the weakest link.** The no-operand opcodes are prose inference, not

@@ -201,38 +201,29 @@ def check_control_actually_skips_a_turn():
           str(foe.statuses))
 
 
-def check_legacy_and_engine_statuses_coexist():
-    """Both representations live on one shared unit; neither reader may choke."""
-    import battle_effects as fx
+def check_only_engine_statuses_exist():
+    """After the cutover a unit carries ONE status representation.
 
+    This check used to assert the opposite -- that `battle_effects.Status` and
+    `engine.status.Active` could share a unit without either reader choking. That was the
+    right invariant while both engines ran; now the second representation is gone, and
+    what needs pinning is that nothing reintroduces it. A unit growing a second kind
+    again is how the `'Active' object has no attribute 'dot_atk'` drop happened.
+    """
     battle, state = a_battle()
-    caster = next(u for u in battle.units.values() if u.team == bt.TEAM_PLAYER)
-    target = next(u for u in battle.units.values() if u.team == bt.TEAM_ENEMY)
-    target.statuses.clear()                  # battle start may already have applied some
-    fx.apply_status(target, "Stun", source=caster)
-    target.statuses.append(est.Active(status_id=5011, name="Tinder", kind="dot",
-                                      category="damage_over_time", remaining=2,
-                                      magnitude=30.0, source_atk=500))
-    legacy = [s for s in target.statuses if not isinstance(s, est.Active)]
-    engine = [s for s in target.statuses if isinstance(s, est.Active)]
-    check("a unit holds both status representations",
-          bool(legacy) and bool(engine), f"{len(legacy)} legacy, {len(engine)} engine")
-
-    # The legacy readers must see only their own kind, or they raise on `.definition`.
-    check("the legacy filter excludes engine statuses",
-          all(not isinstance(s, est.Active) for s in bt._legacy_statuses(target)))
-    try:
-        battle._start_of_turn()
-        battle.end_turn()
-        check("a turn runs with both kinds present", True)
-    except Exception as exc:                                  # noqa: BLE001
-        check("a turn runs with both kinds present", False,
-              f"{type(exc).__name__}: {exc}")
+    for _ in range(6):
+        try:
+            battle.end_turn()
+        except Exception:                                     # noqa: BLE001
+            break
+    bad = [(u.order, type(s).__name__) for u in battle.units.values()
+           for s in u.statuses if not isinstance(s, est.Active)]
+    check("every status on the field is an engine status", not bad, str(bad[:4]))
 
     restored = bt.restore_battle(json.loads(json.dumps(battle.to_state())))
-    kinds = {type(s).__name__ for s in restored.units[target.order].statuses}
-    check("both survive the save together", "Active" in kinds, str(kinds))
-
+    bad = [(u.order, type(s).__name__) for u in restored.units.values()
+           for s in u.statuses if not isinstance(s, est.Active)]
+    check("  ...and still is after a save/restore", not bad, str(bad[:4]))
 
 
 def check_passives_fire_at_battle_start():
@@ -751,30 +742,24 @@ def check_control_redirects_and_cooldowns():
 
 
 def main():
-    was = bt.NEW_ENGINE
-    bt.NEW_ENGINE = True                     # the whole point of this file
-    try:
-        check("the flag is on for these checks", bt.NEW_ENGINE)
-        for fn in (check_a_whole_fight,
-                   check_passives_fire_at_battle_start,
-                   check_raid_boss_is_cc_immune,
-                   check_damage_and_after_action_hooks,
-                   check_passive_rule_machinery,
-                   check_headwind_stops_the_gauge,
-                   check_statuses_reach_the_unit,
-                   check_control_actually_skips_a_turn,
-                   check_legacy_and_engine_statuses_coexist,
-                   check_divine_fallen_toggle,
-                   check_passive_statuses_resolve,
-                   check_no_unsendable_ids_on_the_wire,
-                   check_nested_status_scripts,
-                   check_heal_basis,
-                   check_seals_and_heal_block,
-                   check_control_redirects_and_cooldowns):
-            print(f"\n{fn.__name__}:")
-            fn()
-    finally:
-        bt.NEW_ENGINE = was
+    for fn in (check_a_whole_fight,
+               check_passives_fire_at_battle_start,
+               check_raid_boss_is_cc_immune,
+               check_damage_and_after_action_hooks,
+               check_passive_rule_machinery,
+               check_headwind_stops_the_gauge,
+               check_statuses_reach_the_unit,
+               check_control_actually_skips_a_turn,
+               check_only_engine_statuses_exist,
+               check_divine_fallen_toggle,
+               check_passive_statuses_resolve,
+               check_no_unsendable_ids_on_the_wire,
+               check_nested_status_scripts,
+               check_heal_basis,
+               check_seals_and_heal_block,
+               check_control_redirects_and_cooldowns):
+        print(f"\n{fn.__name__}:")
+        fn()
     print(f"\n{_fail} failure(s)")
     return 1 if _fail else 0
 

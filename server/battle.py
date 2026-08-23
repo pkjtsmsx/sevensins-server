@@ -26,23 +26,16 @@ import re
 
 import design_data as dd
 import settings
-import battle_effects as fx
+import battle_ai
 from engine import core as _engine_core
 from engine import status as _engine_status
 from engine import passives as _engine_passives
 from engine import specs as _engine_specs
 
-# The engine switch, now defaulting to the NEW engine. It is a temporary escape hatch
-# rather than a choice: `SEVENSINS_BATTLE_ENGINE=old` still selects battle_effects while
-# that package exists, and goes away with it.
-#
-# Defaulting to "old" was not a neutral default. Nothing sets this variable on the phone
-# -- main.py sets SEVENSINS_ACCOUNTS / _DESIGN_CACHE / _PATCH_ROOT and nothing else --
-# so every device ran the old engine no matter what was fixed here, while the desktop
-# server ran the new one because the flag was passed on the command line. Measured on
-# the same corpus, that is 4,754 runnable player skills instead of 8,318, plus none of
-# the status enforcement.
-NEW_ENGINE = os.environ.get("SEVENSINS_BATTLE_ENGINE", "new").strip().lower() != "old"
+# The move CHOOSER, same shape of escape hatch as the engine switch above and for the
+# same reason: a bad weight table should be one environment variable away from the old
+# behaviour, not a rollback. `SEVENSINS_BATTLE_AI=old` restores _auto_move_greedy.
+TIER1_AI = os.environ.get("SEVENSINS_BATTLE_AI", "new").strip().lower() != "old"
 
 # CALIBRATION HOOK (temporary, pairs with patch_design.py's lattice): the served
 # formation table is a 10x10 lattice of candidate positions rather than 5 real slots,
@@ -148,7 +141,7 @@ DEFAULT_ULTIMATE_CHARGE = 0
 # the ATB step with nobody ready.
 FULL_EPS = SCV_FULL - 1e-6
 # DesignSkillRow._type (SkillType enum): 4 = PASSIVE. A passive's effects are event-
-# driven (battle_start / on_counter), not fired by an active use -- see battle_effects.
+# driven (battle_start / on_counter), not fired by an active use.
 SKILLTYPE_PASSIVE = 4
 
 # Test probe for the bloodpact aura. SEVENSINS_BLOOD_EFFECT accepts either
@@ -1183,7 +1176,7 @@ def starshard_temple_pool(stage_id, when=None):
     really can pay a ★1 and a truncated preview under-reports it. On the deepest floors
     that is 6 stars x 4 sets = 24 icons, which is a lot -- but the alternative is Drop
     Info disagreeing with the payout, which is the exact drift the preview/payout check
-    in test_battle_effects.py exists to catch (and did catch, here).
+    in the engine suites exists to catch (and did catch, here).
 
     Rank is not split out: every rank in the band can drop, so no variant is "the"
     answer and the base icon stands for the set.
@@ -1547,17 +1540,6 @@ def skill_ratio(skill_id):
 
 
 
-def _legacy_statuses(unit):
-    """The OLD engine's Status objects only.
-
-    A unit's `statuses` list now holds both kinds: `battle_effects.Status` from the old
-    path and `engine.status.Active` from the new one, because the two engines share the
-    unit. The old readers reach for `.definition` and `.tick()`, which an Active does not
-    have, so every legacy call site filters through this. The list shrinks to nothing as
-    the old engine is retired -- which is the point.
-    """
-    return [s for s in unit.statuses if not isinstance(s, _engine_status.Active)]
-
 
 class Unit(_engine_core.Unit):
     """One combatant. `order` is the dictionary key the client uses everywhere --
@@ -1645,7 +1627,7 @@ class Unit(_engine_core.Unit):
         # time (0 for basics, 3-5 for the big ones); publishing 0 for everything
         # lets the player spam their strongest skill every turn.
         self.cooldowns = [0] * len(self.skills)
-        # Active buffs/debuffs (battle_effects.Status). The effect engine appends here;
+        # Active buffs/debuffs (engine.status.Active). The engine appends here;
         # they tick down on this unit's own turns and modify its effective stats /
         # incoming damage. Empty for the simple-damage path.
         self.statuses = []
@@ -1712,7 +1694,7 @@ class Unit(_engine_core.Unit):
         than firing a guessed effect (Lucifer's Fear Nothing, not yet complete, is one)."""
         return [s for s in self.skills
                 if (dd.row("skill", s) or {}).get("_type") == SKILLTYPE_PASSIVE
-                and fx.is_complete(s)]
+                and (_engine_specs.skill(s) or {}).get("type") == "passive"]
 
     @property
     def alive(self):
@@ -1840,28 +1822,18 @@ class Unit(_engine_core.Unit):
 
 
 def _status_to_state(st):
-    """A catalog-backed status (the overwhelming majority) re-links to
-    fx.catalog()[name] on restore rather than freezing its `definition` -- so a later
-    catalog/status-data fix is picked up by an in-progress fight too. Only a
-    SYNTHESIZED status (the `stat_mod` op's ad-hoc ATK/DEF/SPD buffs, built inline as
-    `Status(tag, ..., synth)` with no catalog entry under that exact tag) carries its
-    own definition, since there is nothing to re-link to."""
-    # The engine's own statuses are a different class and round-trip as a whole: they
-    # carry their meaning in plain fields rather than a catalog link, so `asdict` is
-    # lossless. Tagged so `_status_from_state` can tell the two apart.
-    #
-    # Missing this cost a live drop: an in-progress fight is persisted on every message
-    # (battle resume), so the FIRST turn after an engine status landed raised
-    # `'Active' object has no attribute 'dot_atk'` and killed the connection.
-    if isinstance(st, _engine_status.Active):
-        return {"_engine": True, **dataclasses.asdict(st)}
+    """A status -> its save form. Engine statuses round-trip whole: they carry their
+    meaning in plain fields rather than a catalog link, so `asdict` is lossless.
 
-    d = {"name": st.name, "remaining": st.remaining, "stacks": st.stacks,
-        "shield_hp": st.shield_hp, "dot_atk": st.dot_atk,
-        "taunt_source": st.taunt_source}
-    if st.name not in fx.catalog():
-        d["definition"] = st.definition
-    return d
+    Still TAGGED `_engine`, even though it is now the only kind written, because
+    `_status_from_state` has to keep reading saves written before the cutover -- an
+    untagged dict is a legacy status and takes the migration path.
+
+    The tag also cost a live drop when it was missing: an in-progress fight is persisted
+    on every message (battle resume), so the FIRST turn after an engine status landed
+    raised `'Active' object has no attribute 'dot_atk'` and killed the connection.
+    """
+    return {"_engine": True, **dataclasses.asdict(st)}
 
 
 def _status_from_state(d):
@@ -1871,17 +1843,7 @@ def _status_from_state(d):
         fields = {f.name for f in dataclasses.fields(_engine_status.Active)}
         return _engine_status.Active(**{k: v for k, v in d.items()
                                         if k != "_engine" and k in fields})
-    if NEW_ENGINE:
-        return _migrate_legacy_status(d)
-    definition = d.get("definition")
-    if definition is None:
-        definition = fx.catalog().get(d["name"], {})
-    st = fx.Status(d["name"], d["remaining"], definition)
-    st.stacks = d.get("stacks", 1)
-    st.shield_hp = d.get("shield_hp", 0)
-    st.dot_atk = d.get("dot_atk")
-    st.taunt_source = d.get("taunt_source")
-    return st
+    return _migrate_legacy_status(d)
 
 
 def _migrate_legacy_status(d):
@@ -2257,15 +2219,6 @@ class Battle:
                 queue.append(nxt.order)
         self.turn_order = queue
 
-    def _defend_reduce(self):
-        """A damage-reduction function the effect engine calls per target: the client's
-        own defend-ratio curve applied to the target's post-status DEF."""
-        return lambda u: defend_ratio(
-            u.defence * fx.stat_multiplier(_legacy_statuses(u), "DEF")
-            + fx.flat_bonus(_legacy_statuses(u), "DEF"))
-    # NOTE: only reached on the OLD path -- the engine reads DEF through
-    # engine.status.stat_multiplier inside formula.strike.
-
     def _forced_target(self, attacker):
         """Taunt/Charm/Confuse override the ATTACKER's own target choice -- enforced
         here so it applies whether the target was auto-picked (enemy AI / auto-battle)
@@ -2273,41 +2226,23 @@ class Battle:
         someone else in the request. -> the forced unit, or None to leave the caller's
         target alone.
 
-        confused_targeting (Charm/Confuse) turns the attack on the attacker's OWN side
-        (checked first: a unit can be both taunted-by-an-enemy and charmed at once, and
-        losing control of your target trumps being drawn to a specific one). forced_target
-        (Taunt) redirects to whoever inflicted it, if that unit is still alive."""
-        if NEW_ENGINE:
-            # THREE redirects, not one flag -- see engine/status.redirect. The registry
-            # states each exactly: Taunt "can only attack the taunt caster", Charm/
-            # Enchant "will attack allies", Confuse "will attack both allies and
-            # enemies". The old single `confused_targeting` flag could not express the
-            # difference, and on this path never fired at all.
-            got = _engine_status.redirect(attacker)
-            if not got:
-                return None
-            kind, source = got
-            live = [u for u in self.units.values() if u.alive and u is not attacker]
-            if kind == "taunt":
-                src = self.units.get(source)
-                return src if (src and src.alive) else None
-            pool = [u for u in live if u.team == attacker.team] if kind == "allies" \
-                else live
-            # Random, not first: "attacks allies" is a scramble, and always picking the
-            # same slot makes a control effect look deterministic to the player.
-            return random.choice(pool) if pool else None
-        if fx.has_flag(attacker, "confused_targeting"):
-            own = [u for u in self.units.values()
-                  if u.team == attacker.team and u is not attacker and u.alive]
-            if own:
-                return own[0]
+        THREE redirects, not one flag -- see engine/status.redirect. The registry states
+        each exactly: Taunt "can only attack the taunt caster", Charm/Enchant "will
+        attack allies", Confuse "will attack both allies and enemies". Charm and Confuse
+        outrank Taunt: a unit can be both taunted and charmed, and losing control of your
+        target beats being drawn to a specific one."""
+        got = _engine_status.redirect(attacker)
+        if not got:
             return None
-        for st in attacker.statuses:
-            if st.taunt_source and "forced_target" in st.definition.get("flags", []):
-                src = self.units.get(st.taunt_source)
-                if src and src.alive:
-                    return src
-        return None
+        kind, source = got
+        live = [u for u in self.units.values() if u.alive and u is not attacker]
+        if kind == "taunt":
+            src = self.units.get(source)
+            return src if (src and src.alive) else None
+        pool = [u for u in live if u.team == attacker.team] if kind == "allies" else live
+        # Random, not first: "attacks allies" is a scramble, and always picking the same
+        # slot makes a control effect look deterministic to the player.
+        return random.choice(pool) if pool else None
 
     def _apply_gauge_cd(self, outcome):
         """Fold an effect outcome's charge-gauge and cooldown changes back onto the
@@ -2319,25 +2254,6 @@ class Battle:
             u = c["unit"]
             u.cooldowns = [max(0, cd + c["delta"]) for cd in u.cooldowns]
 
-    def _status_wire(self, events):
-        """Turn engine status applications into DamageInfo.status entries
-        [unit_order, skillID, round]. skillID is the _type-6 STATUS skill whose
-        _statusID names the icon (fx.status_skill_id); a status we have no graphic for
-        is dropped -- no icon beats a wrong one. `round` is the remaining turn count the
-        client displays and self-decrements; a permanent ("battle") status shows as 99.
-        Because two statuses map to two different skillIDs, several distinct icons can
-        sit on the same unit at once."""
-        wire = []
-        for ev in events:
-            sid = fx.status_skill_id(ev["name"])
-            if sid is None:
-                continue
-            r = ev["round"]
-            rnd = 99 if r == "battle" else int(r)
-            if rnd > 0:
-                wire.append([int(ev["unit"].order), sid, rnd])
-        return wire
-
     def _apply_battle_start(self, units):
         """Fire the battle-start effects of each given unit's passive skills against the
         current field. Called when units ENTER the fight -- the whole roster at battle
@@ -2345,25 +2261,16 @@ class Battle:
         and self-immunities (e.g. Leviathan's Jealousy Vortex) are in place before the
         first turn. Runs before the turn order is rolled so a SPD buff can reorder it."""
         field = list(self.units.values())
-        if NEW_ENGINE:
-            # ONE engine owns battle content. The engine's passives are a declarative
-            # rule table (engine/passives.py) rather than fx phases.
-            if not hasattr(self, "_passives_fired"):
-                self._passives_fired = set()
-            for u in units:
-                for sid in (u.skills or []):
-                    spec = _engine_specs.skill(sid) if sid else None
-                    if spec and spec.get("type") == "passive":
-                        _engine_passives.fire(
-                            _engine_passives.BATTLE_START, u, sid, field,
-                            fired=self._passives_fired)
-            return
+        # The engine's passives are a declarative rule table (engine/passives.py).
+        if not hasattr(self, "_passives_fired"):
+            self._passives_fired = set()
         for u in units:
-            allies = [x for x in field if x.team == u.team]
-            enemies = [x for x in field if x.team != u.team]
-            for sid in u.passives():
-                fx.run_phase(sid, "battle_start", u, None, allies, enemies,
-                             env={"turn": self.round})
+            for sid in (u.skills or []):
+                spec = _engine_specs.skill(sid) if sid else None
+                if spec and spec.get("type") == "passive":
+                    _engine_passives.fire(
+                        _engine_passives.BATTLE_START, u, sid, field,
+                        fired=self._passives_fired)
 
     # -- payloads ---------------------------------------------------------
     def battle_datas_json(self):
@@ -2483,193 +2390,46 @@ class Battle:
             return
         unit.use_skill(slot)
 
-    def attack_cmd_json(self, attacker_order, defender_order, skill_id):
+    def attack_cmd_json(self, attacker_order, defender_order, skill_id, rng=None):
         """BattleCmd for cmd 1201, carrying the actual attack in `combo`.
 
         AttackJsonData is built through .ctor(string caster, int skill), so those two
         ctor parameter names are its JSON keys; `data` is List<List<DamageInfo>> --
         outer list per hit, inner per target.
+
+        `rng` is threaded purely so the payload the CLIENT receives is reproducible from
+        a seed. The server never passes it (crit and variance should be live), but a
+        fuzzer that cannot replay a failing fight can only report that one existed --
+        and this is the function that builds the payload, so it is the one that has to
+        be replayable. See tools/battle_fuzz.py.
         """
         attacker = self.units.get(attacker_order)
         target = self.units.get(defender_order)
         if attacker and target:
             target = self._forced_target(attacker) or target
 
-        if NEW_ENGINE:
-            # The new engine returns None for anything it has no spec for, so an
-            # unsupported skill falls through to the path below rather than failing the
-            # turn. See engine/bridge.py.
-            from engine import bridge
-            combo = bridge.attack_combo(
-                self, attacker_order,
-                target.order if target else defender_order, skill_id)
-            if combo is not None:
-                self._drain_pending_status(combo)
-                _trace_action(self, attacker, target, skill_id)
-                cmd = json.loads(self.battle_cmd_json(
-                    cur_team=attacker.team if attacker else TEAM_PLAYER))
-                cmd["combo"] = [combo]
-                return json.dumps(cmd, separators=(",", ":"))
-
-        # DamageInfo shape (from HandleAttack): a hit is mode 1 with a NEGATIVE amount --
-        # IsDamage is `Mode == 1 && Damage < 0`, HasHP is `Mode in (1,2) && Damage != 0`.
-        def dmg_info(u, amount):
-            return {"c": u.order, "md": 1, "cg": 0, "dmg": -amount, "cri": 0,
-                    "die": 1 if not u.alive else 0,
-                    # status is filled below from the engine's applied statuses; extra/
-                    # picons stay empty (picons = passive-icon list, not yet used).
-                    "status": [], "extra": [], "picons": [], "pskill_id": 0}
-
-        # `data` is List<List<DamageInfo>>: ONE INNER LIST PER SWING, not one list of
-        # everything. The skill's cinematic fires a BscTagKind-5 tag per hit and
-        # AttackBehavior.BscTag (0x1BE3924) pops `DmgInfo[0]` for each one, so a 3-hit
-        # skill shipped as a single group animates once and drops the other two swings.
-        # DesignSkillRow._count is the swing count (see fx.hit_count).
-        swings = fx.hit_count(skill_id) if skill_id else 1
-        groups = [[] for _ in range(swings)]
-
-        def add(seq, u, amount):
-            """Fold `amount` into this swing's row for `u`, creating it if needed.
-
-            **A unit may appear at most ONCE per group.** The client reads each group
-            into a dictionary keyed by `c`, so a second row for the same order throws
-            `An item with the same key has already been added. Key: 101` -- caught
-            by the generic event handler, which means no stack, no skill animation,
-            and a fight that simply stops: the enemy stands there and never yields the
-            turn, so the client never asks for the next one. Nothing on the server
-            says anything is wrong; it had already applied the damage and moved on.
-
-            Duplicates arise whenever a skill has more than one DAMAGE effect: the
-            effect engine emits one strike per (effect x target x swing), so a 2-effect
-            AoE over 2 targets across 2 swings is 8 strikes and every group names both
-            targets twice. Guild Weekly's Gabriel (skill 100001101) is the first one
-            the party ever meets, which is why ordinary stages never showed this.
-
-            Summing is not a workaround for the client's benefit -- one number per
-            target per swing is all the wire shape can express, and it is what the
-            damage popup shows either way. The total is unchanged."""
-            g = groups[min(max(seq, 0), swings - 1)]
-            for row in g:
-                if row["c"] == u.order:
-                    row["dmg"] -= amount            # dmg rides negative
-                    row["die"] = 1 if not u.alive else 0
-                    return
-            g.append(dmg_info(u, amount))
-
-        status_events = []
-        if attacker and target and fx.is_complete(skill_id):
-            # Trusted skill -> full effect engine: correct per-hit coefficients, real
-            # targeting (a debuff can land on a different unit than the damage), and
-            # server-side buff/debuff tracking that feeds back into damage.
-            allies = [u for u in self.units.values() if u.team == attacker.team]
-            enemies = [u for u in self.units.values() if u.team != attacker.team]
-            reduce = self._defend_reduce()
-            # env feeds the condition gates: the turn counter for odd/even and turn-cap
-            # gates. No crit model exists yet, so crit-gated branches stay dormant.
-            env = {"turn": self.round}
-            outcome = fx.execute_skill(attacker, target, allies, enemies, skill_id,
-                                       damage_reduce=reduce, env=env)
-            status_events += outcome["status_events"]
-            # Totals off the per-target FOLD (one addition per target), the wire rows
-            # off the per-swing list -- same damage, different shape.
-            for h in outcome["hits"]:
-                if h["damage"] > 0:
-                    self.damage_sum += h["damage"]
-                    attacker.dmg_done += h["damage"]
-                    h["target"].dmg_taken += h["damage"]
-            for st in outcome["strikes"]:
-                if st["damage"] > 0:
-                    add(st["seq"], st["target"], st["damage"])
-            # on_use / after_action gauge & cooldown changes (e.g. drain the target's
-            # gauge, delay its skills, refresh the caster's own cooldowns).
-            self._apply_gauge_cd(outcome)
-            # Passive counters: any struck-and-still-alive enemy with an on_counter
-            # passive hits the attacker back in the same combo.
-            for h in outcome["hits"]:
-                tgt = h["target"]
-                if h["damage"] <= 0 or not tgt.alive:
-                    continue
-                for sid in tgt.passives():
-                    c_out = fx.run_phase(sid, "on_counter", tgt, attacker,
-                                         [u for u in self.units.values()
-                                          if u.team == tgt.team],
-                                         [u for u in self.units.values()
-                                          if u.team != tgt.team],
-                                         damage_reduce=reduce, env=env)
-                    status_events += c_out["status_events"]
-                    for ch in c_out["hits"]:
-                        if ch["damage"] > 0:
-                            # The counter lands after the combo, so it rides the last
-                            # swing rather than opening the sequence.
-                            add(swings - 1, ch["target"], ch["damage"])
-                            self.damage_sum += ch["damage"]
-                            tgt.dmg_done += ch["damage"]
-                            ch["target"].dmg_taken += ch["damage"]
-                    self._apply_gauge_cd(c_out)
-        elif attacker and target:
-            # Fallback: the simple-damage path, for a skill whose parse is incomplete.
-            # **It still has to respect AoE.** This branch used to hit exactly one unit
-            # no matter what the skill said, so every AoE whose parse fell short landed
-            # on a single enemy -- 226 skills whose record had already identified the
-            # AoE, against 114 that reached the effect engine and worked.
-            live = [u for u in self.units.values()
-                    if u.team != attacker.team and u.alive]
-            # The DESIGN ROW is the authority on how many units a skill hits -- it is
-            # what the panel's "Range 2 enemies" label is drawn from. Prose is the
-            # fallback for the rows it does not describe, since a description often
-            # says "the target" for a skill the panel calls multi-target.
-            victims = fx.design_enemy_targets(skill_id, target, live)
-            if victims is None:
-                victims = live if fx.aoe_damage(skill_id) else [target]
-            victims = victims or [target]
-            for victim in victims:
-                # Rolled per target: `damage` reads the victim's own DEF, so a shared
-                # number would over-hit the tanky and under-hit the frail.
-                # The prose coefficient is PER SWING ("Deals 120% DEF as damage 3
-                # times"), which is how the effect engine reads it too, so a multi-hit
-                # skill lands its roll once per swing instead of once in total.
-                for seq in range(swings):
-                    damage = self.damage(attacker, victim, skill_id)
-                    victim.hp = max(0, victim.hp - damage)
-                    self.damage_sum += damage
-                    attacker.dmg_done += damage
-                    victim.dmg_taken += damage
-                    add(seq, victim, damage)
-        # An empty group would eat one of the cinematic's hit tags and show nothing,
-        # so only the groups that actually carry rows go on the wire.
-        groups = [g for g in groups if g]
-        if not groups and target:
-            groups = [[dmg_info(target, 0)]]    # never send an empty combo
-        # `die` belongs on the LAST row that names a unit: dmg_info reads the unit's
-        # FINAL state, so a unit killed on swing 1 would otherwise be told to play its
-        # death animation on every remaining swing.
-        died_seen = set()
-        for g in reversed(groups):
-            for r in reversed(g):
-                if not r["die"]:
-                    continue
-                if r["c"] in died_seen:
-                    r["die"] = 0
-                else:
-                    died_seen.add(r["c"])
-        # Attach status icons to the lead DamageInfo. Each entry is [order, skillID,
-        # round]: the client resolves the graphic from a _type-6 STATUS skill's
-        # _statusID (see _status_wire) and counts `round` down itself, so one push per
-        # application is enough. Every entry names its own unit order, so hanging them
-        # all off the first row reaches every affected unit.
-        if groups:
-            groups[0][0]["status"] = self._status_wire(status_events)
-        self._tally_statuses(status_events)
-
+        from engine import bridge
+        combo = bridge.attack_combo(
+            self, attacker_order,
+            target.order if target else defender_order, skill_id, rng=rng)
+        if combo is None:
+            # The engine has no runnable spec for this skill. 15 rows corpus-wide reach
+            # here and they are boss PHASE SCRIPTS -- `即死`, "HP Changed to 50%",
+            # "boss轉階段" -- not skills anyone casts. A zero-damage entry is the honest
+            # answer: the client needs a combo to drive the animation and yield the turn
+            # (an empty one is not valid), and inventing a basic attack for a script
+            # whose effect we cannot read would be worse than doing nothing.
+            who = (target or attacker)
+            combo = {"caster": attacker_order, "skill": int(skill_id or 0),
+                     "data": [[{"c": who.order if who else attacker_order, "md": 1,
+                                "cg": 0, "dmg": 0, "cri": 0, "die": 0,
+                                "status": [], "extra": [], "picons": [],
+                                "pskill_id": 0}]]}
+        self._drain_pending_status(combo)
+        _trace_action(self, attacker, target, skill_id)
         cmd = json.loads(self.battle_cmd_json(
             cur_team=attacker.team if attacker else TEAM_PLAYER))
-        cmd["combo"] = [{
-            "caster": attacker_order, "skill": skill_id, "pskill_id": 0,
-            "data": groups,
-        }]
-        # sync/line have to reflect the post-damage state, so rebuild them after
-        # applying the hit rather than reusing the pre-attack snapshot.
-        cmd["sync"] = {o: u.sync() for o, u in self.units.items()}
+        cmd["combo"] = [combo]
         return json.dumps(cmd, separators=(",", ":"))
 
     def _bank_enemy(self, unit):
@@ -2784,9 +2544,7 @@ class Battle:
         unit = self.acting_unit()
         cds = list(unit.cooldowns) if unit else []
         cd = [cds[i] if i < len(cds) else 0 for i in (1, 2, 3)]
-        sealed_set = (_engine_status.sealed_slots(unit) if (NEW_ENGINE and unit)
-                      else (set((1, 2)) if unit and fx.has_flag(unit, "ability_seal")
-                            else set()))
+        sealed_set = _engine_status.sealed_slots(unit) if unit else set()
         seal_skill = 1 in sealed_set          # Power Attack Seal / Skill Seal
         seal_ult = 2 in sealed_set            # Special Move Seal / Skill Seal
         # Button 3 is the ultimate, and it is gated by CHARGE as well as by cooldown.
@@ -2823,20 +2581,13 @@ class Battle:
             if pending:
                 acted.scv = max(0.0, min(float(SCV_FULL), acted.scv + pending))
                 acted.pending_scv = 0.0
-            # Count down this unit's statuses on its own turn; drop the expired.
-            # On the NEW path the engine owns this and spends durations at the START of a
-            # unit's turn instead, so the legacy tick does not run at all.
-            if NEW_ENGINE:
-                # After-action passives fire before the duration tick, so an effect the
-                # actor's own turn produces is not immediately aged by it.
-                _engine_passives.fire_all(
-                    _engine_passives.AFTER_ACTION, [acted],
-                    list(self.units.values()),
-                    fired=getattr(self, "_passives_fired", None))
-                # A resolved turn spends a turn of the actor's own statuses.
-                _engine_status.tick_duration(acted)
-            elif acted.statuses:
-                acted.statuses = [s for s in _legacy_statuses(acted) if not s.tick()]
+            # After-action passives fire before the duration tick, so an effect the
+            # actor's own turn produces is not immediately aged by it.
+            _engine_passives.fire_all(
+                _engine_passives.AFTER_ACTION, [acted], list(self.units.values()),
+                fired=getattr(self, "_passives_fired", None))
+            # A resolved turn spends a turn of the actor's own statuses.
+            _engine_status.tick_duration(acted)
         self._roll_turn_order()
         self.round += 1
         self.turn_open = False
@@ -2850,18 +2601,10 @@ class Battle:
         unit = self.acting_unit()
         if not unit or _depth > len(self.units):
             return
-        # ONE engine owns battle content at a time. On the new path `battle_effects`
-        # does not run: it would tick its own DoTs and apply its own stat rules alongside
-        # the engine's, which is double-processing, not compatibility. Filtering the two
-        # representations apart was treating the symptom.
-        if NEW_ENGINE:
-            # DAMAGE only. The duration is spent after the can-it-act decision below --
-            # see the note in engine/status.py: ticking both here made a 1-turn stun
-            # expire on the very tick that should have skipped the turn.
-            dot, hot = _engine_status.tick_damage(unit)
-        else:
-            fx.tick_dot_hot(unit)
-            dot = hot = 0
+        # DAMAGE only. The duration is spent after the can-it-act decision below -- see
+        # the note in engine/status.py: ticking both here made a 1-turn stun expire on
+        # the very tick that should have skipped the turn.
+        dot, hot = _engine_status.tick_damage(unit)
         if dot:
             unit.hp = max(0, unit.hp - dot)
         if hot:
@@ -2870,36 +2613,31 @@ class Battle:
             self._roll_turn_order()
             self._start_of_turn(_depth + 1)
             return
-        if NEW_ENGINE:
-            # Turn-start passives fire BEFORE the can-it-act decision: "at the start of
-            # the turn, if you have a Commendation, you gain CC Immunity" has to be able
-            # to stop the very stun being checked for.
-            _engine_passives.fire_all(
-                _engine_passives.TURN_START, [unit], list(self.units.values()),
-                fired=getattr(self, "_passives_fired", None))
-            # A status can be a trigger marker that grants further statuses while held --
-            # see engine/status.py. Runs after the passives so a marker applied THIS turn
-            # start does not also fire in the same tick; it fires next turn, once the
-            # unit is actually holding it.
-            #
-            # EVERY living unit, not just the one acting. Durations tick once per global
-            # turn but a unit only acts once every N turns, so refreshing a marker's
-            # grants on the holder's own turn alone left them lapsing in between --
-            # Lucifer's Keen and Teardown flickered on and off every other turn with two
-            # units on the field, and would have been up for 2 turns in 6 with a full
-            # party. "When affected by this status, X will trigger Y" is a continuous
-            # consequence of holding the marker, not a once-per-own-turn event.
-            for u in self.units.values():
-                if u.alive:
-                    self._queue_status_rows(_engine_status.run_nested(u))
-        if (_engine_status.is_immobilized(unit) if NEW_ENGINE
-                else fx.is_immobilized(unit.statuses)):
+        # Turn-start passives fire BEFORE the can-it-act decision: "at the start of
+        # the turn, if you have a Commendation, you gain CC Immunity" has to be able
+        # to stop the very stun being checked for.
+        _engine_passives.fire_all(
+            _engine_passives.TURN_START, [unit], list(self.units.values()),
+            fired=getattr(self, "_passives_fired", None))
+        # A status can be a trigger marker that grants further statuses while held --
+        # see engine/status.py. Runs after the passives so a marker applied THIS turn
+        # start does not also fire in the same tick; it fires next turn, once the
+        # unit is actually holding it.
+        #
+        # EVERY living unit, not just the one acting. Durations tick once per global
+        # turn but a unit only acts once every N turns, so refreshing a marker's
+        # grants on the holder's own turn alone left them lapsing in between --
+        # Lucifer's Keen and Teardown flickered on and off every other turn with two
+        # units on the field, and would have been up for 2 turns in 6 with a full
+        # party. "When affected by this status, X will trigger Y" is a continuous
+        # consequence of holding the marker, not a once-per-own-turn event.
+        for u in self.units.values():
+            if u.alive:
+                self._queue_status_rows(_engine_status.run_nested(u))
+        if _engine_status.is_immobilized(unit):
             unit.tick_cooldowns()
-            # The skipped turn still spends a turn of every status the acting engine owns.
-            if NEW_ENGINE:
-                _engine_status.tick_duration(unit)
-            elif unit.statuses:
-                unit.statuses = [s for s in unit.statuses if not s.tick()]
+            # The skipped turn still spends a turn of every status.
+            _engine_status.tick_duration(unit)
             # A skipped turn still costs the gauge, or the queue never moves on.
             unit.scv = 0.0
             self._roll_turn_order()
@@ -3110,7 +2848,20 @@ class Battle:
         OnUpdate and OnLeave are all stubs, so once the client is idling there it acts
         only when the SERVER pushes Attack (1201). It never picks a move itself, which
         is why enabling auto without this just hid the skill bar and deadlocked.
+
+        The choice itself lives in `battle_ai` (tier 1: simulate every legal move and
+        score what it did). The greedy chooser below is kept only as the escape hatch --
+        `SEVENSINS_BATTLE_AI=old` -- and goes when the old engine does, since its
+        `skill_ratio` ranking cannot see basis, swings, breadth, or what a skill DOES.
         """
+        if TIER1_AI:
+            move = battle_ai.choose(self, target_team)
+            if move:
+                return move
+        return self._auto_move_greedy(target_team)
+
+    def _auto_move_greedy(self, target_team):
+        """The pre-tier-1 chooser: strongest prose-ratio skill, first live target."""
         attacker = self.acting_unit()
         targets = [u for u in self.units.values()
                    if u.team == target_team and u.alive]
@@ -3130,8 +2881,7 @@ class Battle:
         # Special Move Seal locks the ultimate, Skill Seal locks both. The old flag
         # collapsed all three into "basic only" -- and on the new path it never fired at
         # all, because it reads `st.definition`, which an engine status does not have.
-        sealed = (_engine_status.sealed_slots(unit) if NEW_ENGINE
-                  else ((1, 2) if fx.has_flag(unit, "ability_seal") else ()))
+        sealed = _engine_status.sealed_slots(unit)
         slots = []
         for i in range(min(len(unit.skills), ULTIMATE_SLOT + 1)):
             if i in sealed:
