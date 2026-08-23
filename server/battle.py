@@ -837,13 +837,58 @@ def material_dungeon_drops(stage_id, waves=1, rng=None):
     rng = rng or _r
     waves = max(1, int(waves))
     mult = difficulty_multiplier(stage_difficulty(stage_id))
-    per_wave = clear_count * DUNGEON_DROP_SHARE / waves
+    # Flat by default, and only the Abyss can climb -- see `_evolution_depth_bonus`.
+    per_clear = clear_count * DUNGEON_DROP_SHARE * _evolution_depth_bonus(stage_id, row)
+    per_wave = per_clear / waves
     lo = int(per_wave * (1.0 - DUNGEON_SPREAD))
     hi = int(per_wave * (1.0 + DUNGEON_SPREAD))
     return [(item_id, settings.scale(
-                _scaled(rng.randint(min(lo, hi), max(lo, hi)) if hi > lo
-                        else int(per_wave), mult), "dungeon_drop"))
+                # FLOOR OF ONE. `5 * 0.20` is 1.0 a wave, and the spread then rounds the
+                # bottom of the band to zero -- so rung 1 of the Trainers Gym paid
+                # literally nothing, an empty Drops panel on a cleared stage. No dungeon
+                # in the game hands back an empty clear; whatever the arithmetic says,
+                # the smallest honest payout is one.
+                max(1, _scaled(rng.randint(min(lo, hi), max(lo, hi)) if hi > lo
+                               else int(per_wave), mult)), "dungeon_drop"))
             for _ in range(waves)]
+
+
+# ---- HOUSE RULE: the Evolution Abyss can be made to reward depth ------------------
+#
+# Retail pays the same at Evo-1 and Evo-48 -- same Stage Clear (100), same stamina (1),
+# only the enemy level climbs (11 -> 555). That is deliberate: the Trainers Gym is the
+# same family on the same 1 stamina and DOES scale its reward by rung, so the designers
+# scaled where they wanted to and left this flat. What the ladder actually pays for is
+# the one-time rating diamonds, not repeatable gem income.
+#
+# So this is not a reconstruction and must never be mistaken for one. It exists because a
+# 48-rung ladder that pays the same at the bottom and the top is a poor private-server
+# experience, and `settings.RATES["evolution_depth"]` is where that opinion lives: 1.0
+# restores retail exactly, and the code path below is skipped entirely at that value.
+#
+# Rung 1 is the fixed point of the ramp, so the live footage the `dungeon_drop` default
+# reproduces (a clear paying 4+7+9 against a Stage Clear of 100) still reproduces at any
+# setting. Only depth is bought.
+EVOLUTION_DMAP = 30002
+_evolution_span = None
+
+
+def _evolution_depth_bonus(stage_id, row):
+    """-> the multiplier for this rung, 1.0 everywhere except a tuned-up Abyss."""
+    global _evolution_span
+    if int(row.get("_dmap_id") or 0) != EVOLUTION_DMAP:
+        return 1.0
+    depth = settings.rate("evolution_depth")
+    if depth <= 1.0:
+        return 1.0                      # faithful, and the arithmetic below is skipped
+    if _evolution_span is None:
+        sorts = [int(r.get("_sort") or 0) for r in (dd.rows("stage") or {}).values()
+                 if int(r.get("_dmap_id") or 0) == EVOLUTION_DMAP]
+        _evolution_span = (min(sorts), max(sorts)) if sorts else (1, 1)
+    first, last = _evolution_span
+    order = max(first, min(last, int(row.get("_sort") or first)))
+    # Linear from 1.0 at the shallowest rung to `depth` at the deepest.
+    return 1.0 + (depth - 1.0) * (order - first) / float(max(1, last - first))
 
 
 # ---- Kizuna dungeons -------------------------------------------------------

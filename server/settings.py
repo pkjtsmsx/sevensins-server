@@ -65,6 +65,17 @@ RATES = {
     # 1.0 is the dungeon share read off live footage: an Evolution Abyss clear paying
     # 4+7+9 against a listed Stage Clear reward of 100.
     "dungeon_drop": 1.0,
+    # 1.0 is FLAT, which is what retail paid: the Evolution Abyss lists the same Stage
+    # Clear reward (100) and the same stamina cost (1) on all 48 rungs, so a deep clear
+    # and a shallow one pay alike. The dungeon next door settles that this is deliberate
+    # rather than an oversight -- the Trainers Gym, same family and same 1 stamina, does
+    # scale its reward by rung (5 -> 15).
+    #
+    # This is therefore a HOUSE RULE and not a reconstruction: above 1.0 the Abyss climbs
+    # linearly to this multiple of the shallow payout at the deepest rung, so 10.0 means
+    # rung 48 pays about ten times rung 1. Rung 1 never moves, so the footage the
+    # `dungeon_drop` default is anchored on stays reproduced whatever this is set to.
+    "evolution_depth": 1.0,
     # 1.0 is stage_battle_xp as it stands. Flagged honestly: the real per-stage XP is
     # NOT in the pack, so this default is itself a reconstruction of unknown accuracy --
     # unlike the others, 1.0 here means "our best guess", not "what retail paid".
