@@ -144,7 +144,39 @@ Do not publish a build whose headline change has never been played.
   env var is *not* a substitute for fixing the bug — the user was right to push back on
   that.
 
-## 10. Comments and commits are the record
+## 10. What must never be committed
+
+The `.gitignore` protects all of this, but `git add -f` does not care, and a contributor
+who has not been told will eventually try it.
+
+- **`server/accounts/`** — real per-account save data. These are people's characters,
+  currency and progress. Never commit them, never copy one into a test fixture, and never
+  point a test at a real account: the suites set their own `SEVENSINS_ACCOUNTS` tempdir for
+  exactly this reason, and `save_editor.py` refuses to write an account the server has
+  open. The same guarantee is enforced on the build side — `tools/build_hostapp_update.py`
+  ships a fixed file list that excludes accounts, `design_cache` and `patch_root`, so a hot
+  update can never overwrite somebody's save.
+- **`server/patch_root/`** — ~2.5 GB of extracted game assets. Distributed out of band as a
+  tar; a repo is the wrong place for it.
+- **`certs/`** — local mitmproxy CA material, including private keys. (The one tracked
+  `.pem`, `tools/legacy_proxy/uj_leaf.pem`, is a certificate with no key and is fine.)
+- **IDA databases, extracted APKs, il2cpp dumps** — large, rebuildable, and not ours to
+  redistribute.
+- **`dist/`** — built release payloads (APKs plus the asset tar).
+
+**Generated, ignored, but still SHIPPED.** `server/battle_data/skills/`, `statuses.json`
+and `cinematic_swings.json` are build artifacts of `tools/compile_skills.py` /
+`compile_statuses.py`, deliberately untracked so nobody diffs 12 MB of generated JSON — but
+`build_hostapp_update.py` reads the working tree, not git, so they *do* go to the phone. A
+fresh clone must run both compilers before anything battle-related works, and before
+building an update.
+
+One more thing a contributor should know rather than discover: **commits carry the git
+identity configured on the machine**, and this repo's history is public to anyone it is
+handed to. Set `user.name` / `user.email` to whatever you are willing to have in it before
+your first commit.
+
+## 11. Comments and commits are the record
 
 House style, and it is load-bearing: comments explain **why**, cite the evidence, and name
 the bug that motivated the code. `battle.py` and `engine/` are full of "this used to do X
@@ -156,7 +188,7 @@ was decided and what was deliberately *not* done. Long is fine.
 
 Do not delete a comment that records a trap because the code moved. Update it.
 
-## 11. Scope, and saying what you did not do
+## 12. Scope, and saying what you did not do
 
 Do what was asked. If the work turns out to be bigger than the ask, say so at the point you
 notice, not in the summary afterwards. If you leave part of a task undone, name it.
