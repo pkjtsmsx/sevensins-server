@@ -176,7 +176,49 @@ identity configured on the machine**, and this repo's history is public to anyon
 handed to. Set `user.name` / `user.email` to whatever you are willing to have in it before
 your first commit.
 
-## 11. Comments and commits are the record
+## 11. Where the trust boundary actually sits
+
+Worth knowing before you touch the updater, and not obvious from any one file.
+
+**Having this repo does not let you push an update to anybody.**
+`tools/publish_hostapp_update.py` shells out to `gh release create` against the dedicated
+release repo, using whatever GitHub credentials are on the local machine — nothing in this
+repo authenticates. The only other delivery path is pushing a snapshot over adb, which
+needs physical access to a device. So a contributor can build an update and cannot deliver
+one, which is the intended shape.
+
+**What holds the line is that GitHub account, and nothing else.** `UpdateManager` fetches
+`update.json` and `server_update.zip` from the same hardcoded URL and checks the zip's
+sha256 against that manifest:
+
+```java
+String actualSha = sha256Hex(zipFile);
+if (!actualSha.equalsIgnoreCase(sha256))     // ...from the manifest at the same URL
+```
+
+That is an **integrity** check — it catches a corrupted download. It is **not** an
+authenticity check, because both halves come from the same place, and nothing is signed.
+Whoever can write to that release repo can push arbitrary Python to every device that taps
+Check for updates, running in the app sandbox with access to `accounts/`. In practice: 2FA
+on that account, and no long-lived `repo`-scoped token lying about, IS the security of
+every device on the channel.
+
+Two consequences that follow, and one that does not:
+
+- `UPDATE_URL` is **hardcoded in the APK**, so pointing an installed device at a different
+  update host needs a rebuild and reinstall — device access, not repo access. That is a
+  real protection and worth preserving; resist making it a runtime setting.
+- The host APK is **debug-signed** — there is no `signingConfig` in
+  `hostapp/app/build.gradle`, so it uses Android's default debug keystore, which is a
+  well-known reproducible key. Anyone can therefore build an APK that installs over the
+  host app and keeps its data. That still needs device access, so it is not a repo hole,
+  but "it installed over the existing app" proves nothing about where it came from. A
+  pinned release keystore is the fix and is a standing to-do.
+- It is NOT a reason to add a signing step to the update zip on a whim. If you do, the
+  verifying key ships in the APK and the whole scheme is only as good as the release
+  keystore above — do that one first, in the same piece of work.
+
+## 12. Comments and commits are the record
 
 House style, and it is load-bearing: comments explain **why**, cite the evidence, and name
 the bug that motivated the code. `battle.py` and `engine/` are full of "this used to do X
@@ -188,7 +230,7 @@ was decided and what was deliberately *not* done. Long is fine.
 
 Do not delete a comment that records a trap because the code moved. Update it.
 
-## 12. Scope, and saying what you did not do
+## 13. Scope, and saying what you did not do
 
 Do what was asked. If the work turns out to be bigger than the ask, say so at the point you
 notice, not in the summary afterwards. If you leave part of a task undone, name it.
