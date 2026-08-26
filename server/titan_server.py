@@ -1574,6 +1574,226 @@ def heartbeat_reply(req_id):
 
 # ---- connection ----------------------------------------------------------
 
+# ---- the RPC handler registry ---------------------------------------------------
+#
+# Dispatch as DATA rather than as a 78-branch `elif index == X and cmd == Y` chain.
+#
+# Not a style preference. tools/rpc_coverage.py has to PARSE THE SOURCE of handle() to
+# learn what is answered: it regexes for `index == A ... cmd == B`, grew a second regex
+# for `cmd in (A, B)` after Backpack and Mail under-reported for a release, and still
+# produced a wrong number for Battle because its answers arrive through two paths the
+# scan cannot see (docs/rpc_coverage.md records all of this). Every one of those is a
+# symptom of the table being control flow. With the registry, coverage is exactly
+# `set(client_cmds) - set(HANDLERS)`.
+#
+# MIGRATED ONE SUBSYSTEM AT A TIME. The chain in handle() still answers most commands;
+# a registered pair is looked up FIRST, so a subsystem moves here by lifting its
+# branches into functions and deleting them from the chain -- nothing else changes.
+# Mail and Guild came first because they touch only what `Rpc` carries. Login stays in
+# the chain: it REBINDS `state` and `cur_battle`, which a handler cannot do to a local.
+# Battle stays in battle_replies(), which is a dispatcher of its own for good reason.
+HANDLERS = {}
+
+
+class Rpc:
+    """One request, as a registered handler sees it. `send` is the connection's."""
+    __slots__ = ("state", "session", "send", "index", "cmd", "rid",
+                 "intargs", "strargs", "strargs2")
+
+    def __init__(self, state, session, send, index, cmd, rid, intargs, strargs, strargs2):
+        self.state, self.session, self.send = state, session, send
+        self.index, self.cmd, self.rid = index, cmd, rid
+        self.intargs, self.strargs, self.strargs2 = intargs, strargs, strargs2
+
+
+def rpc(index, *cmds):
+    """Register fn for every (index, cmd) named. One function may answer several."""
+    def deco(fn):
+        for cmd in cmds:
+            if (index, cmd) in HANDLERS:
+                raise RuntimeError(f"duplicate handler for index={index:#x} cmd={cmd}")
+            HANDLERS[(index, cmd)] = fn
+        return fn
+    return deco
+
+
+# ---- Mail ------------------------------------------------------------------------
+
+@rpc(PLAYER_MAIL_SERVER, MAIL_REQ_LIST_PANEL)
+def mail_list(r):
+    # The Mail panel's own list request. Echo `rid` -- it waits on an AsyncOp keyed by
+    # it, and SetMailList also buffers the chunks under that id, finalising only when
+    # dataEnd (intargs[1]) is 1.
+    log(f"    -> mail list reply ({len(r.state.get('mail', []))} mails, "
+        f"{ps.unread_mail_count(r.state)} unread, id {r.rid})")
+    r.send(MSG_RPC, uint64_msg(PLAYER_MAIL, MAIL_RPLY_LIST, [0, 1],
+                               [ps.mail_list_json(r.state)], req_id=r.rid))
+    r.send(MSG_RPC, uint64_msg(PLAYER_MAIL, MAIL_RPLY_UNREAD,
+                               [0, ps.unread_mail_count(r.state), 0], [], req_id=r.rid))
+
+
+@rpc(PLAYER_MAIL_SERVER, MAIL_REQ_RECEIVE, MAIL_REQ_RECEIVE_ALL)
+def mail_receive(r):
+    # cmd 5 claims one mail (uid in strargs[0]), cmd 7 claims every unread one. The
+    # reply is cmd 8 whose strargs[0] is the JSON list of uids actually claimed --
+    # ReceiveAllAttachments marks exactly those read and pops the item display for them.
+    want = r.strargs if r.cmd == MAIL_REQ_RECEIVE and r.strargs else None
+    claimed, buckets = ps.claim_mail(r.state, want)
+    ps.save(r.state)
+    log(f"    -> mail receive {claimed} (buckets {sorted(buckets)})")
+    r.send(MSG_RPC, uint64_msg(PLAYER_MAIL, MAIL_RPLY_RECEIVE, [0],
+                               [json.dumps(claimed, separators=(",", ":"))], req_id=r.rid))
+    # the popup is display only -- push whatever the grant touched
+    if "backpack" in buckets:
+        r.send(MSG_RPC, backpack_msg(84, [1],
+                                     [ps.backpack_json(r.state, ps.BP_STORAGE_NORMAL)]))
+    if "currency" in buckets:
+        r.send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [], [ps.currency_json(r.state)]))
+    if "energy" in buckets:
+        r.send(MSG_RPC, uint_msg(0xAE487D79, 512, [], [ps.energy_json(r.state)]))
+
+
+# ---- Guild -----------------------------------------------------------------------
+
+def _guild_error(r, errno):
+    r.send(MSG_RPC, uint_msg(GUILD_CLIENT, GUILD_RPLY_ERROR, [errno], []))
+
+
+@rpc(GUILD_SERVER, GUILD_REQ_CREATE)
+def guild_create(r):
+    # RequestServerCreateGuild: intargs = [badge, joinFree], strargs = [name, ad]. It
+    # opens PanelLoadingWaiting(1) before sending, so this MUST be answered either way.
+    # The reply (529) carries the whole GuildInfo in strargs[0] and sets gStatus = 1
+    # itself; there are no intargs.
+    badge = r.intargs[0] if r.intargs else 0
+    join_free = r.intargs[1] if len(r.intargs) > 1 else 0
+    gname = r.strargs[0] if r.strargs else ""
+    gad = r.strargs[1] if len(r.strargs) > 1 else ""
+    ok, errno = ps.create_guild(r.state, gname, gad, badge, join_free)
+    if not ok:
+        log(f"    -> guild create REFUSED ({gname!r}): errno {errno}")
+        _guild_error(r, errno)
+        return
+    ps.save(r.state)
+    log(f"    -> guild created: {gname!r} badge {badge} (-{ps.GUILD_CREATE_MIRA} Mira)")
+    r.send(MSG_RPC, uint_msg(GUILD_CLIENT, GUILD_RPLY_CREATE, [], [ps.guild_json(r.state)]))
+    # 200,000 Mira just left the account; the header balance is cached from the login
+    # sync and nothing on this path refreshes it.
+    r.send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [], [ps.currency_json(r.state)]))
+
+
+@rpc(GUILD_SERVER, GUILD_REQ_QUIT, GUILD_REQ_DISBAND)
+def guild_quit(r):
+    # Both clear MyGuild and drop gStatus to 0 client-side. quit (534) reads nothing;
+    # disband (535) logs strargs[0], so it needs the guild uid it is about to forget.
+    guid = (r.state.get("guild") or {}).get("uid", "")
+    ok, errno = ps.quit_guild(r.state)
+    if not ok:
+        log(f"    -> guild quit/disband REFUSED: errno {errno}")
+        _guild_error(r, errno)
+    elif r.cmd == GUILD_REQ_QUIT:
+        ps.save(r.state)
+        log("    -> left the guild")
+        r.send(MSG_RPC, uint_msg(GUILD_CLIENT, GUILD_RPLY_QUIT, [], []))
+    else:
+        ps.save(r.state)
+        log(f"    -> guild {guid} disbanded")
+        r.send(MSG_RPC, uint_msg(GUILD_CLIENT, GUILD_RPLY_DISBAND, [], [guid]))
+
+
+@rpc(GUILD_SERVER, GUILD_REQ_MEMBER_LIST)
+def guild_members(r):
+    # 562: intargs[0] becomes MyGuild.MembersTimestamp, strargs[0] is a MembersInfo.
+    # Fired from PanelGuild.OnEnterGuild and from OnReconnected on BOTH guild panels.
+    r.send(MSG_RPC, uint_msg(GUILD_CLIENT, GUILD_RPLY_MEMBERS, [int(time.time())],
+                             [ps.guild_members_json(r.state)]))
+
+
+@rpc(GUILD_SERVER, GUILD_REQ_SIGN)
+def guild_sign(r):
+    # The daily guild check-in, sent from PanelGuild.onActive on every open with
+    # intargs=[signSum[0]]. 577 replaces signSum wholesale with our intargs (event
+    # INFO_UPDATE, which is what redraws the progress bar); 567 is a flat [id, count,
+    # ...] pair list behind the "you received" popup, so it only goes out when a tier
+    # was actually crossed.
+    total, earned = ps.guild_sign(r.state)
+    ps.save(r.state)
+    log(f"    -> guild sign-in: {total} today" + (f", rewards {earned}" if earned else ""))
+    r.send(MSG_RPC, uint_msg(GUILD_CLIENT, GUILD_RPLY_SIGN, [total], []))
+    if earned:
+        flat = [v for pair in earned for v in pair]
+        r.send(MSG_RPC, uint_msg(GUILD_CLIENT, GUILD_RPLY_SIGN_REWARD, flat, []))
+        # Guild Pt is a CURRENCY (item 4 -> type 64), and the balance is cached from the
+        # login sync -- the reward popup does not update it. Push the currency or the
+        # points are real on disk and invisible in the shop.
+        r.send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [], [ps.currency_json(r.state)]))
+
+
+@rpc(GUILD_SERVER, GUILD_REQ_SETTING)
+def guild_setting(r):
+    # intargs = [badge, joinFree]; the reply echoes them straight into MyGuild (event
+    # SETTING_INT).
+    badge = r.intargs[0] if r.intargs else 0
+    join_free = r.intargs[1] if len(r.intargs) > 1 else 0
+    ok, errno = ps.guild_set_setting(r.state, badge, join_free)
+    if not ok:
+        _guild_error(r, errno)
+        return
+    ps.save(r.state)
+    log(f"    -> guild setting: badge {badge}, joinFree {join_free}")
+    r.send(MSG_RPC, uint_msg(GUILD_CLIENT, GUILD_RPLY_SETTING, [badge, join_free], []))
+
+
+@rpc(GUILD_SERVER, GUILD_REQ_EDIT)
+def guild_edit(r):
+    # receivedEdit switches on intargs[0] (EditType):
+    #   2 AD       -> strargs[0]
+    #   3 ANNOUNCE -> strargs[0] plus intargs[1] = editTime
+    #   1 OWNER    -> strargs = [ownerUID, ownerName]
+    # It also returns early unless gStatus == 1, so an edit that arrives while not in a
+    # guild is silently dropped client-side.
+    etype = r.intargs[0] if r.intargs else 0
+    ok, errno = ps.guild_edit(r.state, etype, r.strargs)
+    if not ok:
+        log(f"    -> guild edit type {etype} REFUSED: errno {errno}")
+        _guild_error(r, errno)
+        return
+    ps.save(r.state)
+    g = r.state["guild"]
+    log(f"    -> guild edit type {etype}")
+    r.send(MSG_RPC, uint_msg(GUILD_CLIENT, GUILD_RPLY_EDIT, [etype, int(g["edit_time"])],
+                             [r.strargs[0] if r.strargs else ""]))
+
+
+@rpc(GUILD_SERVER, GUILD_REQ_CARD_INFO)
+def guild_card(r):
+    # The guild name-card popup (PanelNameCard.OnGuildCard). strargs[0] is a
+    # GuildCardInfo; a parse failure just returns, leaving the popup blank, so the keys
+    # matter.
+    r.send(MSG_RPC, uint_msg(GUILD_CLIENT, GUILD_RPLY_CARD_INFO, [],
+                             [ps.guild_card_json(r.state)]))
+
+
+@rpc(GUILD_SERVER, GUILD_REQ_RECOMMEND, GUILD_REQ_SEARCH)
+def guild_browse(r):
+    # Browsing other people's guilds. strargs[0] is a JSON ARRAY of GuildListItem and an
+    # empty one is a clean no-op: the list is cleared, deserialized, and the
+    # REMOMMEND_LIST/SEARCH_LIST event fires with nothing in it. There are no other
+    # guilds, so empty is correct rather than merely safe.
+    reply = GUILD_RPLY_RECOMMEND if r.cmd == GUILD_REQ_RECOMMEND else GUILD_RPLY_SEARCH
+    r.send(MSG_RPC, uint_msg(GUILD_CLIENT, reply, [], ["[]"]))
+
+
+@rpc(GUILD_SERVER, GUILD_REQ_APPLY, GUILD_REQ_APPLY_CANCEL, GUILD_REQ_CHECK,
+     GUILD_REQ_KICK, GUILD_REQ_SET_RANK)
+def guild_needs_another_player(r):
+    # Every one of these needs a second player to exist. Answer as an error rather than
+    # not at all: cmd 65535 is the only branch that closes PanelLoadingWaiting, which
+    # apply in particular opens before sending.
+    log(f"    -> guild cmd {r.cmd} needs another player; replying errno {ps.ERR_GUILD_OTHER}")
+    _guild_error(r, ps.ERR_GUILD_OTHER)
+
+
 def recv_exact(conn, n):
     buf = b""
     while len(buf) < n:
@@ -1751,7 +1971,13 @@ def handle(conn, addr):
                     last_rpc = (index, cmd, intargs, strargs)
                     log(f"    RPC index={index:#010x} cmd={cmd} id={rid} "
                         f"int={intargs} str={strargs}")
-                    if index == PLAYER_SESSION_SERVER and cmd == SESSION_HEARTBEAT_REQUEST:
+                    handler = HANDLERS.get((index, cmd))
+                    if handler is not None:
+                        # Registered subsystems answer from the table (see HANDLERS);
+                        # everything below is the chain they are being lifted out of.
+                        handler(Rpc(state, session, send, index, cmd, rid,
+                                    intargs, strargs, strargs2))
+                    elif index == PLAYER_SESSION_SERVER and cmd == SESSION_HEARTBEAT_REQUEST:
                         send(MSG_RPC, heartbeat_reply(rid))
                     elif index == PLAYER_STAGE_SERVER and cmd == STAGE_REQ_AVG_SYNC:
                         # HandleAVGSyncReplyCmd wants EXACTLY 4 ints, and it **SKIPS
@@ -1963,42 +2189,6 @@ def handle(conn, addr):
                         send(MSG_RPC, uint_msg(
                             PLAYER_GACHA, GACHA_RPLY_REDRAW_SAVE, [box_id],
                             [json.dumps(hist, separators=(",", ":"))]))
-                    elif index == PLAYER_MAIL_SERVER and cmd == MAIL_REQ_LIST_PANEL:
-                        # The Mail panel's own list request. Echo `rid` -- it waits on an
-                        # AsyncOp keyed by it, and SetMailList also buffers the chunks
-                        # under that id, finalising only when dataEnd (intargs[1]) is 1.
-                        log(f"    -> mail list reply ({len(state.get('mail', []))} "
-                            f"mails, {ps.unread_mail_count(state)} unread, id {rid})")
-                        send(MSG_RPC, uint64_msg(PLAYER_MAIL, MAIL_RPLY_LIST, [0, 1],
-                                                 [ps.mail_list_json(state)],
-                                                 req_id=rid))
-                        send(MSG_RPC, uint64_msg(
-                            PLAYER_MAIL, MAIL_RPLY_UNREAD,
-                            [0, ps.unread_mail_count(state), 0], [], req_id=rid))
-                    elif index == PLAYER_MAIL_SERVER and cmd in (
-                            MAIL_REQ_RECEIVE, MAIL_REQ_RECEIVE_ALL):
-                        # cmd 5 claims one mail (uid in strargs[0]), cmd 7 claims every
-                        # unread one. The reply is cmd 8 whose strargs[0] is the JSON
-                        # list of uids actually claimed -- ReceiveAllAttachments marks
-                        # exactly those read and pops the item display for them.
-                        want = strargs if cmd == MAIL_REQ_RECEIVE and strargs else None
-                        claimed, buckets = ps.claim_mail(state, want)
-                        ps.save(state)
-                        log(f"    -> mail receive {claimed} (buckets {sorted(buckets)})")
-                        send(MSG_RPC, uint64_msg(
-                            PLAYER_MAIL, MAIL_RPLY_RECEIVE, [0],
-                            [json.dumps(claimed, separators=(",", ":"))], req_id=rid))
-                        # the popup is display only -- push whatever the grant touched
-                        if "backpack" in buckets:
-                            send(MSG_RPC, backpack_msg(
-                                84, [1],
-                                [ps.backpack_json(state, ps.BP_STORAGE_NORMAL)]))
-                        if "currency" in buckets:
-                            send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
-                                                   [ps.currency_json(state)]))
-                        if "energy" in buckets:
-                            send(MSG_RPC, uint_msg(0xAE487D79, 512, [],
-                                                   [ps.energy_json(state)]))
                     elif index == PLAYER_QUEST_SERVER and cmd == QUEST_REQ_COMPLETED:
                         # intargs = the quest ids being claimed.
                         rewards, new_chars = ps.complete_quests(state, intargs)
@@ -3163,146 +3353,6 @@ def handle(conn, addr):
                             SHOP_CLIENT, SHOP_RPLY_SYNC_GOODS,
                             [shop_id, sync_bought],
                             ps.shop_goods_json(state, shop_id)))
-                    elif index == GUILD_SERVER and cmd == GUILD_REQ_CREATE:
-                        # RequestServerCreateGuild: intargs = [badge, joinFree],
-                        # strargs = [name, ad]. It opens PanelLoadingWaiting(1) before
-                        # sending, so this MUST be answered either way.
-                        # The reply (529) carries the whole GuildInfo in strargs[0] and
-                        # sets gStatus = 1 itself; there are no intargs.
-                        badge = intargs[0] if intargs else 0
-                        join_free = intargs[1] if len(intargs) > 1 else 0
-                        gname = strargs[0] if strargs else ""
-                        gad = strargs[1] if len(strargs) > 1 else ""
-                        ok, errno = ps.create_guild(state, gname, gad, badge, join_free)
-                        if ok:
-                            ps.save(state)
-                            log(f"    -> guild created: {gname!r} badge {badge} "
-                                f"(-{ps.GUILD_CREATE_MIRA} Mira)")
-                            send(MSG_RPC, uint_msg(GUILD_CLIENT, GUILD_RPLY_CREATE,
-                                                   [], [ps.guild_json(state)]))
-                            # 200,000 Mira just left the account; the header balance
-                            # is cached from the login sync and nothing on this path
-                            # refreshes it.
-                            send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
-                                                   [ps.currency_json(state)]))
-                        else:
-                            log(f"    -> guild create REFUSED ({gname!r}): errno {errno}")
-                            send(MSG_RPC, uint_msg(GUILD_CLIENT, GUILD_RPLY_ERROR,
-                                                   [errno], []))
-                    elif index == GUILD_SERVER and cmd in (GUILD_REQ_QUIT,
-                                                           GUILD_REQ_DISBAND):
-                        # Both clear MyGuild and drop gStatus to 0 client-side. quit
-                        # (534) reads nothing; disband (535) logs strargs[0], so it
-                        # needs the guild uid it is about to forget.
-                        guid = (state.get("guild") or {}).get("uid", "")
-                        ok, errno = ps.quit_guild(state)
-                        if not ok:
-                            log(f"    -> guild quit/disband REFUSED: errno {errno}")
-                            send(MSG_RPC, uint_msg(GUILD_CLIENT, GUILD_RPLY_ERROR,
-                                                   [errno], []))
-                        elif cmd == GUILD_REQ_QUIT:
-                            ps.save(state)
-                            log("    -> left the guild")
-                            send(MSG_RPC, uint_msg(GUILD_CLIENT, GUILD_RPLY_QUIT,
-                                                   [], []))
-                        else:
-                            ps.save(state)
-                            log(f"    -> guild {guid} disbanded")
-                            send(MSG_RPC, uint_msg(GUILD_CLIENT, GUILD_RPLY_DISBAND,
-                                                   [], [guid]))
-                    elif index == GUILD_SERVER and cmd == GUILD_REQ_MEMBER_LIST:
-                        # 562: intargs[0] becomes MyGuild.MembersTimestamp, strargs[0]
-                        # is a MembersInfo. Fired from PanelGuild.OnEnterGuild and from
-                        # OnReconnected on BOTH guild panels.
-                        send(MSG_RPC, uint_msg(
-                            GUILD_CLIENT, GUILD_RPLY_MEMBERS, [int(time.time())],
-                            [ps.guild_members_json(state)]))
-                    elif index == GUILD_SERVER and cmd == GUILD_REQ_SIGN:
-                        # The daily guild check-in, sent from PanelGuild.onActive on
-                        # every open with intargs=[signSum[0]]. 577 replaces signSum
-                        # wholesale with our intargs (event INFO_UPDATE, which is what
-                        # redraws the progress bar); 567 is a flat [id, count, ...]
-                        # pair list behind the "you received" popup, so it only goes
-                        # out when a tier was actually crossed.
-                        total, earned = ps.guild_sign(state)
-                        ps.save(state)
-                        log(f"    -> guild sign-in: {total} today"
-                            + (f", rewards {earned}" if earned else ""))
-                        send(MSG_RPC, uint_msg(GUILD_CLIENT, GUILD_RPLY_SIGN,
-                                               [total], []))
-                        if earned:
-                            flat = [v for pair in earned for v in pair]
-                            send(MSG_RPC, uint_msg(GUILD_CLIENT,
-                                                   GUILD_RPLY_SIGN_REWARD, flat, []))
-                            # Guild Pt is a CURRENCY (item 4 -> type 64), and the
-                            # balance is cached from the login sync -- the reward
-                            # popup does not update it. Push the currency or the
-                            # points are real on disk and invisible in the shop.
-                            send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
-                                                   [ps.currency_json(state)]))
-                    elif index == GUILD_SERVER and cmd == GUILD_REQ_SETTING:
-                        # intargs = [badge, joinFree]; the reply echoes them straight
-                        # into MyGuild (event SETTING_INT).
-                        badge = intargs[0] if intargs else 0
-                        join_free = intargs[1] if len(intargs) > 1 else 0
-                        ok, errno = ps.guild_set_setting(state, badge, join_free)
-                        if ok:
-                            ps.save(state)
-                            log(f"    -> guild setting: badge {badge}, "
-                                f"joinFree {join_free}")
-                            send(MSG_RPC, uint_msg(GUILD_CLIENT, GUILD_RPLY_SETTING,
-                                                   [badge, join_free], []))
-                        else:
-                            send(MSG_RPC, uint_msg(GUILD_CLIENT, GUILD_RPLY_ERROR,
-                                                   [errno], []))
-                    elif index == GUILD_SERVER and cmd == GUILD_REQ_EDIT:
-                        # receivedEdit switches on intargs[0] (EditType):
-                        #   2 AD       -> strargs[0]
-                        #   3 ANNOUNCE -> strargs[0] plus intargs[1] = editTime
-                        #   1 OWNER    -> strargs = [ownerUID, ownerName]
-                        # It also returns early unless gStatus == 1, so an edit that
-                        # arrives while not in a guild is silently dropped client-side.
-                        etype = intargs[0] if intargs else 0
-                        ok, errno = ps.guild_edit(state, etype, strargs)
-                        if not ok:
-                            log(f"    -> guild edit type {etype} REFUSED: errno {errno}")
-                            send(MSG_RPC, uint_msg(GUILD_CLIENT, GUILD_RPLY_ERROR,
-                                                   [errno], []))
-                        else:
-                            ps.save(state)
-                            g = state["guild"]
-                            log(f"    -> guild edit type {etype}")
-                            send(MSG_RPC, uint_msg(
-                                GUILD_CLIENT, GUILD_RPLY_EDIT,
-                                [etype, int(g["edit_time"])],
-                                [strargs[0] if strargs else ""]))
-                    elif index == GUILD_SERVER and cmd == GUILD_REQ_CARD_INFO:
-                        # The guild name-card popup (PanelNameCard.OnGuildCard).
-                        # strargs[0] is a GuildCardInfo; a parse failure just returns,
-                        # leaving the popup blank, so the keys matter.
-                        send(MSG_RPC, uint_msg(GUILD_CLIENT, GUILD_RPLY_CARD_INFO,
-                                               [], [ps.guild_card_json(state)]))
-                    elif index == GUILD_SERVER and cmd in (GUILD_REQ_RECOMMEND,
-                                                           GUILD_REQ_SEARCH):
-                        # Browsing other people's guilds. strargs[0] is a JSON ARRAY of
-                        # GuildListItem and an empty one is a clean no-op: the list is
-                        # cleared, deserialized, and the REMOMMEND_LIST/SEARCH_LIST
-                        # event fires with nothing in it. There are no other guilds, so
-                        # empty is correct rather than merely safe.
-                        reply = (GUILD_RPLY_RECOMMEND if cmd == GUILD_REQ_RECOMMEND
-                                 else GUILD_RPLY_SEARCH)
-                        send(MSG_RPC, uint_msg(GUILD_CLIENT, reply, [], ["[]"]))
-                    elif index == GUILD_SERVER and cmd in (
-                            GUILD_REQ_APPLY, GUILD_REQ_APPLY_CANCEL, GUILD_REQ_CHECK,
-                            GUILD_REQ_KICK, GUILD_REQ_SET_RANK):
-                        # Every one of these needs a second player to exist. Answer as
-                        # an error rather than not at all: cmd 65535 is the only branch
-                        # that closes PanelLoadingWaiting, which apply in particular
-                        # opens before sending.
-                        log(f"    -> guild cmd {cmd} needs another player; "
-                            f"replying errno {ps.ERR_GUILD_OTHER}")
-                        send(MSG_RPC, uint_msg(GUILD_CLIENT, GUILD_RPLY_ERROR,
-                                               [ps.ERR_GUILD_OTHER], []))
                     elif index == CHALLENGE_SERVER and cmd == CHALLENGE_REQ_SYNC:
                         # Guild Weekly home. SyncChallengeDataReply tests
                         # `intargs.Count == 5 && strargs.Count == 1` and logs-and-

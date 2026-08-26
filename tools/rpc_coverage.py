@@ -97,6 +97,11 @@ def handled_pairs():
         return val if isinstance(val, int) else None
 
     pairs = set()
+    # The registry: exact, no parsing. Subsystems are being lifted out of handle()'s
+    # chain into `titan_server.HANDLERS` one at a time (Mail and Guild first); once the
+    # chain is empty every regex below can go and this line is the whole scan.
+    for idx, cmd in getattr(ts, "HANDLERS", {}):
+        pairs.add((labels.get(idx), cmd))
     # `index == A ... cmd == B` within one elif condition (may wrap lines).
     for idx_tok, gap, cmd_tok in re.findall(
             r"index == (\w+)(.{0,160}?)cmd == (\w+)", src, re.S):
@@ -124,7 +129,13 @@ def handled_pairs():
     # as named constants ((PLAYER_LOGINBONUS_SERVER, LOGINBONUS_REQ_SYNC)), and matching
     # only the hex form left LoginBonus/Redeem/Session reading as unanswered once the
     # unlabelled-index fallback stopped masking it.
-    for idx_tok, cmd_tok in re.findall(r"\((\w+),\s*(\w+)\)\s*:", src):
+    # The lookbehind matters. Without it this ALSO matched the chain's own
+    # `cmd in (GUILD_REQ_QUIT,\n GUILD_REQ_DISBAND):`, read GUILD_REQ_QUIT as an index,
+    # could not label it, and credited cmd 279 as handled to EVERY subsystem with a 279
+    # -- Arena `fight`, ChatRoom `disband` -- and 305 likewise via RECOMMEND/SEARCH. It
+    # surfaced when Guild moved into HANDLERS and the phantom credits vanished: the
+    # total went 142 -> 138 with nothing actually lost. The line-11 warning, in practice.
+    for idx_tok, cmd_tok in re.findall(r"(?<!in )\((\w+),\s*(\w+)\)\s*:", src):
         idx, cmd = resolve(idx_tok), resolve(cmd_tok)
         if cmd is not None:
             pairs.add((labels.get(idx), cmd))

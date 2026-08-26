@@ -19,10 +19,8 @@ Uses its own SEVENSINS_ACCOUNTS tempdir so it never touches real save data.
 """
 import json
 import os
-import socket
 import sys
 import tempfile
-import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -35,8 +33,7 @@ sys.argv = [sys.argv[0]]                       # titan_server reads argv[1] as a
 import player_state as ps                                      # noqa: E402
 from player_state import core                                  # noqa: E402
 import titan_server as ts                                      # noqa: E402
-from wire import (RC4, KEY_C2S, KEY_S2C, MSG_LOGIN, HDR_LEN,   # noqa: E402
-                  make_header, pb_field_bytes)
+from _testkit import Client                                   # noqa: E402
 
 _fail = 0
 
@@ -93,74 +90,18 @@ def check_save_is_compact_and_round_trips():
 
 
 # ---- the real thing: two logins through handle() ----------------------------
-
-def _login_frame(pid, cipher):
-    body = pb_field_bytes(11, pb_field_bytes(1, f"titan_token_{pid}".encode())
-                          + pb_field_bytes(3, b"{}"))
-    return cipher.crypt(make_header(MSG_LOGIN, len(body)) + body)
-
-
-class _Client:
-    """One fake client: a socketpair with handle() on the far end and a drain thread."""
-
-    def __init__(self, tag):
-        self.ours, theirs = socket.socketpair()
-        self.c2s = RC4(KEY_C2S)
-        self.got = []
-        self.thread = threading.Thread(target=ts.handle, args=(theirs, ("test", tag)),
-                                       daemon=True)
-        self.thread.start()
-        threading.Thread(target=self._drain, daemon=True).start()
-
-    def _drain(self):
-        s2c = RC4(KEY_S2C)
-        try:
-            while True:
-                hdr = self.ours.recv(HDR_LEN)
-                if not hdr:
-                    return
-                hdr = s2c.crypt(hdr)
-                size = int.from_bytes(hdr[2:6], "big")
-                body = b""
-                while len(body) < size:
-                    chunk = self.ours.recv(size - len(body))
-                    if not chunk:
-                        return
-                    body += chunk
-                s2c.crypt(body)
-                self.got.append(hdr[1])
-        except OSError:
-            return
-
-    def login(self, pid):
-        self.ours.sendall(_login_frame(pid, self.c2s))
-        deadline = time.time() + 5
-        while MSG_LOGIN not in self.got and time.time() < deadline:
-            time.sleep(0.02)
-        return MSG_LOGIN in self.got
-
-    def close(self):
-        # A half-close, so the server sees EOF ("closed by peer") the way a client
-        # exiting does, rather than a reset it logs as a crash.
-        try:
-            self.ours.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-        self.ours.close()
-        self.thread.join(5)
-        return not self.thread.is_alive()
-
+# (the socketpair client lives in _testkit.py; test_rpc_registry.py shares it)
 
 def check_two_logins_for_one_player():
     ts.LOG = os.path.join(_TMP, "titan_server.log")
     pid = "7003"
 
-    a = _Client(1)
+    a = Client(1)
     check("client A logs in", a.login(pid))
     state_a = ts._live_states.get(pid)
     check("A's account dict is registered as live", state_a is not None)
 
-    b = _Client(2)
+    b = Client(2)
     check("client B logs in on the SAME player", b.login(pid))
     state_b = ts._live_states.get(pid)
     check("B now owns the live slot", state_b is not None and state_b is not state_a)

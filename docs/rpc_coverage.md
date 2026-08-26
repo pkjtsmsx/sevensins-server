@@ -15,6 +15,18 @@ with no code change — those branches were always answered, just invisible), an
 `--missing` no longer dies on import because `titan_server` reads `sys.argv[1]` as its
 port.
 
+Updated 2026-08-25. **138 of 219** -- DOWN from 142 with nothing lost. Mail and Guild
+moved out of `handle()`'s `elif` chain into `titan_server.HANDLERS`, a `(index, cmd)
+-> function` table the tool now reads directly, and four phantom credits vanished: the
+"table-driven" regex had also matched the chain's own `cmd in (GUILD_REQ_QUIT,
+GUILD_REQ_DISBAND):`, read `GUILD_REQ_QUIT` as an index it could not label, and
+credited cmd 279 to every subsystem with a 279 (Arena `fight`, ChatRoom `disband`);
+likewise 305 via RECOMMEND/SEARCH. The regex now refuses `in (`, and re-running it
+against the pre-migration file also says 138. **The registry is the way forward:** a
+subsystem in the table is counted exactly, and once the chain is empty every regex in
+`handled_pairs()` can be deleted. `test_rpc_registry.py` drives real frames through
+`handle()` so a registered pair that never fires cannot read as handled.
+
 > Prioritise by what actually fires, not by tier alone. `grep -oE "no handler for
 > index=0x[0-9a-f]+ cmd=[0-9]+" server/titan_server.log | sort | uniq -c | sort -rn`
 > ranks the real gaps; cross-reference `re/rpc_subsystems.txt` for the index names.
