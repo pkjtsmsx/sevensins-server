@@ -1550,6 +1550,7 @@ def handle(conn, addr):
     log(f"[+] CONNECT from {addr}")
     c2s, s2c = RC4(KEY_C2S), RC4(KEY_S2C)
     state, cur_battle = None, None
+    last_rpc = None                 # (index, cmd, intargs, strargs) most recently parsed
     conn.settimeout(120)
     # Announce the connection before login: an editor asking "is anyone playing?" must
     # see a client that has connected but not yet sent its LOGIN, or it would happily
@@ -1693,6 +1694,10 @@ def handle(conn, addr):
             elif mtype == MSG_RPC:
                 for raw_rpc in msg.get(31, []):
                     index, cmd, rid, intargs, strargs, strargs2 = parse_rpc(raw_rpc)
+                    # Remembered for the crash log below: a handler that raises drops
+                    # the whole connection, and the traceback alone does not say WHICH
+                    # command was being answered.
+                    last_rpc = (index, cmd, intargs, strargs)
                     log(f"    RPC index={index:#010x} cmd={cmd} id={rid} "
                         f"int={intargs} str={strargs}")
                     if index == PLAYER_SESSION_SERVER and cmd == SESSION_HEARTBEAT_REQUEST:
@@ -3553,8 +3558,20 @@ def handle(conn, addr):
         # Full traceback, not just the type -- a handler crash drops the socket
         # ("connection interrupted" on the client), and the one-line form gave no
         # way to see WHERE (e.g. which int(None) in which subsystem handler).
+        #
+        # The command being answered is named too. Before this, finding it meant
+        # decoding the preceding `[<] body=` hex line by hand -- and with frame bodies
+        # no longer logged by default (see LOG_BODIES) there is no hex line to decode.
+        # This is deliberately NOT a per-command catch-and-continue: an unanswered
+        # request freezes the client behind PanelWaitingBlock until it is killed, which
+        # is worse than the reconnect a dropped socket costs.
         import traceback
-        log(f"[!] {addr} {type(e).__name__}: {e}\n" + traceback.format_exc())
+        where = ""
+        if last_rpc is not None:
+            index, cmd, intargs, strargs = last_rpc
+            where = (f"\n    while handling index={index:#010x} cmd={cmd} "
+                     f"int={intargs} str={strargs}")
+        log(f"[!] {addr} {type(e).__name__}: {e}{where}\n" + traceback.format_exc())
     finally:
         with _sessions_lock:
             _sessions.pop(id(session), None)
