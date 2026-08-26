@@ -1644,6 +1644,19 @@ def handle(conn, addr):
                 with _sessions_lock:
                     _publish_sessions_locked()
                 state = ps.load(pid)
+                # THE NEWEST LOGIN OWNS THE ACCOUNT. A reconnect opens a new connection
+                # while the old thread may still be alive, holding its own copy of this
+                # same dict -- and its next save would overwrite everything this
+                # session does. Mark the predecessor so its saves raise instead (see
+                # player_state.core.supersede). Loaded from disk AFTER the old session's
+                # last completed write, so nothing it already saved is lost.
+                with _sessions_lock:
+                    old = _live_states.get(pid)
+                    if old is not None and old is not state:
+                        ps.core.supersede(old)
+                        log(f"    -> superseding an earlier live session for {pid}; "
+                            f"its further saves will be refused")
+                    _live_states[pid] = state
                 # backpack_msg reads this to prefix its cmd-83 info refresh.
                 _bp_ctx.state = state
                 # Case-4 goals name a single stage, and the chains walk the player past
@@ -3613,6 +3626,13 @@ def handle(conn, addr):
     finally:
         with _sessions_lock:
             _sessions.pop(id(session), None)
+            # Only the CURRENT owner clears the slot: a superseded thread exiting must
+            # not remove the newer session's entry. Either way, forget our own dict's
+            # id now that nothing will write it again.
+            pid = session.get("player_id")
+            if pid is not None and _live_states.get(pid) is state:
+                _live_states.pop(pid, None)
+            ps.core.release(state)
             _publish_sessions_locked()
         conn.close()
 
@@ -3629,6 +3649,12 @@ _listener = None
 # meaningfully have one, but a reconnect can briefly overlap the old one.
 _sessions = {}
 _sessions_lock = threading.Lock()
+
+# The account dict each player id is CURRENTLY being played from, so a second login for
+# the same player can retire the first. Kept apart from `_sessions` because that one is
+# published to disk as JSON for the save editor, and a whole account does not belong in
+# it. Same lock.
+_live_states = {}
 
 
 def live_sessions():

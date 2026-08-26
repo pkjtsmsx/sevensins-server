@@ -463,8 +463,47 @@ def _purge_orphan_sp_quests(state):
     return bool(doomed)
 
 
+class StaleSession(RuntimeError):
+    """Raised by save() for a state dict whose session has been superseded."""
+
+
+# The in-memory account dicts that must never be written again, by identity.
+#
+# THE RACE. titan_server.handle loads the account ONCE at login into a local and saves
+# it back on every change. Sessions are per connection, and a client reconnecting --
+# after a network blip, or a phone screen-off -- opens a NEW connection and logs in
+# again while the old thread may still be alive. For that overlap two threads each hold
+# a complete copy of the same account, and whichever saves LAST wins: a gacha pull or a
+# stage clear on the new session, undone by the old thread's next write of its stale
+# copy. The registry exists for the save editor; nothing existed for this.
+#
+# The rule: the NEWEST login owns the account. Its predecessor is marked here and every
+# later save from it raises rather than writing. Raising, not returning, is deliberate --
+# the stale thread is a dead session, and an exception ends it cleanly through handle()'s
+# own crash path, which logs the command it was answering.
+_SUPERSEDED = set()
+
+
+def supersede(state):
+    """Mark a loaded account dict as belonging to a session that has been replaced."""
+    if state is not None:
+        with _lock:
+            _SUPERSEDED.add(id(state))
+
+
+def release(state):
+    """Forget a superseded dict once its thread is gone, so ids can be reused safely."""
+    if state is not None:
+        with _lock:
+            _SUPERSEDED.discard(id(state))
+
+
 def save(state):
     with _lock:
+        if id(state) in _SUPERSEDED:
+            raise StaleSession(
+                f"refusing to save player {state.get('player_id')}: a newer login "
+                f"owns this account")
         _save_locked(state)
 
 
