@@ -50,10 +50,17 @@ def check_registry_shape():
     check("the 15 Guild request cmds handled in-table are all present",
           guild == [273, 274, 275, 276, 277, 278, 279, 280, 304, 305, 306, 308, 309, 310, 311],
           str(guild))
+    by_sub = {}
+    for idx, _cmd in ts.HANDLERS:
+        by_sub[idx] = by_sub.get(idx, 0) + 1
+    check("Char, Backpack and Shop are in the table",
+          by_sub.get(ts.PLAYER_CHAR_SERVER) == 24 and by_sub.get(ts.BACKPACK_SERVER) == 9
+          and by_sub.get(ts.SHOP_SERVER) == 5, str(by_sub))
     # The chain must no longer carry what the table answers, or the two could drift.
     src = open(os.path.join(HERE, "titan_server.py"), encoding="utf-8").read()
-    check("no Mail branch is left in the chain", "index == PLAYER_MAIL_SERVER" not in src)
-    check("no Guild branch is left in the chain", "index == GUILD_SERVER" not in src)
+    for name in ("PLAYER_MAIL_SERVER", "GUILD_SERVER", "PLAYER_CHAR_SERVER",
+                 "BACKPACK_SERVER", "SHOP_SERVER"):
+        check(f"no {name} branch is left in the chain", f"index == {name}" not in src)
 
     dup = False
     try:
@@ -81,6 +88,15 @@ def check_registered_handlers_answer():
     # A needs-another-player cmd is answered as an error, not left hanging.
     n = c.rpc(ts.GUILD_SERVER, ts.GUILD_REQ_KICK, [1])
     check("guild kick gets its error reply", c.wait_frames(n + 1) and c.got[n] == MSG_RPC)
+
+    # One frame each from the three subsystems lifted mechanically, so the tokenizer
+    # rewrite is proven on a live socket and not only by py_compile.
+    n = c.rpc(ts.PLAYER_CHAR_SERVER, ts.CHAR_REQ_CHAR_MAX)
+    check("Char capacity is answered", c.wait_frames(n + 1) and c.got[n] == MSG_RPC)
+    n = c.rpc(ts.SHOP_SERVER, ts.SHOP_REQ_SYNC, [0, 0])
+    check("Shop sync is answered", c.wait_frames(n + 1) and c.got[n] == MSG_RPC)
+    n = c.rpc(ts.BACKPACK_SERVER, ts.BACKPACK_REQ_QUERY_BOX, [1001])
+    check("Backpack box query is answered", c.wait_frames(n + 1) and c.got[n] == MSG_RPC)
 
     # Something the table does NOT have still reaches the chain: the heartbeat.
     n = c.rpc(ts.PLAYER_SESSION_SERVER, ts.SESSION_HEARTBEAT_REQUEST)

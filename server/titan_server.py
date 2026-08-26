@@ -1794,6 +1794,1140 @@ def guild_needs_another_player(r):
     _guild_error(r, ps.ERR_GUILD_OTHER)
 
 
+# ---- Char ------------------------------------------------------------------------------
+@rpc(PLAYER_CHAR_SERVER, CHAR_REQ_FORMATION)
+def char_formation(r):
+    # intargs = [teamIndex + 1, support, 1]; strargs = the slot
+    # uids. Persist it and echo the stored FormationData back --
+    # the client does not apply its own edit until this lands.
+    team_no = r.intargs[0] if r.intargs else 1
+    support = r.intargs[1] if len(r.intargs) > 1 else 0
+    data = ps.set_formation(r.state, team_no - 1, r.strargs, support)
+    log(f"    -> formation {team_no} set to {data['array']} "
+        f"(support {support})")
+    r.send(MSG_RPC, uint_msg(
+        PLAYER_CHAR, CHAR_RPLY_FORMATION, [team_no, 0],
+        [json.dumps(data, separators=(",", ":"))]))
+
+
+@rpc(PLAYER_CHAR_SERVER, CHAR_REQ_SYNC_ID_DATA)
+def char_sync_id_data(r):
+    # The Soulpedia ("Cast -> Soulpedia", PanelCharacterList in
+    # illustration mode). OnEnterIllustrationCharacterList calls
+    # PlayerChar.RequestCharIDData() -> cmd 310, and the grid does
+    # not draw until the reply lands: receivedSyncIDData is what
+    # dispatches CharEvent 21, the event the panel repopulates on.
+    # Unanswered, the panel opens as an empty black page with only
+    # its frame -- no grid, no tabs, no completion label.
+    #
+    # Reply is cmd 567 with intargs [bookRank, bookSumXp,
+    # bookLeftXp] -- all three are indexed unconditionally, so a
+    # short list throws -- and strargs[0] = charIDDic. strargs may
+    # be empty (the handler skips the deserialize and still fires
+    # the event), but then the pedia cannot mark anything owned.
+    rank, sum_xp, left_xp = ps.book_progress(r.state)
+    id_tbl = ps.char_id_table(r.state)
+    log(f"    -> charIDData sync ({len(id_tbl)} owned, "
+        f"book rank {rank})")
+    r.send(MSG_RPC, uint_msg(
+        PLAYER_CHAR, CHAR_RPLY_SYNC_ID_DATA,
+        [rank, sum_xp, left_xp],
+        [json.dumps(id_tbl, separators=(",", ":"))]))
+
+
+@rpc(PLAYER_CHAR_SERVER, CHAR_REQ_GIFT)
+def char_gift(r):
+    # Consonance -> Send Gifts. intargs =
+    # [charID, itemId, amount, itemId, amount, ...], no strargs.
+    # Identified by CHAR ID, not roster uid.
+    #
+    # giftReply reads ONLY intargs[0] and feeds it straight into
+    # UICharacterRoom._lbAddKizunaExpNum -- so that value is the
+    # KARMA XP GAINED (the floating "+N"), not the char id. It
+    # refreshes nothing else, which is why the karma rank on the
+    # surrounding page stays stale until the panel is reopened.
+    #
+    # The actual state has to be pushed separately with
+    # update_friendly (552): strargs[0] = {"<charId>": [flv, fxp]},
+    # which receivedUpdateFriendly writes into charIDDic (arr[0] ->
+    # friendlyLevel, arr[1] -> friendlyXp) and flags as updated.
+    # Send the data BEFORE the reply so the "+N" tween lands on
+    # already-current numbers.
+    char_id = r.intargs[0] if r.intargs else 0
+    pairs = list(zip(r.intargs[1::2], r.intargs[2::2]))
+    ok, karma_xp, used, rank_paid = ps.give_gifts(
+        r.state, char_id, pairs)
+    if ok:
+        ps.save(r.state)
+        k = ps.karma_of(r.state, char_id)
+        log(f"    -> gifts to char {char_id}: {used} = +{karma_xp} "
+            f"karma -> rank {k['flv']} ({k['fxp']} xp)"
+            + (f", rank bonuses {rank_paid}" if rank_paid else ""))
+        r.send(MSG_RPC, uint_msg(
+            PLAYER_CHAR, CHAR_RPLY_UPDATE_FRIENDLY, [],
+            [json.dumps({str(char_id): [k["flv"], k["fxp"]]},
+                        separators=(",", ":"))]))
+        r.send(MSG_RPC, backpack_msg(
+            84, [1],
+            [ps.backpack_json(r.state, ps.BP_STORAGE_NORMAL)]))
+        # Gifts can cross several Karma ranks in one feed, and each
+        # crossed rank pays its Rank Bonus row.
+        #
+        # Pass the REAL karma dict, not a synthetic {"_paid": ...}.
+        # `grant_karma` stashes `_rows` on it too -- the char_flv row
+        # ids the RANK UP splash is built from -- and a hand-made
+        # dict silently drops them, so the 563s never went out and
+        # PanelEvilUp closed on an empty queue. `karma_of` returns
+        # that same dict, which is why `k` already has both.
+        if rank_paid or k.get("_rows"):
+            for _b in karma_reward_msgs(r.state, k):
+                r.send(MSG_RPC, _b)
+        # cmd 84 updates the bag data but dispatches BackpackEvent
+        # 4, which no open panel listens to. Only cmd 145
+        # (HandleBackpackChagne) dispatches BackpackEvent 1, which
+        # is what UICharacterRoom.OnCharGiftUpdate subscribes to --
+        # so this is what makes an already-open gift list redraw
+        # instead of correcting itself on reopen.
+        # cmd 145 (HandleBackpackChagne) is PARKED, not solved.
+        # It is the only command that dispatches BackpackEvent 1,
+        # the event an open panel refreshes on, so it is what would
+        # make gift counts tick down live rather than on reopen.
+        # It currently throws. What is established:
+        #
+        #   145 off             -> 0 NREs / 2 gifts
+        #   145 on, real data   -> 1 NRE  / 1 gift
+        #   145 on, EMPTY data  -> 2 NREs / 2 gifts   (payload is
+        #                          NOT the trigger)
+        #   145 on, at LOGIN with no panel open -> still throws
+        #                       => an always-on subscriber, not a
+        #                          character-room panel
+        #
+        # Ruled out: PlayerBackpack's ctor allocates _storageList
+        # and _backpackInfo, so UIItemConsole.OnBackpackUpdate's
+        # two dictionary derefs are not the null. BackpackEvent 1
+        # has ~20 subscribers (xrefs to
+        # Method$EventDispatcher_BackpackEvent_.AddListener) and
+        # the catch in TitanStack.StackCore.poll logs only
+        # e.Message, so the stack is lost. Frida cannot attach
+        # (the emulator's ARM translation layer breaks it), so the
+        # remaining approach is to enumerate the subscribers that
+        # are live at login and check each handler's derefs against
+        # what we sync.
+        #
+        # Left OFF: it throws AND does not refresh, so it buys
+        # nothing over the stale-until-reopen behaviour. Counts are
+        # correct -- cmd 84 above updates the data, it just
+        # dispatches BackpackEvent 4, which no open panel observes.
+    else:
+        log(f"    -> gift REFUSED for char {char_id} "
+            f"(pairs={pairs}) -- not held, or not a gift item")
+    r.send(MSG_RPC, uint_msg(PLAYER_CHAR, CHAR_RPLY_GIFT,
+                           [karma_xp], []))
+
+
+@rpc(PLAYER_CHAR_SERVER, CHAR_REQ_KIZUNA_SET)
+def char_kizuna_set(r):
+    # Soul Book Kizuna, equip. intargs = [charID, ...rowIds]; the
+    # reply mirrors it, and receivedBookKizunaSet rebuilds the list
+    # from those ids while reading each level out of the
+    # BookKizunaLvData it already holds from the char sync.
+    cid = r.intargs[0] if r.intargs else 0
+    rows = list(r.intargs[1:]) if len(r.intargs) > 1 else []
+    ok, stored = ps.set_kizuna(r.state, cid, rows)
+    if ok:
+        ps.save(r.state)
+        log(f"    -> kizuna set char {cid} -> {stored}")
+    else:
+        log(f"    -> kizuna set REFUSED char {cid} rows={rows} "
+            f"-- more than {ps.MAX_KIZUNA_EQUIP} equipped")
+    r.send(MSG_RPC, uint_msg(PLAYER_CHAR, CHAR_RPLY_KIZUNA_SET,
+                           [cid] + stored, []))
+
+
+@rpc(PLAYER_CHAR_SERVER, CHAR_REQ_KIZUNA_LVUP)
+def char_kizuna_lvup(r):
+    # Soul Book Kizuna, level up. intargs = [charID, rowID, nowLv]
+    # in and [charID, rowID, NEW level] back.
+    cid = r.intargs[0] if r.intargs else 0
+    row = r.intargs[1] if len(r.intargs) > 1 else 0
+    now = r.intargs[2] if len(r.intargs) > 2 else 0
+    ok, lv = ps.kizuna_level_up(r.state, cid, row, now)
+    if ok:
+        ps.save(r.state)
+        log(f"    -> kizuna lvup char {cid} row {row}: "
+            f"{now} -> {lv}")
+    else:
+        log(f"    -> kizuna lvup REFUSED char {cid} row {row} "
+            f"-- client says lv {now}, we have {lv}")
+    r.send(MSG_RPC, uint_msg(PLAYER_CHAR, CHAR_RPLY_KIZUNA_LVUP,
+                           [cid, row, lv], []))
+
+
+@rpc(PLAYER_CHAR_SERVER, CHAR_REQ_LIMIT_IMPART)
+def char_limit_impart(r):
+    # Inherit. intargs = [costType] (1 = Inherit Gem, 2 = diamonds),
+    # strargs = [apprentice uid, mentor uid]. Reply 544 has its own
+    # handler, receivedLimitImpart, which writes exactly three ints:
+    # apprentice.limit_book, mentor.limit_book, mentor.limit_char.
+    in_uid = r.strargs[0] if r.strargs else ""
+    out_uid = r.strargs[1] if len(r.strargs) > 1 else ""
+    ctype = r.intargs[0] if r.intargs else ps.INHERIT_COST_ITEM
+    ok, a_book, m_book, m_char, why = \
+        ps.inherit_char(r.state, in_uid, out_uid, ctype)
+    if ok:
+        ps.save(r.state)
+        log(f"    -> inherit {out_uid} -> {in_uid} "
+            f"(costType {ctype}; apprentice book {a_book}, "
+            f"mentor {m_book}+{m_char})")
+        r.send(MSG_RPC, uint_msg(
+            PLAYER_CHAR, CHAR_RPLY_LIMIT_IMPART,
+            [a_book, m_book, m_char], [in_uid, out_uid]))
+        # impartLimit lives in the General sync, so the "Number of
+        # Inherit Remaining" tip goes stale without a resync.
+        r.send(MSG_RPC, uint_msg(0x4C1872DD, 512, [],
+                               [ps.general_json(r.state)]))
+        r.send(MSG_RPC, uint_msg(PLAYER_CHAR, 528, [1, 1],
+                               [ps.char_json(r.state)]))
+        r.send(MSG_RPC, uint_msg(
+            PLAYER_CHAR, CHAR_RPLY_SYNC_ID_DATA,
+            list(ps.book_progress(r.state)),
+            [json.dumps(ps.char_id_table(r.state),
+                        separators=(",", ":"))]))
+        if ctype == ps.INHERIT_COST_DIAMOND:
+            r.send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
+                                   [ps.currency_json(r.state)]))
+        else:
+            r.send(MSG_RPC, backpack_msg(
+                84, [1],
+                [ps.backpack_json(r.state, ps.BP_STORAGE_NORMAL)]))
+    else:
+        # No reply at all would wedge the panel, so answer anyway --
+        # the client just rewrites the values it already has.
+        log(f"    -> inherit REFUSED {out_uid!r} -> {in_uid!r} "
+            f"(costType {ctype}) -- {why}")
+        a = r.state["roster"].get(in_uid, {})
+        m = r.state["roster"].get(out_uid, {})
+        r.send(MSG_RPC, uint_msg(
+            PLAYER_CHAR, CHAR_RPLY_LIMIT_IMPART,
+            [int(a.get("limit_book", 0)),
+             int(m.get("limit_book", 0)),
+             int(m.get("limit_char", 0))], [in_uid, out_uid]))
+
+
+@rpc(PLAYER_CHAR_SERVER, CHAR_REQ_LIMIT_UP)
+def char_limit_up(r):
+    # Skill Up ("Skill Awaken"). Identical wire shape to plus up:
+    # strargs = [target uid, ...material uids], reply 537 is another
+    # receivedOneCharAndRemove (534/535/536/537/545 all share it).
+    uid = r.strargs[0] if r.strargs else ""
+    mats = list(r.strargs[1:]) if len(r.strargs) > 1 else []
+    ok, used, gained, coins = ps.skill_up(r.state, uid, mats)
+    if ok:
+        ps.bump_quest_counter(r.state, ps.QUEST_CASE_SKILL_UP)
+        ps.save(r.state)
+        r.send(MSG_RPC, quest_sync_msg(r.state))
+        e = r.state["roster"].get(uid, {})
+        log(f"    -> skill up {uid} -> limit "
+            f"{ps.char_limit(e)} (book {e.get('limit_book')} + "
+            f"char {e.get('limit_char')}, +{gained}, ate "
+            f"{len(used)} for {coins} coins)")
+    else:
+        log(f"    -> skill up REFUSED for {uid!r} mats={mats} -- "
+            f"in a formation, missing, at the limit cap, or not "
+            f"enough coins")
+    r.send(MSG_RPC, uint_msg(
+        PLAYER_CHAR, CHAR_RPLY_LIMIT_UP, [],
+        [ps.char_data_json(r.state, uid)] + (used if ok else [])))
+    if ok:
+        # Skill rank rides in charIDDic too (`skill` = char_limit),
+        # so the Soulpedia would go stale without a 567 refresh.
+        r.send(MSG_RPC, uint_msg(PLAYER_CHAR, 528, [1, 1],
+                               [ps.char_json(r.state)]))
+        r.send(MSG_RPC, uint_msg(
+            PLAYER_CHAR, CHAR_RPLY_SYNC_ID_DATA,
+            list(ps.book_progress(r.state)),
+            [json.dumps(ps.char_id_table(r.state),
+                        separators=(",", ":"))]))
+        r.send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
+                               [ps.currency_json(r.state)]))
+
+
+@rpc(PLAYER_CHAR_SERVER, CHAR_REQ_PLUS_UP)
+def char_plus_up(r):
+    # Transcend (plus up). strargs = [target uid, ...material uids].
+    # Reply 536 is receivedOneCharAndRemove: strargs[0] = updated
+    # CharData, strargs[1..] = the consumed materials to delete.
+    uid = r.strargs[0] if r.strargs else ""
+    mats = list(r.strargs[1:]) if len(r.strargs) > 1 else []
+    ok, used, pxp, coins = ps.transcend_char(r.state, uid, mats)
+    if ok:
+        ps.bump_quest_counter(r.state, ps.QUEST_CASE_TRANSCEND)
+        ps.save(r.state)
+        r.send(MSG_RPC, quest_sync_msg(r.state))
+        e = r.state["roster"].get(uid, {})
+        log(f"    -> transcend {uid} -> plus {e.get('plus')} "
+            f"(pxp {e.get('pxp')}, maxLv {ps.char_max_lv(e)}, "
+            f"ate {len(used)} casts for {pxp}pt / {coins} coins)")
+    else:
+        log(f"    -> transcend REFUSED for {uid!r} mats={mats} -- "
+            f"in a formation, missing, or not enough coins")
+    r.send(MSG_RPC, uint_msg(
+        PLAYER_CHAR, CHAR_RPLY_PLUS_UP, [],
+        [ps.char_data_json(r.state, uid)] + (used if ok else [])))
+    if ok:
+        r.send(MSG_RPC, uint_msg(PLAYER_CHAR, 528, [1, 1],
+                               [ps.char_json(r.state)]))
+        r.send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
+                               [ps.currency_json(r.state)]))
+
+
+@rpc(PLAYER_CHAR_SERVER, CHAR_REQ_RANK_UP)
+def char_rank_up(r):
+    # Rank Up. strargs = [uid], no intargs. Reply 535 shares
+    # receivedOneCharAndRemove with level up (534), so strargs[0]
+    # is the updated CharData.
+    uid = r.strargs[0] if r.strargs else ""
+    ok, gems, coins = ps.rank_up_char(r.state, uid)
+    if ok:
+        ps.bump_quest_counter(r.state, ps.QUEST_CASE_RANK_UP)
+        ps.save(r.state)
+        r.send(MSG_RPC, quest_sync_msg(r.state))
+        e = r.state["roster"].get(uid, {})
+        log(f"    -> rank up {uid} -> star {e.get('star')} "
+            f"(maxLv {ps.char_max_lv(e)}, spent {gems} gems + "
+            f"{coins} coins)")
+    else:
+        log(f"    -> rank up REFUSED for {uid!r} -- star out of "
+            f"range, or not enough gems/coins")
+    # Always reply, or the panel waits forever (PanelSell pattern).
+    r.send(MSG_RPC, uint_msg(PLAYER_CHAR, CHAR_RPLY_RANK_UP, [],
+                           [ps.char_data_json(r.state, uid)]))
+    if ok:
+        r.send(MSG_RPC, backpack_msg(
+            84, [1],
+            [ps.backpack_json(r.state, ps.BP_STORAGE_NORMAL)]))
+        r.send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
+                               [ps.currency_json(r.state)]))
+
+
+@rpc(PLAYER_CHAR_SERVER, CHAR_REQ_LEVEL_UP)
+def char_level_up(r):
+    # Level Training. intargs = how many of each trainer tier to
+    # feed (index 0..4 = items 101..105), strargs = [target uid].
+    #
+    # The reply is cmd 534, handled by receivedOneCharAndRemove:
+    # strargs[0] is the UPDATED CharData (deserialized and pushed
+    # through AddChar, replacing the entry in charDic) and any
+    # further strargs are uids to delete. Level training consumes
+    # items rather than casts, so there is nothing to delete here.
+    uid = r.strargs[0] if r.strargs else ""
+    ok, cost, used = ps.level_up_char(r.state, uid, r.intargs)
+    if not ok:
+        log(f"    -> level up REFUSED for {uid!r} "
+            f"(intargs={r.intargs}) -- missing trainers or coins")
+        # Still reply, or PanelCharacterUpgrade waits forever the
+        # same way PanelSell does.
+        r.send(MSG_RPC, uint_msg(PLAYER_CHAR, CHAR_RPLY_LEVEL_UP, [],
+                               [ps.char_data_json(r.state, uid)]))
+    else:
+        ps.bump_quest_counter(r.state, ps.QUEST_CASE_POWER_UP)
+        ps.save(r.state)
+        r.send(MSG_RPC, quest_sync_msg(r.state))
+        entry = r.state["roster"].get(uid, {})
+        log(f"    -> level up {uid} -> lv {entry.get('lv')} "
+            f"xp {entry.get('xp')} (spent {cost} coins, {used})")
+        r.send(MSG_RPC, uint_msg(PLAYER_CHAR, CHAR_RPLY_LEVEL_UP, [],
+                               [ps.char_data_json(r.state, uid)]))
+        r.send(MSG_RPC, backpack_msg(
+            84, [1],
+            [ps.backpack_json(r.state, ps.BP_STORAGE_NORMAL)]))
+        r.send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
+                               [ps.currency_json(r.state)]))
+
+
+@rpc(PLAYER_CHAR_SERVER, CHAR_REQ_LOCK)
+def char_lock(r):
+    # RequestServerLock(uids) sends strargs only -- NO intargs -- so
+    # the new state is ours to pick: it is a toggle. receivedLockChar
+    # applies ONE uid per reply and uses Dictionary.get_Item, which
+    # throws on an unknown uid, so send one message per uid we hold.
+    changed = ps.toggle_char_lock(r.state, r.strargs)
+    ps.save(r.state)
+    log(f"    -> lock toggled {changed}")
+    for uid, now in changed:
+        r.send(MSG_RPC, uint_msg(PLAYER_CHAR, CHAR_RPLY_LOCK,
+                               [now], [uid]))
+
+
+@rpc(PLAYER_CHAR_SERVER, CHAR_REQ_CHAR_MAX)
+def char_char_max(r):
+    # RequestCharMax() sends no args. Case 533 assigns
+    # PlayerCharData.addCharCount = intargs[0], so this is the roster
+    # CAPACITY, not "max out a cast" as the name suggests.
+    cap = ps.char_capacity(r.state)
+    log(f"    -> char capacity add_char={cap}")
+    r.send(MSG_RPC, uint_msg(PLAYER_CHAR, CHAR_RPLY_CHAR_MAX,
+                           [cap], []))
+
+
+@rpc(PLAYER_CHAR_SERVER, CHAR_REQ_DECOMPOSE)
+def char_decompose(r):
+    # RequestCharDecompose(List<string> decompose_uids). Same reply
+    # shape as Unsummon: strargs = uids to drop from charDic,
+    # intargs = FLAT [item id, amount, ...] for the reward popup.
+    done, gain = ps.decompose_chars(r.state, r.strargs)
+    if not done:
+        log(f"    -> decompose refused for {list(r.strargs)}")
+        r.send(MSG_RPC, uint_msg(
+            PLAYER_CHAR, CHAR_RPLY_DECOMPOSE_FAIL, [], []))
+    else:
+        ps.save(r.state)
+        log(f"    -> decompose {done} -> {gain}")
+        pairs = [v for i, c in gain for v in (i, c)]
+        r.send(MSG_RPC, uint_msg(PLAYER_CHAR,
+                               CHAR_RPLY_DECOMPOSE, pairs, done))
+        r.send(MSG_RPC, uint_msg(PLAYER_CHAR, 528, [1, 1],
+                               [ps.char_json(r.state)]))
+        buckets = {ps.item_bucket(i) for i, c in gain if i and c}
+        if "backpack" in buckets:
+            r.send(MSG_RPC, backpack_msg(
+                84, [1],
+                [ps.backpack_json(r.state, ps.BP_STORAGE_NORMAL)]))
+        if "currency" in buckets:
+            r.send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
+                                   [ps.currency_json(r.state)]))
+
+
+@rpc(PLAYER_CHAR_SERVER, CHAR_REQ_SET_SORT)
+def char_set_sort(r):
+    # RequestSetSort(index, type, down). There is no set_sort in
+    # CharRpcClientCmd, so the client never waits -- just persist it
+    # so the next login sync returns the same ordering.
+    ix = r.intargs[0] if r.intargs else 0
+    ty = r.intargs[1] if len(r.intargs) > 1 else 0
+    dn = r.intargs[2] if len(r.intargs) > 2 else 0
+    ps.set_char_sort(r.state, ix, ty, dn)
+    ps.save(r.state)
+    log(f"    -> sort slot {ix} = {ty}_{dn} (no reply expected)")
+
+
+@rpc(PLAYER_CHAR_SERVER, CHAR_REQ_REMOVE_ALL_FORM)
+def char_remove_all_form(r):
+    # RequestServerRemoveFromAllFormation(uid). The reply carries the
+    # REBUILT formation dicts: strargs[0] normal, strargs[1] arena
+    # team. Both are indexed before any count check and both are
+    # dereferenced straight after deserializing, so send two real
+    # JSON objects -- "{}" for arena, which we do not model.
+    uid = r.strargs[0] if r.strargs else ""
+    forms = ps.remove_from_all_formations(r.state, uid)
+    ps.save(r.state)
+    log(f"    -> removed {uid} from all formations")
+    r.send(MSG_RPC, uint_msg(
+        PLAYER_CHAR, CHAR_RPLY_REMOVE_ALL_FORM, [],
+        [json.dumps(forms, separators=(",", ":")), "{}"]))
+
+
+@rpc(PLAYER_CHAR_SERVER, CHAR_REQ_WEAR_RUNE)
+def char_wear_rune(r):
+    # RequestWearRune(char_uid, equips): NO intargs, and
+    # strargs = [...18 equip slots..., char_uid] with the uid LAST.
+    # The client has already applied its change to the array, so we
+    # validate and echo rather than trying to infer a slot.
+    char_uid = r.strargs[-1] if r.strargs else ""
+    want = list(r.strargs[:-1])
+    try:
+        slots, stolen = ps.wear_runes(r.state, char_uid, want)
+    except (KeyError, ValueError) as exc:
+        # No `char_wear_rune_fail` cmd exists, so there is nothing
+        # honest to answer with -- log it and leave the array alone.
+        log(f"    !! wear_rune refused for {char_uid!r}: {exc}")
+    else:
+        ps.save(r.state)
+        worn = [u for u in slots if u]
+        log(f"    -> {char_uid} wearing {len(worn)} equip(s): {worn}")
+        # Whoever we took a piece off needs its own 549 FIRST --
+        # receivedUpdateEquip only rewrites charDic[strargs.last],
+        # so without this the old wearer keeps showing the
+        # starshard until the next login sync.
+        for other_uid, other_slots in stolen.items():
+            log(f"    -> {other_uid} lost a piece to {char_uid}")
+            r.send(MSG_RPC, uint_msg(
+                PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
+                list(other_slots) + [other_uid]))
+        # Exactly CHAR_EQUIP_SLOTS + 1 strargs, uid last, or
+        # receivedUpdateEquip returns without a word.
+        r.send(MSG_RPC, uint_msg(
+            PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
+            slots + [char_uid]))
+
+
+@rpc(PLAYER_CHAR_SERVER, CHAR_REQ_WEAR_BLOODPACT)
+def char_wear_bloodpact(r):
+    # RequestWearBloodPact(char_uid, equip): no intargs and
+    # strargs = [char_uid, equip_uid] -- uid FIRST, the reverse of
+    # 296. No slot index, so the server picks one of 12..14.
+    char_uid = r.strargs[0] if r.strargs else ""
+    equip_uid = r.strargs[1] if len(r.strargs) > 1 else ""
+    try:
+        slot, slots, stolen = ps.wear_bloodpact(
+            r.state, char_uid, equip_uid)
+    except (KeyError, ValueError) as exc:
+        log(f"    !! wear_bloodpact refused for "
+            f"{char_uid!r}: {exc}")
+    else:
+        ps.save(r.state)
+        log(f"    -> {char_uid} bloodpact slot {slot} = "
+            f"{equip_uid or '(cleared)'}")
+        for other_uid, other_slots in stolen.items():
+            log(f"    -> {other_uid} lost the pact to {char_uid}")
+            r.send(MSG_RPC, uint_msg(
+                PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
+                list(other_slots) + [other_uid]))
+        r.send(MSG_RPC, uint_msg(
+            PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
+            slots + [char_uid]))
+
+
+@rpc(PLAYER_CHAR_SERVER, CHAR_REQ_SET_HELPER)
+def char_set_helper(r):
+    # RequestServerSetHelper(char_uid): strargs=[uid], no intargs.
+    char_uid = r.strargs[0] if r.strargs else ""
+    try:
+        uid = ps.set_helper(r.state, char_uid)
+    except ValueError as exc:
+        log(f"    !! set_helper refused: {exc}")
+    else:
+        ps.save(r.state)
+        log(f"    -> helper = {uid}")
+        r.send(MSG_RPC, uint_msg(
+            PLAYER_CHAR, CHAR_RPLY_SET_HELPER, [], [uid]))
+
+
+@rpc(PLAYER_CHAR_SERVER, CHAR_REQ_SET_SHOWGIRL)
+def char_set_showgirl(r):
+    # RequestServerSetShowgirl(group, id, state, x, y, scale):
+    # intargs=[group, id, state], strargs=["x_y_scale"].
+    # The reply drops the group: receivedShowgirlData reads
+    # intargs[0]=id, intargs[1]=state, strargs[0]=offset.
+    sg_id = r.intargs[1] if len(r.intargs) > 1 else 0
+    sg_state = r.intargs[2] if len(r.intargs) > 2 else 0
+    offset = r.strargs[0] if r.strargs else ""
+    try:
+        sid, sstate, soff = ps.set_showgirl(
+            r.state, sg_id, sg_state, offset)
+    except ValueError as exc:
+        log(f"    !! set_showgirl refused: {exc}")
+    else:
+        ps.save(r.state)
+        log(f"    -> showgirl = {sid} state={sstate} "
+            f"offset={soff!r}")
+        r.send(MSG_RPC, uint_msg(
+            PLAYER_CHAR, CHAR_RPLY_SET_SHOWGIRL,
+            [sid, sstate], [soff]))
+
+
+@rpc(PLAYER_CHAR_SERVER, CHAR_REQ_UNLOCK_SKIN)
+def char_unlock_skin(r):
+    # RequestUnlockSkin: intargs=[skinType], strargs=[char_uid].
+    # The reply flips the flag on the per-CHARACTER-ID record, so it
+    # carries [charId, skinType] and NO strargs.
+    char_uid = r.strargs[0] if r.strargs else ""
+    skin_type = r.intargs[0] if r.intargs else 0
+    try:
+        char_id = ps.unlock_skin(r.state, char_uid, skin_type)
+    except (KeyError, ValueError) as exc:
+        log(f"    !! unlock_skin refused for "
+            f"{char_uid!r}: {exc}")
+    else:
+        ps.save(r.state)
+        log(f"    -> char {char_id} unlocked CharSoulType "
+            f"{skin_type}")
+        r.send(MSG_RPC, uint_msg(
+            PLAYER_CHAR, CHAR_RPLY_UNLOCK_SKIN,
+            [char_id, skin_type], []))
+        # The pedia record IS the unlock flag, so resend it or the
+        # gallery reverts on the next rebuild.
+        r.send(MSG_RPC, uint_msg(
+            PLAYER_CHAR, CHAR_RPLY_SYNC_ID_DATA, [],
+            [json.dumps(ps.char_id_table(r.state),
+                        separators=(",", ":"))]))
+
+
+@rpc(PLAYER_CHAR_SERVER, CHAR_REQ_SET_SKIN)
+def char_set_skin(r):
+    # RequestSetSkin: intargs=[skinType], strargs=[char_uid].
+    # receivedSetSkin echoes both back onto charDic[uid].dbChar.skin.
+    char_uid = r.strargs[0] if r.strargs else ""
+    skin_type = r.intargs[0] if r.intargs else 0
+    try:
+        chosen = ps.set_skin(r.state, char_uid, skin_type)
+    except (KeyError, ValueError) as exc:
+        log(f"    !! set_skin refused for {char_uid!r}: {exc}")
+    else:
+        ps.save(r.state)
+        log(f"    -> {char_uid} showing CharSoulType {chosen}")
+        r.send(MSG_RPC, uint_msg(
+            PLAYER_CHAR, CHAR_RPLY_SET_SKIN,
+            [chosen], [char_uid]))
+
+
+@rpc(PLAYER_CHAR_SERVER, CHAR_REQ_WEAR_SOULFRAG)
+def char_wear_soulfrag(r):
+    # RequestWearSoulFrag(char_uid, equip, itemAction):
+    # strargs = [equip_uid, char_uid], intargs = [slot index],
+    # where the index came from the client's own jump table at
+    # 0x3703540 (action 101..109 -> 6..11 / 15..17).
+    equip_uid = r.strargs[0] if r.strargs else ""
+    char_uid = r.strargs[1] if len(r.strargs) > 1 else ""
+    slot = r.intargs[0] if r.intargs else -1
+    try:
+        slots, stolen = ps.wear_soulmirror(
+            r.state, char_uid, equip_uid, slot)
+    except (KeyError, ValueError) as exc:
+        log(f"    !! wear_soulfrag refused for "
+            f"{char_uid!r}: {exc}")
+    else:
+        ps.save(r.state)
+        log(f"    -> {char_uid} soulmirror slot {slot} = "
+            f"{equip_uid or '(cleared)'}")
+        for other_uid, other_slots in stolen.items():
+            log(f"    -> {other_uid} lost the mirror "
+                f"to {char_uid}")
+            r.send(MSG_RPC, uint_msg(
+                PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
+                list(other_slots) + [other_uid]))
+        r.send(MSG_RPC, uint_msg(
+            PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
+            slots + [char_uid]))
+
+
+@rpc(PLAYER_CHAR_SERVER, CHAR_REQ_SELL)
+def char_sell(r):
+    # Unsummon -> "Mana Extract" (PanelSell action type 0).
+    # strargs = the selected cast uids.
+    #
+    # THIS REPLY ALSO UNWEDGES THE PANEL. PanelSell gates both
+    # CharListIconOnClickAction and OnCharSellClick on
+    # `_charSellFlag`, which it clears when it sends this request
+    # and only restores in OnCharUpdate / OnCharSellFailed -- i.e.
+    # on our reply. Leave 291 unanswered and the panel soft-locks:
+    # no selection, no button, and the lock survives leaving and
+    # re-entering the panel because the instance is cached. Only a
+    # game restart clears it.
+    #
+    # receivedCharSell reads strargs as the uids to drop from
+    # charDic, and intargs as FLAT [item id, amount, ...] pairs for
+    # the reward popup (it walks them two at a time).
+    sold, gain = ps.sell_chars(r.state, r.strargs)
+    ps.save(r.state)
+    log(f"    -> unsummon {sold} -> {gain}")
+    pairs = [v for item_id, amount in gain for v in (item_id, amount)]
+    r.send(MSG_RPC, uint_msg(PLAYER_CHAR, CHAR_RPLY_SELL,
+                           pairs, sold))
+    # The roster shrank and the payout has to reach the cached bag
+    # and currency, exactly as for quest rewards below.
+    r.send(MSG_RPC, uint_msg(PLAYER_CHAR, 528, [1, 1],
+                           [ps.char_json(r.state)]))
+    buckets = {ps.item_bucket(i) for i, c in gain if i and c}
+    if "backpack" in buckets:
+        r.send(MSG_RPC, backpack_msg(
+            84, [1],
+            [ps.backpack_json(r.state, ps.BP_STORAGE_NORMAL)]))
+    if "currency" in buckets:
+        r.send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
+                               [ps.currency_json(r.state)]))
+
+
+@rpc(PLAYER_CHAR_SERVER, CHAR_REQ_BOOK_RANK_UP)
+def char_book_rank_up(r):
+    # The Soulpedia's `RANK UP!` button. Soul Link rank is CLAIMED,
+    # not derived: the score accumulates on its own but the rank
+    # only moves when the player presses this, which is why live
+    # footage shows RANK 97 against a score already past rank 100.
+    # One press claims EVERY rank the score has earned, not one --
+    # confirmed against live footage. receivedBookRankUp agrees: it
+    # saves the OLD rank and dispatches CharEvent 22 with it so the
+    # UI can animate old -> new, which is only meaningful when the
+    # jump can be bigger than a single rank.
+    sum_xp = ps.book_sum_xp(r.state)
+    earned = ps.book_rank_for(sum_xp)
+    cur = int(r.state.get("book_rank", 0))
+    new = earned
+    if new != cur:
+        r.state["book_rank"] = new
+        ps.save(r.state)
+    rank, sum_xp, left_xp = ps.book_progress(r.state)
+    log(f"    -> soul link rank up {cur} -> {rank} "
+        f"(score {sum_xp}, earned rank {earned})")
+    # receivedBookRankUp indexes intargs 0..3, so all FOUR must be
+    # present; it applies [0] -> bookRank and [2] -> bookLeftXp.
+    r.send(MSG_RPC, uint_msg(
+        PLAYER_CHAR, CHAR_RPLY_BOOK_RANK_UP,
+        [rank, sum_xp, left_xp, 0], []))
+
+
+# ---- Backpack --------------------------------------------------------------------------
+@rpc(BACKPACK_SERVER, BACKPACK_REQ_ENCHANT_GEM)
+def backpack_enchant_gem(r):
+    # SendEnchantGemReq(itemUID, cnt): intargs=[levels],
+    # strargs=[rune uid]. The reply (100) is a bare ack --
+    # HandleEnchantGemRply is a single RET -- so everything the
+    # client displays afterwards has to come from the cmd-145
+    # BackpackChange push and a currency sync.
+    uid = r.strargs[0] if r.strargs else ""
+    levels = r.intargs[0] if r.intargs else 0
+    try:
+        entry, gained, cost = ps.upgrade_rune(r.state, uid, levels)
+    except (LookupError, ValueError) as exc:
+        log(f"    !! gem upgrade refused for {uid!r}: {exc}")
+    else:
+        # Cases 21 (levels in total), 26 (best level reached) and
+        # 27 (how many shards at level >= v1) all hang off this
+        # one action -- see bump_rune_upgrade_quests.
+        qtouched = ps.bump_rune_upgrade_quests(r.state, gained)
+        ps.save(r.state)
+        log(f"    -> {uid} +{gained} lv "
+            f"(now {entry['attr'][ps.RUNE_ATTR_LEVEL]}) "
+            f"for {cost} coins")
+        if qtouched:
+            log(f"    -> starshard quest counters {qtouched}")
+        r.send(MSG_RPC, backpack_msg(
+            BACKPACK_RPLY_ENCHANT_GEM, [0], []))
+        # BackpackEvent 1 is the only event an already-open panel
+        # refreshes on; the storage sync (84-87) raises 4 instead.
+        r.send(MSG_RPC, backpack_msg(
+            BACKPACK_CHANGE, [0],
+            [ps.backpacks_all_json(
+                r.state, {ps.BP_STORAGE_EQUIPMENT}),
+             ps.backpack_info_json(r.state)]))
+        r.send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
+                               [ps.currency_json(r.state)]))
+        if qtouched:
+            r.send(MSG_RPC, quest_sync_msg(r.state))
+
+
+@rpc(BACKPACK_SERVER, BACKPACK_REQ_EQUIP_LOCK)
+def backpack_equip_lock(r):
+    # SendEquipLockReq(equip_uid, toLock): intargs=[toLock],
+    # strargs=[uid]. Absolute, not a toggle -- the client already
+    # computed 1 - attr["l"].
+    uid = r.strargs[0] if r.strargs else ""
+    to_lock = r.intargs[0] if r.intargs else 0
+    try:
+        storage, entry = ps.set_equip_lock(r.state, uid, to_lock)
+    except LookupError as exc:
+        log(f"    !! equip lock refused: {exc}")
+    else:
+        ps.save(r.state)
+        log(f"    -> {uid} lock={to_lock} (storage {storage})")
+        # 106 only moves the client's _lockCount; the flag itself
+        # rides in attr["l"], so push the storage too.
+        r.send(MSG_RPC, backpack_msg(
+            BACKPACK_RPLY_EQUIP_LOCK, [to_lock], [uid]))
+        r.send(MSG_RPC, backpack_msg(
+            BACKPACK_CHANGE, [0],
+            [ps.backpacks_all_json(r.state, {storage}),
+             ps.backpack_info_json(r.state)]))
+
+
+@rpc(BACKPACK_SERVER, BACKPACK_REQ_DECOMPOSE_BLOODPACT)
+def backpack_decompose_bloodpact(r):
+    # SendDecomposeBloodpactReq(uid_list): strargs = the pact uids,
+    # no intargs. Opens a PanelWaitingBlock, so always answer.
+    try:
+        reward, gone, affected = ps.dismantle_bloodpacts(
+            r.state, list(r.strargs))
+    except (LookupError, ValueError) as exc:
+        log(f"    !! dismantle refused: {exc}")
+        r.send(MSG_RPC, backpack_msg(
+            BACKPACK_RPLY_DECOMPOSE_BLOODPACT, [0], ["[]"]))
+    else:
+        ps.save(r.state)
+        log(f"    -> dismantled {len(r.strargs)} pact(s) "
+            f"-> {reward}")
+        for other_uid, other_slots in affected.items():
+            log(f"    -> {other_uid} lost a destroyed piece")
+            r.send(MSG_RPC, uint_msg(
+                PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
+                list(other_slots) + [other_uid]))
+        r.send(MSG_RPC, backpack_msg(
+            BACKPACK_RPLY_DECOMPOSE_BLOODPACT, [1],
+            [json.dumps(reward, separators=(",", ":"))]))
+        r.send(MSG_RPC, backpack_msg(
+            BACKPACK_CHANGE, [0],
+            [ps.backpacks_all_json(
+                r.state, {ps.BP_STORAGE_BLOODPACT,
+                        ps.BP_STORAGE_NORMAL},
+                {ps.BP_STORAGE_BLOODPACT: gone}),
+             ps.backpack_info_json(r.state)]))
+        r.send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
+                               [ps.currency_json(r.state)]))
+
+
+@rpc(BACKPACK_SERVER, BACKPACK_REQ_DECOMPOSE_SOULFRAG)
+def backpack_decompose_soulfrag(r):
+    # SendDecomposeSoulFragReq(uid_list): strargs = the mirror uids,
+    # no intargs. ALWAYS answer -- the request opened a
+    # PanelWaitingBlock and only cmd 120 closes it.
+    try:
+        reward, gone, affected = ps.dismantle_soulmirrors(
+            r.state, list(r.strargs))
+    except (LookupError, ValueError) as exc:
+        log(f"    !! soulmirror dismantle refused: {exc}")
+        # intargs[0] != 1 skips the popup and falls straight through
+        # to PanelWaitingBlock.Close(), which is the clean way to
+        # unblock the UI on a refusal.
+        r.send(MSG_RPC, backpack_msg(
+            BACKPACK_RPLY_DECOMPOSE_SOULFRAG, [0], []))
+    else:
+        ps.save(r.state)
+        log(f"    -> dismantled {len(r.strargs)} soulmirror(s) "
+            f"-> {reward}")
+        for other_uid, other_slots in affected.items():
+            log(f"    -> {other_uid} lost a destroyed piece")
+            r.send(MSG_RPC, uint_msg(
+                PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
+                list(other_slots) + [other_uid]))
+        # HandleDecomposeSoulFragRply (0x18EBD60): intargs[0] must
+        # be 1, then it RemoveAt(0)s that flag and walks whatever is
+        # left in PAIRS -- [itemId, amount, itemId, amount, ...] --
+        # building one ItemStruct each for the reward popup. The
+        # pairs ride in intargs; unlike the bloodpact reply there is
+        # no JSON strarg at all, and it takes `size >> 1` pairs so a
+        # trailing odd element would be dropped silently.
+        flat = [n for pair in reward for n in pair]
+        r.send(MSG_RPC, backpack_msg(
+            BACKPACK_RPLY_DECOMPOSE_SOULFRAG, [1] + flat, []))
+        # 145 MERGES, so the dismantled slots need iid-0 tombstones
+        # or their icons stay on screen; storage 1 carries the
+        # refunded material.
+        r.send(MSG_RPC, backpack_msg(
+            BACKPACK_CHANGE, [0],
+            [ps.backpacks_all_json(
+                r.state, {ps.BP_STORAGE_SOULFRAG,
+                        ps.BP_STORAGE_NORMAL},
+                {ps.BP_STORAGE_SOULFRAG: gone},
+                only={ps.BP_STORAGE_SOULFRAG: []}),
+             ps.backpack_info_json(r.state)]))
+
+
+@rpc(BACKPACK_SERVER, BACKPACK_REQ_TRANSMUTE_SOULFRAG)
+def backpack_transmute_soulfrag(r):
+    # SendTransmuteSoulFragReq(uid_list): strargs = the mirrors to
+    # fuse, no intargs. PanelWaitingBlock again -- always answer.
+    try:
+        new, gone, coins, affected = ps.fuse_soulmirrors(
+            r.state, list(r.strargs))
+    except (LookupError, ValueError) as exc:
+        log(f"    !! soulmirror fuse refused: {exc}")
+        r.send(MSG_RPC, backpack_msg(
+            BACKPACK_RPLY_TRANSMUTE_SOULFRAG, [0], []))
+    else:
+        ps.save(r.state)
+        log(f"    -> fused {len(r.strargs)} soulmirror(s) for "
+            f"{coins} coins -> item {new['iid']} ({new['uid']})")
+        for other_uid, other_slots in affected.items():
+            log(f"    -> {other_uid} lost a destroyed piece")
+            r.send(MSG_RPC, uint_msg(
+                PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
+                list(other_slots) + [other_uid]))
+        # HandleTransmuteSoulFragRply (0x18EBF9C): intargs[0] == 1,
+        # then it reads intargs[1] as the item id and intargs[2] as
+        # the amount -- ONE ItemStruct, no loop. **All three ints
+        # must be present**: it indexes [1] and [2] behind explicit
+        # size checks that throw ArgumentOutOfRange, unlike 120
+        # which tolerates a bare [1].
+        r.send(MSG_RPC, backpack_msg(
+            BACKPACK_RPLY_TRANSMUTE_SOULFRAG,
+            [1, int(new["iid"]), 1], []))
+        r.send(MSG_RPC, backpack_msg(
+            BACKPACK_CHANGE, [0],
+            [ps.backpacks_all_json(
+                r.state, {ps.BP_STORAGE_SOULFRAG},
+                {ps.BP_STORAGE_SOULFRAG: gone},
+                only={ps.BP_STORAGE_SOULFRAG: [new["sid"]]}),
+             ps.backpack_info_json(r.state)]))
+        r.send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
+                               [ps.currency_json(r.state)]))
+
+
+@rpc(BACKPACK_SERVER, BACKPACK_REQ_MIX_BLOODPACT)
+def backpack_mix_bloodpact(r):
+    # SendMixBloodpactReq(fromUID, toUID, fromIndex, toIndex):
+    # intargs=[fromIndex, toIndex], strargs=[fromUID, toUID],
+    # slot indices 1-based onto bid_N.
+    from_uid = r.strargs[0] if r.strargs else ""
+    to_uid = r.strargs[1] if len(r.strargs) > 1 else ""
+    from_i = r.intargs[0] if r.intargs else 0
+    to_i = r.intargs[1] if len(r.intargs) > 1 else 0
+    try:
+        tgt, skill, coins, gone, affected = ps.mix_bloodpact(
+            r.state, from_uid, to_uid, from_i, to_i)
+    except (LookupError, ValueError) as exc:
+        log(f"    !! forge refused: {exc}")
+        # Still answer, or PanelWaitingBlock never closes.
+        r.send(MSG_RPC, backpack_msg(
+            BACKPACK_RPLY_MIX_BLOODPACT, [0], []))
+    else:
+        ps.save(r.state)
+        log(f"    -> forged skill {skill} from {from_uid}[{from_i}]"
+            f" into {to_uid}[{to_i}] for {coins} coins")
+        for other_uid, other_slots in affected.items():
+            log(f"    -> {other_uid} lost a destroyed piece")
+            r.send(MSG_RPC, uint_msg(
+                PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
+                list(other_slots) + [other_uid]))
+        r.send(MSG_RPC, backpack_msg(
+            BACKPACK_RPLY_MIX_BLOODPACT, [1], []))
+        r.send(MSG_RPC, backpack_msg(
+            BACKPACK_CHANGE, [0],
+            [ps.backpacks_all_json(
+                r.state, {ps.BP_STORAGE_BLOODPACT},
+                {ps.BP_STORAGE_BLOODPACT: [gone]}),
+             ps.backpack_info_json(r.state)]))
+        r.send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
+                               [ps.currency_json(r.state)]))
+
+
+@rpc(BACKPACK_SERVER, BACKPACK_REQ_ENHANCE_BLOODPACT)
+def backpack_enhance_bloodpact(r):
+    # SendEnhanceBloodpactReq(itemUID, cnt): intargs=[levels],
+    # strargs=[pact uid]. Reply is a bare ack; the client only
+    # updates from the 145 push and the currency sync.
+    uid = r.strargs[0] if r.strargs else ""
+    levels = r.intargs[0] if r.intargs else 0
+    try:
+        entry, gained, coins = ps.upgrade_bloodpact(
+            r.state, uid, levels)
+    except (LookupError, ValueError) as exc:
+        log(f"    !! bloodpact upgrade refused for "
+            f"{uid!r}: {exc}")
+    else:
+        ps.save(r.state)
+        log(f"    -> {uid} +{gained} lv "
+            f"(now {entry['attr'][ps.RUNE_ATTR_LEVEL]}) "
+            f"for {coins} coins")
+        r.send(MSG_RPC, backpack_msg(
+            BACKPACK_RPLY_ENHANCE_BLOODPACT, [0], []))
+        r.send(MSG_RPC, backpack_msg(
+            BACKPACK_CHANGE, [0],
+            [ps.backpacks_all_json(
+                r.state, {ps.BP_STORAGE_BLOODPACT}),
+             ps.backpack_info_json(r.state)]))
+        r.send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
+                               [ps.currency_json(r.state)]))
+
+
+@rpc(BACKPACK_SERVER, BACKPACK_REQ_ENHANCE_SOULFRAG)
+def backpack_enhance_soulfrag(r):
+    # SendEnhanceSoulFragReq(itemUID, cnt): intargs=[levels],
+    # strargs=[mirror uid]. Storage 3 AND storage 1 both change
+    # (the mirror levels, the Soul Essence is spent), so the 145
+    # push carries both.
+    uid = r.strargs[0] if r.strargs else ""
+    levels = r.intargs[0] if r.intargs else 0
+    try:
+        entry, gained, coins, essence = ps.upgrade_soulmirror(
+            r.state, uid, levels)
+    except (LookupError, ValueError) as exc:
+        log(f"    !! soulmirror upgrade refused for "
+            f"{uid!r}: {exc}")
+    else:
+        ps.save(r.state)
+        log(f"    -> {uid} +{gained} lv "
+            f"(now {entry['attr'][ps.RUNE_ATTR_LEVEL]}) for "
+            f"{coins} coins + {essence} essence")
+        # **intargs[0] MUST be 1.** HandleEnhanceSoulFragRply
+        # (0x18EBC14) treats anything else as failure: it skips
+        # straight to PanelWaitingBlock.Close() and returns, which
+        # looks exactly like the click doing nothing. On 1 it
+        # deserializes strargs[0] as a BackpackItemData, converts it
+        # with BackpackItemDataToItemStructGem and dispatches
+        # BackpackEvent 7 -- the event ShowEnhanceResult listens on.
+        r.send(MSG_RPC, backpack_msg(
+            BACKPACK_RPLY_ENHANCE_SOULFRAG, [1],
+            [json.dumps(entry, separators=(",", ":"))]))
+        r.send(MSG_RPC, backpack_msg(
+            BACKPACK_CHANGE, [0],
+            [ps.backpacks_all_json(
+                r.state,
+                {ps.BP_STORAGE_SOULFRAG, ps.BP_STORAGE_NORMAL}),
+             ps.backpack_info_json(r.state)]))
+        r.send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
+                               [ps.currency_json(r.state)]))
+
+
+@rpc(BACKPACK_SERVER, BACKPACK_REQ_QUERY_BOX)
+def backpack_query_box(r):
+    # RequesQueryBoxList(itemId) -> intargs=[item id].
+    # HandleQueryBoxRply (0x18EC148) reads strargs[0] as
+    # List<List<uint>> and calls
+    # PanelItemInfo.ShowBoxItemInfoPopup(intargs[0], list) --
+    # note intargs[0] there is a **box_type**, not the item id.
+    #
+    # Box CONTENTS are not in the client data. item 1001 is
+    # `_class 2` (box) with `_param1 5211`, and 5211 resolves to an
+    # equipment row whose suit has 257 members -- the actual drop
+    # table was live-ops, like the gacha boxes and the roulette. So
+    # answer with an EMPTY list: ShowMultipleItemInfo takes the
+    # multi-item path (a null list would throw, an empty one is
+    # fine), the popup opens with the item's own name/description
+    # and an empty grid, and it can be dismissed. Inventing plausible
+    # contents would show the player a preview that is simply wrong.
+    item_id = r.intargs[0] if r.intargs else 0
+    # Box contents are OUR data -- they were live-ops and are in no
+    # design form -- so answer from the same tables a purchase pays
+    # out of. That is what keeps Drop Info honest: what the preview
+    # lists is exactly what buying hands over. An unknown box still
+    # answers with an empty list, which opens the popup with the
+    # item's own name and an empty grid rather than throwing.
+    contents = ps.box_contents(item_id)
+    log(f"    -> box {item_id}: {len(contents)} entries")
+    r.send(MSG_RPC, backpack_msg(
+        BACKPACK_RPLY_QUERY_BOX, [item_id],
+        [json.dumps(contents, separators=(",", ":"))]))
+
+
+# ---- Shop ------------------------------------------------------------------------------
+@rpc(SHOP_SERVER, SHOP_REQ_SYNC)
+def shop_sync(r):
+    # intargs = [refreshFlag, ShopVersion], and the client tells us
+    # which case it wants: LOGIN sends [0, 0], the store panel sends
+    # [1, 1]. Reply intargs[0] picks the event HandleLoginSync
+    # dispatches -- 0 -> OPEN_SHOP_FINISH(1), non-zero ->
+    # UPDATE_SHOP_LIST(12). The login sync WAITS on
+    # OPEN_SHOP_FINISH, so hardcoding 1 hangs the whole login on
+    # "Subsystem 'PlayerShop' still in syncing"; but the store panel
+    # needs UPDATE_SHOP_LIST or it never rebuilds its banner list.
+    # Echoing the flag serves both.
+    #
+    # ShopVersion must DIFFER from the client's current value or
+    # HandleLoginSync skips the rebuild entirely, so bump it.
+    flag = r.intargs[0] if r.intargs else 0
+    log(f"    -> shop sync (flag {flag} -> ShopEvent "
+        f"{'UPDATE_SHOP_LIST' if flag else 'OPEN_SHOP_FINISH'})")
+    r.send(MSG_RPC, uint_msg(
+        SHOP_CLIENT, SHOP_RPLY_SYNC, [flag, shop_version()],
+        [ps.shop_json(), "{}"]))
+
+
+@rpc(SHOP_SERVER, SHOP_REQ_BUY)
+def shop_buy(r):
+    # SendBuyCmd(goodsID, count) -- no shop id, goods ids are global.
+    gid = r.intargs[0] if r.intargs else 0
+    cnt = r.intargs[1] if len(r.intargs) > 1 else 1
+    ok, shop_id, why, new_chars = ps.buy_shop_goods(
+        r.state, gid, cnt)
+    if ok:
+        ps.save(r.state)
+        log(f"    -> bought {cnt}x goods {gid} from shop {shop_id}"
+            + (f", cast reward {new_chars}" if new_chars else ""))
+    else:
+        log(f"    -> buy REFUSED goods {gid} x{cnt} -- {why}")
+    # Reply 513 (case 513 in PlayerShop.OnClientCmdReceived):
+    #   intargs[0] = SHOP id   -- looked up in _shopDic
+    #   intargs[1] = goods id
+    #   intargs[2] = granted ITEM id    } only read when Count >= 3;
+    #   intargs[3] = granted ITEM count } they build the List<ItemStruct>
+    #                                     behind the "you received"
+    #                                     popup, which is why a
+    #                                     2-int reply bought the item
+    #                                     silently with no animation.
+    #   strargs[0] = updated Dictionary<int, GoodsBuyData>
+    item_id, item_cnt = ps.goods_reward(r.state, gid, cnt)
+    # A BUNDLE pays several things, so its confirmation goes out as
+    # a drop-item popup listing every line. Reply 513 then carries
+    # only two intargs -- with fewer than three it deliberately
+    # shows nothing, which is what stops the two popups stacking.
+    lines = ps.goods_bundle_lines(r.state, gid) if ok else []
+    r.send(MSG_RPC, uint_msg(
+        SHOP_CLIENT, SHOP_RPLY_BUY,
+        ([shop_id or 0, gid] if len(lines) > 1
+         else [shop_id or 0, gid, item_id, item_cnt]),
+        [ps.shop_bought_json(r.state, shop_id or 0)]))
+    if len(lines) > 1:
+        r.send(MSG_RPC, backpack_msg(
+            BACKPACK_RPLY_DROP_ITEM, [],
+            [json.dumps({str(i): c for i, c in lines},
+                        separators=(",", ":"))]))
+    if ok:
+        r.send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
+                               [ps.currency_json(r.state)]))
+        r.send(MSG_RPC, backpack_msg(
+            84, [1],
+            [ps.backpack_json(r.state, ps.BP_STORAGE_NORMAL)]))
+        # A ★5 card on the Medal of Pride tab is an `_action 1`
+        # CAST, so it arrives the same way a quest cast reward
+        # does -- Char `create`, which stores it and plays the
+        # single-pull reveal. See CHAR_RPLY_CREATE.
+        if new_chars:
+            r.send(MSG_RPC, uint_msg(
+                PLAYER_CHAR, CHAR_RPLY_CREATE, [],
+                [ps.char_create_json(r.state, new_chars)]))
+        # Stamina bundles pay ENERGY, which the client caches
+        # from the login sync like everything else.
+        r.send(MSG_RPC, uint_msg(0xAE487D79, 512, [],
+                               [ps.energy_json(r.state)]))
+        # buy_shop_goods credited any "go and exchange X" quest
+        # watching this goods id. The counter only becomes visible
+        # -- and the goal only becomes claimable -- once the client
+        # is told: AnalysisQuest rebuilds the claimable list from
+        # this payload. Without it the player buys the item and the
+        # goal sits there unchanged.
+        r.send(MSG_RPC, quest_sync_msg(r.state))
+
+
+@rpc(SHOP_SERVER, SHOP_REQ_GOODS_TO_SHOP)
+def shop_goods_to_shop(r):
+    # "Which shop sells goods N, and which tab is it on?"
+    # EnterSpecificStore needs BOTH, and the handler bails unless
+    # intargs has two entries -- one is not a partial answer, it is
+    # no answer. A goods id we do not sell gets no reply, since
+    # navigating somewhere arbitrary is worse than not moving.
+    goods_id = r.intargs[0] if r.intargs else 0
+    shop_id, row = ps.find_shop_goods(r.state, goods_id)
+    if row:
+        log(f"    -> goods {goods_id} is in shop {shop_id} "
+            f"tab {row[9]}")
+        r.send(MSG_RPC, uint_msg(
+            SHOP_CLIENT, SHOP_RPLY_GOODS_TO_SHOP,
+            [shop_id, row[9]], []))
+    else:
+        log(f"    -> goods {goods_id} is in no shop we serve")
+
+
+@rpc(SHOP_SERVER, SHOP_REQ_QUERY_COUPON)
+def shop_query_coupon(r):
+    # Drop Info on a selector. UNANSWERED THIS LOCKS THE CLIENT:
+    # the popup is already open behind a modal overlay and only
+    # the reply builds its contents, so the player is left with an
+    # undismissable dark screen. Reply even when we do not model
+    # that selector -- an empty list opens the popup with the
+    # item's own name and an empty grid, which closes normally.
+    item_id = r.intargs[0] if r.intargs else 0
+    contents = ps.box_contents(item_id)
+    log(f"    -> selector {item_id}: {len(contents)} choices")
+    r.send(MSG_RPC, uint_msg(
+        SHOP_CLIENT, SHOP_RPLY_QUERY_COUPON, [item_id],
+        [json.dumps(contents, separators=(",", ":"))]))
+
+
+@rpc(SHOP_SERVER, SHOP_REQ_SYNC_GOODS)
+def shop_sync_goods(r):
+    # Opening a store tab. Without this the panel calls
+    # PanelWaitingBlock.Open(-1.0, 0) -- an indefinite, input-blocking
+    # overlay with NO timeout -- and waits here forever, which locks
+    # the whole client.
+    shop_id = r.intargs[0] if r.intargs else 0
+    sync_bought = r.intargs[1] if len(r.intargs) > 1 else 0
+    log(f"    -> shop goods sync for shop {shop_id}")
+    r.send(MSG_RPC, uint_msg(
+        SHOP_CLIENT, SHOP_RPLY_SYNC_GOODS,
+        [shop_id, sync_bought],
+        ps.shop_goods_json(r.state, shop_id)))
+
+
+
 def recv_exact(conn, n):
     buf = b""
     while len(buf) < n:
@@ -2264,127 +3398,6 @@ def handle(conn, addr):
                                 [ps.backpacks_all_json(state,
                                                        {ps.BP_STORAGE_EQUIPMENT}),
                                  ps.backpack_info_json(state)]))
-                    elif index == PLAYER_CHAR_SERVER and cmd == CHAR_REQ_FORMATION:
-                        # intargs = [teamIndex + 1, support, 1]; strargs = the slot
-                        # uids. Persist it and echo the stored FormationData back --
-                        # the client does not apply its own edit until this lands.
-                        team_no = intargs[0] if intargs else 1
-                        support = intargs[1] if len(intargs) > 1 else 0
-                        data = ps.set_formation(state, team_no - 1, strargs, support)
-                        log(f"    -> formation {team_no} set to {data['array']} "
-                            f"(support {support})")
-                        send(MSG_RPC, uint_msg(
-                            PLAYER_CHAR, CHAR_RPLY_FORMATION, [team_no, 0],
-                            [json.dumps(data, separators=(",", ":"))]))
-                    elif index == PLAYER_CHAR_SERVER and cmd == CHAR_REQ_SYNC_ID_DATA:
-                        # The Soulpedia ("Cast -> Soulpedia", PanelCharacterList in
-                        # illustration mode). OnEnterIllustrationCharacterList calls
-                        # PlayerChar.RequestCharIDData() -> cmd 310, and the grid does
-                        # not draw until the reply lands: receivedSyncIDData is what
-                        # dispatches CharEvent 21, the event the panel repopulates on.
-                        # Unanswered, the panel opens as an empty black page with only
-                        # its frame -- no grid, no tabs, no completion label.
-                        #
-                        # Reply is cmd 567 with intargs [bookRank, bookSumXp,
-                        # bookLeftXp] -- all three are indexed unconditionally, so a
-                        # short list throws -- and strargs[0] = charIDDic. strargs may
-                        # be empty (the handler skips the deserialize and still fires
-                        # the event), but then the pedia cannot mark anything owned.
-                        rank, sum_xp, left_xp = ps.book_progress(state)
-                        id_tbl = ps.char_id_table(state)
-                        log(f"    -> charIDData sync ({len(id_tbl)} owned, "
-                            f"book rank {rank})")
-                        send(MSG_RPC, uint_msg(
-                            PLAYER_CHAR, CHAR_RPLY_SYNC_ID_DATA,
-                            [rank, sum_xp, left_xp],
-                            [json.dumps(id_tbl, separators=(",", ":"))]))
-                    elif index == PLAYER_CHAR_SERVER and cmd == CHAR_REQ_GIFT:
-                        # Consonance -> Send Gifts. intargs =
-                        # [charID, itemId, amount, itemId, amount, ...], no strargs.
-                        # Identified by CHAR ID, not roster uid.
-                        #
-                        # giftReply reads ONLY intargs[0] and feeds it straight into
-                        # UICharacterRoom._lbAddKizunaExpNum -- so that value is the
-                        # KARMA XP GAINED (the floating "+N"), not the char id. It
-                        # refreshes nothing else, which is why the karma rank on the
-                        # surrounding page stays stale until the panel is reopened.
-                        #
-                        # The actual state has to be pushed separately with
-                        # update_friendly (552): strargs[0] = {"<charId>": [flv, fxp]},
-                        # which receivedUpdateFriendly writes into charIDDic (arr[0] ->
-                        # friendlyLevel, arr[1] -> friendlyXp) and flags as updated.
-                        # Send the data BEFORE the reply so the "+N" tween lands on
-                        # already-current numbers.
-                        char_id = intargs[0] if intargs else 0
-                        pairs = list(zip(intargs[1::2], intargs[2::2]))
-                        ok, karma_xp, used, rank_paid = ps.give_gifts(
-                            state, char_id, pairs)
-                        if ok:
-                            ps.save(state)
-                            k = ps.karma_of(state, char_id)
-                            log(f"    -> gifts to char {char_id}: {used} = +{karma_xp} "
-                                f"karma -> rank {k['flv']} ({k['fxp']} xp)"
-                                + (f", rank bonuses {rank_paid}" if rank_paid else ""))
-                            send(MSG_RPC, uint_msg(
-                                PLAYER_CHAR, CHAR_RPLY_UPDATE_FRIENDLY, [],
-                                [json.dumps({str(char_id): [k["flv"], k["fxp"]]},
-                                            separators=(",", ":"))]))
-                            send(MSG_RPC, backpack_msg(
-                                84, [1],
-                                [ps.backpack_json(state, ps.BP_STORAGE_NORMAL)]))
-                            # Gifts can cross several Karma ranks in one feed, and each
-                            # crossed rank pays its Rank Bonus row.
-                            #
-                            # Pass the REAL karma dict, not a synthetic {"_paid": ...}.
-                            # `grant_karma` stashes `_rows` on it too -- the char_flv row
-                            # ids the RANK UP splash is built from -- and a hand-made
-                            # dict silently drops them, so the 563s never went out and
-                            # PanelEvilUp closed on an empty queue. `karma_of` returns
-                            # that same dict, which is why `k` already has both.
-                            if rank_paid or k.get("_rows"):
-                                for _b in karma_reward_msgs(state, k):
-                                    send(MSG_RPC, _b)
-                            # cmd 84 updates the bag data but dispatches BackpackEvent
-                            # 4, which no open panel listens to. Only cmd 145
-                            # (HandleBackpackChagne) dispatches BackpackEvent 1, which
-                            # is what UICharacterRoom.OnCharGiftUpdate subscribes to --
-                            # so this is what makes an already-open gift list redraw
-                            # instead of correcting itself on reopen.
-                            # cmd 145 (HandleBackpackChagne) is PARKED, not solved.
-                            # It is the only command that dispatches BackpackEvent 1,
-                            # the event an open panel refreshes on, so it is what would
-                            # make gift counts tick down live rather than on reopen.
-                            # It currently throws. What is established:
-                            #
-                            #   145 off             -> 0 NREs / 2 gifts
-                            #   145 on, real data   -> 1 NRE  / 1 gift
-                            #   145 on, EMPTY data  -> 2 NREs / 2 gifts   (payload is
-                            #                          NOT the trigger)
-                            #   145 on, at LOGIN with no panel open -> still throws
-                            #                       => an always-on subscriber, not a
-                            #                          character-room panel
-                            #
-                            # Ruled out: PlayerBackpack's ctor allocates _storageList
-                            # and _backpackInfo, so UIItemConsole.OnBackpackUpdate's
-                            # two dictionary derefs are not the null. BackpackEvent 1
-                            # has ~20 subscribers (xrefs to
-                            # Method$EventDispatcher_BackpackEvent_.AddListener) and
-                            # the catch in TitanStack.StackCore.poll logs only
-                            # e.Message, so the stack is lost. Frida cannot attach
-                            # (the emulator's ARM translation layer breaks it), so the
-                            # remaining approach is to enumerate the subscribers that
-                            # are live at login and check each handler's derefs against
-                            # what we sync.
-                            #
-                            # Left OFF: it throws AND does not refresh, so it buys
-                            # nothing over the stale-until-reopen behaviour. Counts are
-                            # correct -- cmd 84 above updates the data, it just
-                            # dispatches BackpackEvent 4, which no open panel observes.
-                        else:
-                            log(f"    -> gift REFUSED for char {char_id} "
-                                f"(pairs={pairs}) -- not held, or not a gift item")
-                        send(MSG_RPC, uint_msg(PLAYER_CHAR, CHAR_RPLY_GIFT,
-                                               [karma_xp], []))
                     elif index == PLAYER_JSAGENT_SERVER and cmd == JSAGENT_ULTRA_TRANSCEND:
                         # Ultra Transcend, routed through PlayerJSAgent (the super-limit
                         # UI is Puerts JS, so it never touches a CharRpc command).
@@ -2419,795 +3432,6 @@ def handle(conn, addr):
                         # uid list) is the most defensible thing to send.
                         send(MSG_RPC, jsagent_msg(JSAGENT_ULTRA_TRANSCEND, module,
                                                   [], uids))
-                    elif index == PLAYER_CHAR_SERVER and cmd == CHAR_REQ_KIZUNA_SET:
-                        # Soul Book Kizuna, equip. intargs = [charID, ...rowIds]; the
-                        # reply mirrors it, and receivedBookKizunaSet rebuilds the list
-                        # from those ids while reading each level out of the
-                        # BookKizunaLvData it already holds from the char sync.
-                        cid = intargs[0] if intargs else 0
-                        rows = list(intargs[1:]) if len(intargs) > 1 else []
-                        ok, stored = ps.set_kizuna(state, cid, rows)
-                        if ok:
-                            ps.save(state)
-                            log(f"    -> kizuna set char {cid} -> {stored}")
-                        else:
-                            log(f"    -> kizuna set REFUSED char {cid} rows={rows} "
-                                f"-- more than {ps.MAX_KIZUNA_EQUIP} equipped")
-                        send(MSG_RPC, uint_msg(PLAYER_CHAR, CHAR_RPLY_KIZUNA_SET,
-                                               [cid] + stored, []))
-                    elif index == PLAYER_CHAR_SERVER and cmd == CHAR_REQ_KIZUNA_LVUP:
-                        # Soul Book Kizuna, level up. intargs = [charID, rowID, nowLv]
-                        # in and [charID, rowID, NEW level] back.
-                        cid = intargs[0] if intargs else 0
-                        row = intargs[1] if len(intargs) > 1 else 0
-                        now = intargs[2] if len(intargs) > 2 else 0
-                        ok, lv = ps.kizuna_level_up(state, cid, row, now)
-                        if ok:
-                            ps.save(state)
-                            log(f"    -> kizuna lvup char {cid} row {row}: "
-                                f"{now} -> {lv}")
-                        else:
-                            log(f"    -> kizuna lvup REFUSED char {cid} row {row} "
-                                f"-- client says lv {now}, we have {lv}")
-                        send(MSG_RPC, uint_msg(PLAYER_CHAR, CHAR_RPLY_KIZUNA_LVUP,
-                                               [cid, row, lv], []))
-                    elif index == PLAYER_CHAR_SERVER and cmd == CHAR_REQ_LIMIT_IMPART:
-                        # Inherit. intargs = [costType] (1 = Inherit Gem, 2 = diamonds),
-                        # strargs = [apprentice uid, mentor uid]. Reply 544 has its own
-                        # handler, receivedLimitImpart, which writes exactly three ints:
-                        # apprentice.limit_book, mentor.limit_book, mentor.limit_char.
-                        in_uid = strargs[0] if strargs else ""
-                        out_uid = strargs[1] if len(strargs) > 1 else ""
-                        ctype = intargs[0] if intargs else ps.INHERIT_COST_ITEM
-                        ok, a_book, m_book, m_char, why = \
-                            ps.inherit_char(state, in_uid, out_uid, ctype)
-                        if ok:
-                            ps.save(state)
-                            log(f"    -> inherit {out_uid} -> {in_uid} "
-                                f"(costType {ctype}; apprentice book {a_book}, "
-                                f"mentor {m_book}+{m_char})")
-                            send(MSG_RPC, uint_msg(
-                                PLAYER_CHAR, CHAR_RPLY_LIMIT_IMPART,
-                                [a_book, m_book, m_char], [in_uid, out_uid]))
-                            # impartLimit lives in the General sync, so the "Number of
-                            # Inherit Remaining" tip goes stale without a resync.
-                            send(MSG_RPC, uint_msg(0x4C1872DD, 512, [],
-                                                   [ps.general_json(state)]))
-                            send(MSG_RPC, uint_msg(PLAYER_CHAR, 528, [1, 1],
-                                                   [ps.char_json(state)]))
-                            send(MSG_RPC, uint_msg(
-                                PLAYER_CHAR, CHAR_RPLY_SYNC_ID_DATA,
-                                list(ps.book_progress(state)),
-                                [json.dumps(ps.char_id_table(state),
-                                            separators=(",", ":"))]))
-                            if ctype == ps.INHERIT_COST_DIAMOND:
-                                send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
-                                                       [ps.currency_json(state)]))
-                            else:
-                                send(MSG_RPC, backpack_msg(
-                                    84, [1],
-                                    [ps.backpack_json(state, ps.BP_STORAGE_NORMAL)]))
-                        else:
-                            # No reply at all would wedge the panel, so answer anyway --
-                            # the client just rewrites the values it already has.
-                            log(f"    -> inherit REFUSED {out_uid!r} -> {in_uid!r} "
-                                f"(costType {ctype}) -- {why}")
-                            a = state["roster"].get(in_uid, {})
-                            m = state["roster"].get(out_uid, {})
-                            send(MSG_RPC, uint_msg(
-                                PLAYER_CHAR, CHAR_RPLY_LIMIT_IMPART,
-                                [int(a.get("limit_book", 0)),
-                                 int(m.get("limit_book", 0)),
-                                 int(m.get("limit_char", 0))], [in_uid, out_uid]))
-                    elif index == PLAYER_CHAR_SERVER and cmd == CHAR_REQ_LIMIT_UP:
-                        # Skill Up ("Skill Awaken"). Identical wire shape to plus up:
-                        # strargs = [target uid, ...material uids], reply 537 is another
-                        # receivedOneCharAndRemove (534/535/536/537/545 all share it).
-                        uid = strargs[0] if strargs else ""
-                        mats = list(strargs[1:]) if len(strargs) > 1 else []
-                        ok, used, gained, coins = ps.skill_up(state, uid, mats)
-                        if ok:
-                            ps.bump_quest_counter(state, ps.QUEST_CASE_SKILL_UP)
-                            ps.save(state)
-                            send(MSG_RPC, quest_sync_msg(state))
-                            e = state["roster"].get(uid, {})
-                            log(f"    -> skill up {uid} -> limit "
-                                f"{ps.char_limit(e)} (book {e.get('limit_book')} + "
-                                f"char {e.get('limit_char')}, +{gained}, ate "
-                                f"{len(used)} for {coins} coins)")
-                        else:
-                            log(f"    -> skill up REFUSED for {uid!r} mats={mats} -- "
-                                f"in a formation, missing, at the limit cap, or not "
-                                f"enough coins")
-                        send(MSG_RPC, uint_msg(
-                            PLAYER_CHAR, CHAR_RPLY_LIMIT_UP, [],
-                            [ps.char_data_json(state, uid)] + (used if ok else [])))
-                        if ok:
-                            # Skill rank rides in charIDDic too (`skill` = char_limit),
-                            # so the Soulpedia would go stale without a 567 refresh.
-                            send(MSG_RPC, uint_msg(PLAYER_CHAR, 528, [1, 1],
-                                                   [ps.char_json(state)]))
-                            send(MSG_RPC, uint_msg(
-                                PLAYER_CHAR, CHAR_RPLY_SYNC_ID_DATA,
-                                list(ps.book_progress(state)),
-                                [json.dumps(ps.char_id_table(state),
-                                            separators=(",", ":"))]))
-                            send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
-                                                   [ps.currency_json(state)]))
-                    elif index == PLAYER_CHAR_SERVER and cmd == CHAR_REQ_PLUS_UP:
-                        # Transcend (plus up). strargs = [target uid, ...material uids].
-                        # Reply 536 is receivedOneCharAndRemove: strargs[0] = updated
-                        # CharData, strargs[1..] = the consumed materials to delete.
-                        uid = strargs[0] if strargs else ""
-                        mats = list(strargs[1:]) if len(strargs) > 1 else []
-                        ok, used, pxp, coins = ps.transcend_char(state, uid, mats)
-                        if ok:
-                            ps.bump_quest_counter(state, ps.QUEST_CASE_TRANSCEND)
-                            ps.save(state)
-                            send(MSG_RPC, quest_sync_msg(state))
-                            e = state["roster"].get(uid, {})
-                            log(f"    -> transcend {uid} -> plus {e.get('plus')} "
-                                f"(pxp {e.get('pxp')}, maxLv {ps.char_max_lv(e)}, "
-                                f"ate {len(used)} casts for {pxp}pt / {coins} coins)")
-                        else:
-                            log(f"    -> transcend REFUSED for {uid!r} mats={mats} -- "
-                                f"in a formation, missing, or not enough coins")
-                        send(MSG_RPC, uint_msg(
-                            PLAYER_CHAR, CHAR_RPLY_PLUS_UP, [],
-                            [ps.char_data_json(state, uid)] + (used if ok else [])))
-                        if ok:
-                            send(MSG_RPC, uint_msg(PLAYER_CHAR, 528, [1, 1],
-                                                   [ps.char_json(state)]))
-                            send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
-                                                   [ps.currency_json(state)]))
-                    elif index == PLAYER_CHAR_SERVER and cmd == CHAR_REQ_RANK_UP:
-                        # Rank Up. strargs = [uid], no intargs. Reply 535 shares
-                        # receivedOneCharAndRemove with level up (534), so strargs[0]
-                        # is the updated CharData.
-                        uid = strargs[0] if strargs else ""
-                        ok, gems, coins = ps.rank_up_char(state, uid)
-                        if ok:
-                            ps.bump_quest_counter(state, ps.QUEST_CASE_RANK_UP)
-                            ps.save(state)
-                            send(MSG_RPC, quest_sync_msg(state))
-                            e = state["roster"].get(uid, {})
-                            log(f"    -> rank up {uid} -> star {e.get('star')} "
-                                f"(maxLv {ps.char_max_lv(e)}, spent {gems} gems + "
-                                f"{coins} coins)")
-                        else:
-                            log(f"    -> rank up REFUSED for {uid!r} -- star out of "
-                                f"range, or not enough gems/coins")
-                        # Always reply, or the panel waits forever (PanelSell pattern).
-                        send(MSG_RPC, uint_msg(PLAYER_CHAR, CHAR_RPLY_RANK_UP, [],
-                                               [ps.char_data_json(state, uid)]))
-                        if ok:
-                            send(MSG_RPC, backpack_msg(
-                                84, [1],
-                                [ps.backpack_json(state, ps.BP_STORAGE_NORMAL)]))
-                            send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
-                                                   [ps.currency_json(state)]))
-                    elif index == PLAYER_CHAR_SERVER and cmd == CHAR_REQ_LEVEL_UP:
-                        # Level Training. intargs = how many of each trainer tier to
-                        # feed (index 0..4 = items 101..105), strargs = [target uid].
-                        #
-                        # The reply is cmd 534, handled by receivedOneCharAndRemove:
-                        # strargs[0] is the UPDATED CharData (deserialized and pushed
-                        # through AddChar, replacing the entry in charDic) and any
-                        # further strargs are uids to delete. Level training consumes
-                        # items rather than casts, so there is nothing to delete here.
-                        uid = strargs[0] if strargs else ""
-                        ok, cost, used = ps.level_up_char(state, uid, intargs)
-                        if not ok:
-                            log(f"    -> level up REFUSED for {uid!r} "
-                                f"(intargs={intargs}) -- missing trainers or coins")
-                            # Still reply, or PanelCharacterUpgrade waits forever the
-                            # same way PanelSell does.
-                            send(MSG_RPC, uint_msg(PLAYER_CHAR, CHAR_RPLY_LEVEL_UP, [],
-                                                   [ps.char_data_json(state, uid)]))
-                        else:
-                            ps.bump_quest_counter(state, ps.QUEST_CASE_POWER_UP)
-                            ps.save(state)
-                            send(MSG_RPC, quest_sync_msg(state))
-                            entry = state["roster"].get(uid, {})
-                            log(f"    -> level up {uid} -> lv {entry.get('lv')} "
-                                f"xp {entry.get('xp')} (spent {cost} coins, {used})")
-                            send(MSG_RPC, uint_msg(PLAYER_CHAR, CHAR_RPLY_LEVEL_UP, [],
-                                                   [ps.char_data_json(state, uid)]))
-                            send(MSG_RPC, backpack_msg(
-                                84, [1],
-                                [ps.backpack_json(state, ps.BP_STORAGE_NORMAL)]))
-                            send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
-                                                   [ps.currency_json(state)]))
-                    elif index == PLAYER_CHAR_SERVER and cmd == CHAR_REQ_LOCK:
-                        # RequestServerLock(uids) sends strargs only -- NO intargs -- so
-                        # the new state is ours to pick: it is a toggle. receivedLockChar
-                        # applies ONE uid per reply and uses Dictionary.get_Item, which
-                        # throws on an unknown uid, so send one message per uid we hold.
-                        changed = ps.toggle_char_lock(state, strargs)
-                        ps.save(state)
-                        log(f"    -> lock toggled {changed}")
-                        for uid, now in changed:
-                            send(MSG_RPC, uint_msg(PLAYER_CHAR, CHAR_RPLY_LOCK,
-                                                   [now], [uid]))
-                    elif index == PLAYER_CHAR_SERVER and cmd == CHAR_REQ_CHAR_MAX:
-                        # RequestCharMax() sends no args. Case 533 assigns
-                        # PlayerCharData.addCharCount = intargs[0], so this is the roster
-                        # CAPACITY, not "max out a cast" as the name suggests.
-                        cap = ps.char_capacity(state)
-                        log(f"    -> char capacity add_char={cap}")
-                        send(MSG_RPC, uint_msg(PLAYER_CHAR, CHAR_RPLY_CHAR_MAX,
-                                               [cap], []))
-                    elif index == PLAYER_CHAR_SERVER and cmd == CHAR_REQ_DECOMPOSE:
-                        # RequestCharDecompose(List<string> decompose_uids). Same reply
-                        # shape as Unsummon: strargs = uids to drop from charDic,
-                        # intargs = FLAT [item id, amount, ...] for the reward popup.
-                        done, gain = ps.decompose_chars(state, strargs)
-                        if not done:
-                            log(f"    -> decompose refused for {list(strargs)}")
-                            send(MSG_RPC, uint_msg(
-                                PLAYER_CHAR, CHAR_RPLY_DECOMPOSE_FAIL, [], []))
-                        else:
-                            ps.save(state)
-                            log(f"    -> decompose {done} -> {gain}")
-                            pairs = [v for i, c in gain for v in (i, c)]
-                            send(MSG_RPC, uint_msg(PLAYER_CHAR,
-                                                   CHAR_RPLY_DECOMPOSE, pairs, done))
-                            send(MSG_RPC, uint_msg(PLAYER_CHAR, 528, [1, 1],
-                                                   [ps.char_json(state)]))
-                            buckets = {ps.item_bucket(i) for i, c in gain if i and c}
-                            if "backpack" in buckets:
-                                send(MSG_RPC, backpack_msg(
-                                    84, [1],
-                                    [ps.backpack_json(state, ps.BP_STORAGE_NORMAL)]))
-                            if "currency" in buckets:
-                                send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
-                                                       [ps.currency_json(state)]))
-                    elif index == PLAYER_CHAR_SERVER and cmd == CHAR_REQ_SET_SORT:
-                        # RequestSetSort(index, type, down). There is no set_sort in
-                        # CharRpcClientCmd, so the client never waits -- just persist it
-                        # so the next login sync returns the same ordering.
-                        ix = intargs[0] if intargs else 0
-                        ty = intargs[1] if len(intargs) > 1 else 0
-                        dn = intargs[2] if len(intargs) > 2 else 0
-                        ps.set_char_sort(state, ix, ty, dn)
-                        ps.save(state)
-                        log(f"    -> sort slot {ix} = {ty}_{dn} (no reply expected)")
-                    elif (index == PLAYER_CHAR_SERVER
-                          and cmd == CHAR_REQ_REMOVE_ALL_FORM):
-                        # RequestServerRemoveFromAllFormation(uid). The reply carries the
-                        # REBUILT formation dicts: strargs[0] normal, strargs[1] arena
-                        # team. Both are indexed before any count check and both are
-                        # dereferenced straight after deserializing, so send two real
-                        # JSON objects -- "{}" for arena, which we do not model.
-                        uid = strargs[0] if strargs else ""
-                        forms = ps.remove_from_all_formations(state, uid)
-                        ps.save(state)
-                        log(f"    -> removed {uid} from all formations")
-                        send(MSG_RPC, uint_msg(
-                            PLAYER_CHAR, CHAR_RPLY_REMOVE_ALL_FORM, [],
-                            [json.dumps(forms, separators=(",", ":")), "{}"]))
-                    elif (index == PLAYER_CHAR_SERVER
-                          and cmd == CHAR_REQ_WEAR_RUNE):
-                        # RequestWearRune(char_uid, equips): NO intargs, and
-                        # strargs = [...18 equip slots..., char_uid] with the uid LAST.
-                        # The client has already applied its change to the array, so we
-                        # validate and echo rather than trying to infer a slot.
-                        char_uid = strargs[-1] if strargs else ""
-                        want = list(strargs[:-1])
-                        try:
-                            slots, stolen = ps.wear_runes(state, char_uid, want)
-                        except (KeyError, ValueError) as exc:
-                            # No `char_wear_rune_fail` cmd exists, so there is nothing
-                            # honest to answer with -- log it and leave the array alone.
-                            log(f"    !! wear_rune refused for {char_uid!r}: {exc}")
-                        else:
-                            ps.save(state)
-                            worn = [u for u in slots if u]
-                            log(f"    -> {char_uid} wearing {len(worn)} equip(s): {worn}")
-                            # Whoever we took a piece off needs its own 549 FIRST --
-                            # receivedUpdateEquip only rewrites charDic[strargs.last],
-                            # so without this the old wearer keeps showing the
-                            # starshard until the next login sync.
-                            for other_uid, other_slots in stolen.items():
-                                log(f"    -> {other_uid} lost a piece to {char_uid}")
-                                send(MSG_RPC, uint_msg(
-                                    PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
-                                    list(other_slots) + [other_uid]))
-                            # Exactly CHAR_EQUIP_SLOTS + 1 strargs, uid last, or
-                            # receivedUpdateEquip returns without a word.
-                            send(MSG_RPC, uint_msg(
-                                PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
-                                slots + [char_uid]))
-                    elif (index == PLAYER_CHAR_SERVER
-                          and cmd == CHAR_REQ_WEAR_BLOODPACT):
-                        # RequestWearBloodPact(char_uid, equip): no intargs and
-                        # strargs = [char_uid, equip_uid] -- uid FIRST, the reverse of
-                        # 296. No slot index, so the server picks one of 12..14.
-                        char_uid = strargs[0] if strargs else ""
-                        equip_uid = strargs[1] if len(strargs) > 1 else ""
-                        try:
-                            slot, slots, stolen = ps.wear_bloodpact(
-                                state, char_uid, equip_uid)
-                        except (KeyError, ValueError) as exc:
-                            log(f"    !! wear_bloodpact refused for "
-                                f"{char_uid!r}: {exc}")
-                        else:
-                            ps.save(state)
-                            log(f"    -> {char_uid} bloodpact slot {slot} = "
-                                f"{equip_uid or '(cleared)'}")
-                            for other_uid, other_slots in stolen.items():
-                                log(f"    -> {other_uid} lost the pact to {char_uid}")
-                                send(MSG_RPC, uint_msg(
-                                    PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
-                                    list(other_slots) + [other_uid]))
-                            send(MSG_RPC, uint_msg(
-                                PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
-                                slots + [char_uid]))
-                    elif (index == PLAYER_CHAR_SERVER
-                          and cmd == CHAR_REQ_SET_HELPER):
-                        # RequestServerSetHelper(char_uid): strargs=[uid], no intargs.
-                        char_uid = strargs[0] if strargs else ""
-                        try:
-                            uid = ps.set_helper(state, char_uid)
-                        except ValueError as exc:
-                            log(f"    !! set_helper refused: {exc}")
-                        else:
-                            ps.save(state)
-                            log(f"    -> helper = {uid}")
-                            send(MSG_RPC, uint_msg(
-                                PLAYER_CHAR, CHAR_RPLY_SET_HELPER, [], [uid]))
-                    elif (index == PLAYER_CHAR_SERVER
-                          and cmd == CHAR_REQ_SET_SHOWGIRL):
-                        # RequestServerSetShowgirl(group, id, state, x, y, scale):
-                        # intargs=[group, id, state], strargs=["x_y_scale"].
-                        # The reply drops the group: receivedShowgirlData reads
-                        # intargs[0]=id, intargs[1]=state, strargs[0]=offset.
-                        sg_id = intargs[1] if len(intargs) > 1 else 0
-                        sg_state = intargs[2] if len(intargs) > 2 else 0
-                        offset = strargs[0] if strargs else ""
-                        try:
-                            sid, sstate, soff = ps.set_showgirl(
-                                state, sg_id, sg_state, offset)
-                        except ValueError as exc:
-                            log(f"    !! set_showgirl refused: {exc}")
-                        else:
-                            ps.save(state)
-                            log(f"    -> showgirl = {sid} state={sstate} "
-                                f"offset={soff!r}")
-                            send(MSG_RPC, uint_msg(
-                                PLAYER_CHAR, CHAR_RPLY_SET_SHOWGIRL,
-                                [sid, sstate], [soff]))
-                    elif (index == PLAYER_CHAR_SERVER
-                          and cmd == CHAR_REQ_UNLOCK_SKIN):
-                        # RequestUnlockSkin: intargs=[skinType], strargs=[char_uid].
-                        # The reply flips the flag on the per-CHARACTER-ID record, so it
-                        # carries [charId, skinType] and NO strargs.
-                        char_uid = strargs[0] if strargs else ""
-                        skin_type = intargs[0] if intargs else 0
-                        try:
-                            char_id = ps.unlock_skin(state, char_uid, skin_type)
-                        except (KeyError, ValueError) as exc:
-                            log(f"    !! unlock_skin refused for "
-                                f"{char_uid!r}: {exc}")
-                        else:
-                            ps.save(state)
-                            log(f"    -> char {char_id} unlocked CharSoulType "
-                                f"{skin_type}")
-                            send(MSG_RPC, uint_msg(
-                                PLAYER_CHAR, CHAR_RPLY_UNLOCK_SKIN,
-                                [char_id, skin_type], []))
-                            # The pedia record IS the unlock flag, so resend it or the
-                            # gallery reverts on the next rebuild.
-                            send(MSG_RPC, uint_msg(
-                                PLAYER_CHAR, CHAR_RPLY_SYNC_ID_DATA, [],
-                                [json.dumps(ps.char_id_table(state),
-                                            separators=(",", ":"))]))
-                    elif (index == PLAYER_CHAR_SERVER
-                          and cmd == CHAR_REQ_SET_SKIN):
-                        # RequestSetSkin: intargs=[skinType], strargs=[char_uid].
-                        # receivedSetSkin echoes both back onto charDic[uid].dbChar.skin.
-                        char_uid = strargs[0] if strargs else ""
-                        skin_type = intargs[0] if intargs else 0
-                        try:
-                            chosen = ps.set_skin(state, char_uid, skin_type)
-                        except (KeyError, ValueError) as exc:
-                            log(f"    !! set_skin refused for {char_uid!r}: {exc}")
-                        else:
-                            ps.save(state)
-                            log(f"    -> {char_uid} showing CharSoulType {chosen}")
-                            send(MSG_RPC, uint_msg(
-                                PLAYER_CHAR, CHAR_RPLY_SET_SKIN,
-                                [chosen], [char_uid]))
-                    elif (index == PLAYER_CHAR_SERVER
-                          and cmd == CHAR_REQ_WEAR_SOULFRAG):
-                        # RequestWearSoulFrag(char_uid, equip, itemAction):
-                        # strargs = [equip_uid, char_uid], intargs = [slot index],
-                        # where the index came from the client's own jump table at
-                        # 0x3703540 (action 101..109 -> 6..11 / 15..17).
-                        equip_uid = strargs[0] if strargs else ""
-                        char_uid = strargs[1] if len(strargs) > 1 else ""
-                        slot = intargs[0] if intargs else -1
-                        try:
-                            slots, stolen = ps.wear_soulmirror(
-                                state, char_uid, equip_uid, slot)
-                        except (KeyError, ValueError) as exc:
-                            log(f"    !! wear_soulfrag refused for "
-                                f"{char_uid!r}: {exc}")
-                        else:
-                            ps.save(state)
-                            log(f"    -> {char_uid} soulmirror slot {slot} = "
-                                f"{equip_uid or '(cleared)'}")
-                            for other_uid, other_slots in stolen.items():
-                                log(f"    -> {other_uid} lost the mirror "
-                                    f"to {char_uid}")
-                                send(MSG_RPC, uint_msg(
-                                    PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
-                                    list(other_slots) + [other_uid]))
-                            send(MSG_RPC, uint_msg(
-                                PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
-                                slots + [char_uid]))
-                    elif index == PLAYER_CHAR_SERVER and cmd == CHAR_REQ_SELL:
-                        # Unsummon -> "Mana Extract" (PanelSell action type 0).
-                        # strargs = the selected cast uids.
-                        #
-                        # THIS REPLY ALSO UNWEDGES THE PANEL. PanelSell gates both
-                        # CharListIconOnClickAction and OnCharSellClick on
-                        # `_charSellFlag`, which it clears when it sends this request
-                        # and only restores in OnCharUpdate / OnCharSellFailed -- i.e.
-                        # on our reply. Leave 291 unanswered and the panel soft-locks:
-                        # no selection, no button, and the lock survives leaving and
-                        # re-entering the panel because the instance is cached. Only a
-                        # game restart clears it.
-                        #
-                        # receivedCharSell reads strargs as the uids to drop from
-                        # charDic, and intargs as FLAT [item id, amount, ...] pairs for
-                        # the reward popup (it walks them two at a time).
-                        sold, gain = ps.sell_chars(state, strargs)
-                        ps.save(state)
-                        log(f"    -> unsummon {sold} -> {gain}")
-                        pairs = [v for item_id, amount in gain for v in (item_id, amount)]
-                        send(MSG_RPC, uint_msg(PLAYER_CHAR, CHAR_RPLY_SELL,
-                                               pairs, sold))
-                        # The roster shrank and the payout has to reach the cached bag
-                        # and currency, exactly as for quest rewards below.
-                        send(MSG_RPC, uint_msg(PLAYER_CHAR, 528, [1, 1],
-                                               [ps.char_json(state)]))
-                        buckets = {ps.item_bucket(i) for i, c in gain if i and c}
-                        if "backpack" in buckets:
-                            send(MSG_RPC, backpack_msg(
-                                84, [1],
-                                [ps.backpack_json(state, ps.BP_STORAGE_NORMAL)]))
-                        if "currency" in buckets:
-                            send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
-                                                   [ps.currency_json(state)]))
-                    elif index == PLAYER_CHAR_SERVER and cmd == CHAR_REQ_BOOK_RANK_UP:
-                        # The Soulpedia's `RANK UP!` button. Soul Link rank is CLAIMED,
-                        # not derived: the score accumulates on its own but the rank
-                        # only moves when the player presses this, which is why live
-                        # footage shows RANK 97 against a score already past rank 100.
-                        # One press claims EVERY rank the score has earned, not one --
-                        # confirmed against live footage. receivedBookRankUp agrees: it
-                        # saves the OLD rank and dispatches CharEvent 22 with it so the
-                        # UI can animate old -> new, which is only meaningful when the
-                        # jump can be bigger than a single rank.
-                        sum_xp = ps.book_sum_xp(state)
-                        earned = ps.book_rank_for(sum_xp)
-                        cur = int(state.get("book_rank", 0))
-                        new = earned
-                        if new != cur:
-                            state["book_rank"] = new
-                            ps.save(state)
-                        rank, sum_xp, left_xp = ps.book_progress(state)
-                        log(f"    -> soul link rank up {cur} -> {rank} "
-                            f"(score {sum_xp}, earned rank {earned})")
-                        # receivedBookRankUp indexes intargs 0..3, so all FOUR must be
-                        # present; it applies [0] -> bookRank and [2] -> bookLeftXp.
-                        send(MSG_RPC, uint_msg(
-                            PLAYER_CHAR, CHAR_RPLY_BOOK_RANK_UP,
-                            [rank, sum_xp, left_xp, 0], []))
-                    elif (index == BACKPACK_SERVER
-                          and cmd == BACKPACK_REQ_ENCHANT_GEM):
-                        # SendEnchantGemReq(itemUID, cnt): intargs=[levels],
-                        # strargs=[rune uid]. The reply (100) is a bare ack --
-                        # HandleEnchantGemRply is a single RET -- so everything the
-                        # client displays afterwards has to come from the cmd-145
-                        # BackpackChange push and a currency sync.
-                        uid = strargs[0] if strargs else ""
-                        levels = intargs[0] if intargs else 0
-                        try:
-                            entry, gained, cost = ps.upgrade_rune(state, uid, levels)
-                        except (LookupError, ValueError) as exc:
-                            log(f"    !! gem upgrade refused for {uid!r}: {exc}")
-                        else:
-                            # Cases 21 (levels in total), 26 (best level reached) and
-                            # 27 (how many shards at level >= v1) all hang off this
-                            # one action -- see bump_rune_upgrade_quests.
-                            qtouched = ps.bump_rune_upgrade_quests(state, gained)
-                            ps.save(state)
-                            log(f"    -> {uid} +{gained} lv "
-                                f"(now {entry['attr'][ps.RUNE_ATTR_LEVEL]}) "
-                                f"for {cost} coins")
-                            if qtouched:
-                                log(f"    -> starshard quest counters {qtouched}")
-                            send(MSG_RPC, backpack_msg(
-                                BACKPACK_RPLY_ENCHANT_GEM, [0], []))
-                            # BackpackEvent 1 is the only event an already-open panel
-                            # refreshes on; the storage sync (84-87) raises 4 instead.
-                            send(MSG_RPC, backpack_msg(
-                                BACKPACK_CHANGE, [0],
-                                [ps.backpacks_all_json(
-                                    state, {ps.BP_STORAGE_EQUIPMENT}),
-                                 ps.backpack_info_json(state)]))
-                            send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
-                                                   [ps.currency_json(state)]))
-                            if qtouched:
-                                send(MSG_RPC, quest_sync_msg(state))
-                    elif (index == BACKPACK_SERVER
-                          and cmd == BACKPACK_REQ_EQUIP_LOCK):
-                        # SendEquipLockReq(equip_uid, toLock): intargs=[toLock],
-                        # strargs=[uid]. Absolute, not a toggle -- the client already
-                        # computed 1 - attr["l"].
-                        uid = strargs[0] if strargs else ""
-                        to_lock = intargs[0] if intargs else 0
-                        try:
-                            storage, entry = ps.set_equip_lock(state, uid, to_lock)
-                        except LookupError as exc:
-                            log(f"    !! equip lock refused: {exc}")
-                        else:
-                            ps.save(state)
-                            log(f"    -> {uid} lock={to_lock} (storage {storage})")
-                            # 106 only moves the client's _lockCount; the flag itself
-                            # rides in attr["l"], so push the storage too.
-                            send(MSG_RPC, backpack_msg(
-                                BACKPACK_RPLY_EQUIP_LOCK, [to_lock], [uid]))
-                            send(MSG_RPC, backpack_msg(
-                                BACKPACK_CHANGE, [0],
-                                [ps.backpacks_all_json(state, {storage}),
-                                 ps.backpack_info_json(state)]))
-                    elif (index == BACKPACK_SERVER
-                          and cmd == BACKPACK_REQ_DECOMPOSE_BLOODPACT):
-                        # SendDecomposeBloodpactReq(uid_list): strargs = the pact uids,
-                        # no intargs. Opens a PanelWaitingBlock, so always answer.
-                        try:
-                            reward, gone, affected = ps.dismantle_bloodpacts(
-                                state, list(strargs))
-                        except (LookupError, ValueError) as exc:
-                            log(f"    !! dismantle refused: {exc}")
-                            send(MSG_RPC, backpack_msg(
-                                BACKPACK_RPLY_DECOMPOSE_BLOODPACT, [0], ["[]"]))
-                        else:
-                            ps.save(state)
-                            log(f"    -> dismantled {len(strargs)} pact(s) "
-                                f"-> {reward}")
-                            for other_uid, other_slots in affected.items():
-                                log(f"    -> {other_uid} lost a destroyed piece")
-                                send(MSG_RPC, uint_msg(
-                                    PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
-                                    list(other_slots) + [other_uid]))
-                            send(MSG_RPC, backpack_msg(
-                                BACKPACK_RPLY_DECOMPOSE_BLOODPACT, [1],
-                                [json.dumps(reward, separators=(",", ":"))]))
-                            send(MSG_RPC, backpack_msg(
-                                BACKPACK_CHANGE, [0],
-                                [ps.backpacks_all_json(
-                                    state, {ps.BP_STORAGE_BLOODPACT,
-                                            ps.BP_STORAGE_NORMAL},
-                                    {ps.BP_STORAGE_BLOODPACT: gone}),
-                                 ps.backpack_info_json(state)]))
-                            send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
-                                                   [ps.currency_json(state)]))
-                    elif (index == BACKPACK_SERVER
-                          and cmd == BACKPACK_REQ_DECOMPOSE_SOULFRAG):
-                        # SendDecomposeSoulFragReq(uid_list): strargs = the mirror uids,
-                        # no intargs. ALWAYS answer -- the request opened a
-                        # PanelWaitingBlock and only cmd 120 closes it.
-                        try:
-                            reward, gone, affected = ps.dismantle_soulmirrors(
-                                state, list(strargs))
-                        except (LookupError, ValueError) as exc:
-                            log(f"    !! soulmirror dismantle refused: {exc}")
-                            # intargs[0] != 1 skips the popup and falls straight through
-                            # to PanelWaitingBlock.Close(), which is the clean way to
-                            # unblock the UI on a refusal.
-                            send(MSG_RPC, backpack_msg(
-                                BACKPACK_RPLY_DECOMPOSE_SOULFRAG, [0], []))
-                        else:
-                            ps.save(state)
-                            log(f"    -> dismantled {len(strargs)} soulmirror(s) "
-                                f"-> {reward}")
-                            for other_uid, other_slots in affected.items():
-                                log(f"    -> {other_uid} lost a destroyed piece")
-                                send(MSG_RPC, uint_msg(
-                                    PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
-                                    list(other_slots) + [other_uid]))
-                            # HandleDecomposeSoulFragRply (0x18EBD60): intargs[0] must
-                            # be 1, then it RemoveAt(0)s that flag and walks whatever is
-                            # left in PAIRS -- [itemId, amount, itemId, amount, ...] --
-                            # building one ItemStruct each for the reward popup. The
-                            # pairs ride in intargs; unlike the bloodpact reply there is
-                            # no JSON strarg at all, and it takes `size >> 1` pairs so a
-                            # trailing odd element would be dropped silently.
-                            flat = [n for pair in reward for n in pair]
-                            send(MSG_RPC, backpack_msg(
-                                BACKPACK_RPLY_DECOMPOSE_SOULFRAG, [1] + flat, []))
-                            # 145 MERGES, so the dismantled slots need iid-0 tombstones
-                            # or their icons stay on screen; storage 1 carries the
-                            # refunded material.
-                            send(MSG_RPC, backpack_msg(
-                                BACKPACK_CHANGE, [0],
-                                [ps.backpacks_all_json(
-                                    state, {ps.BP_STORAGE_SOULFRAG,
-                                            ps.BP_STORAGE_NORMAL},
-                                    {ps.BP_STORAGE_SOULFRAG: gone},
-                                    only={ps.BP_STORAGE_SOULFRAG: []}),
-                                 ps.backpack_info_json(state)]))
-                    elif (index == BACKPACK_SERVER
-                          and cmd == BACKPACK_REQ_TRANSMUTE_SOULFRAG):
-                        # SendTransmuteSoulFragReq(uid_list): strargs = the mirrors to
-                        # fuse, no intargs. PanelWaitingBlock again -- always answer.
-                        try:
-                            new, gone, coins, affected = ps.fuse_soulmirrors(
-                                state, list(strargs))
-                        except (LookupError, ValueError) as exc:
-                            log(f"    !! soulmirror fuse refused: {exc}")
-                            send(MSG_RPC, backpack_msg(
-                                BACKPACK_RPLY_TRANSMUTE_SOULFRAG, [0], []))
-                        else:
-                            ps.save(state)
-                            log(f"    -> fused {len(strargs)} soulmirror(s) for "
-                                f"{coins} coins -> item {new['iid']} ({new['uid']})")
-                            for other_uid, other_slots in affected.items():
-                                log(f"    -> {other_uid} lost a destroyed piece")
-                                send(MSG_RPC, uint_msg(
-                                    PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
-                                    list(other_slots) + [other_uid]))
-                            # HandleTransmuteSoulFragRply (0x18EBF9C): intargs[0] == 1,
-                            # then it reads intargs[1] as the item id and intargs[2] as
-                            # the amount -- ONE ItemStruct, no loop. **All three ints
-                            # must be present**: it indexes [1] and [2] behind explicit
-                            # size checks that throw ArgumentOutOfRange, unlike 120
-                            # which tolerates a bare [1].
-                            send(MSG_RPC, backpack_msg(
-                                BACKPACK_RPLY_TRANSMUTE_SOULFRAG,
-                                [1, int(new["iid"]), 1], []))
-                            send(MSG_RPC, backpack_msg(
-                                BACKPACK_CHANGE, [0],
-                                [ps.backpacks_all_json(
-                                    state, {ps.BP_STORAGE_SOULFRAG},
-                                    {ps.BP_STORAGE_SOULFRAG: gone},
-                                    only={ps.BP_STORAGE_SOULFRAG: [new["sid"]]}),
-                                 ps.backpack_info_json(state)]))
-                            send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
-                                                   [ps.currency_json(state)]))
-                    elif (index == BACKPACK_SERVER
-                          and cmd == BACKPACK_REQ_MIX_BLOODPACT):
-                        # SendMixBloodpactReq(fromUID, toUID, fromIndex, toIndex):
-                        # intargs=[fromIndex, toIndex], strargs=[fromUID, toUID],
-                        # slot indices 1-based onto bid_N.
-                        from_uid = strargs[0] if strargs else ""
-                        to_uid = strargs[1] if len(strargs) > 1 else ""
-                        from_i = intargs[0] if intargs else 0
-                        to_i = intargs[1] if len(intargs) > 1 else 0
-                        try:
-                            tgt, skill, coins, gone, affected = ps.mix_bloodpact(
-                                state, from_uid, to_uid, from_i, to_i)
-                        except (LookupError, ValueError) as exc:
-                            log(f"    !! forge refused: {exc}")
-                            # Still answer, or PanelWaitingBlock never closes.
-                            send(MSG_RPC, backpack_msg(
-                                BACKPACK_RPLY_MIX_BLOODPACT, [0], []))
-                        else:
-                            ps.save(state)
-                            log(f"    -> forged skill {skill} from {from_uid}[{from_i}]"
-                                f" into {to_uid}[{to_i}] for {coins} coins")
-                            for other_uid, other_slots in affected.items():
-                                log(f"    -> {other_uid} lost a destroyed piece")
-                                send(MSG_RPC, uint_msg(
-                                    PLAYER_CHAR, CHAR_RPLY_UPDATE_EQUIP, [],
-                                    list(other_slots) + [other_uid]))
-                            send(MSG_RPC, backpack_msg(
-                                BACKPACK_RPLY_MIX_BLOODPACT, [1], []))
-                            send(MSG_RPC, backpack_msg(
-                                BACKPACK_CHANGE, [0],
-                                [ps.backpacks_all_json(
-                                    state, {ps.BP_STORAGE_BLOODPACT},
-                                    {ps.BP_STORAGE_BLOODPACT: [gone]}),
-                                 ps.backpack_info_json(state)]))
-                            send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
-                                                   [ps.currency_json(state)]))
-                    elif (index == BACKPACK_SERVER
-                          and cmd == BACKPACK_REQ_ENHANCE_BLOODPACT):
-                        # SendEnhanceBloodpactReq(itemUID, cnt): intargs=[levels],
-                        # strargs=[pact uid]. Reply is a bare ack; the client only
-                        # updates from the 145 push and the currency sync.
-                        uid = strargs[0] if strargs else ""
-                        levels = intargs[0] if intargs else 0
-                        try:
-                            entry, gained, coins = ps.upgrade_bloodpact(
-                                state, uid, levels)
-                        except (LookupError, ValueError) as exc:
-                            log(f"    !! bloodpact upgrade refused for "
-                                f"{uid!r}: {exc}")
-                        else:
-                            ps.save(state)
-                            log(f"    -> {uid} +{gained} lv "
-                                f"(now {entry['attr'][ps.RUNE_ATTR_LEVEL]}) "
-                                f"for {coins} coins")
-                            send(MSG_RPC, backpack_msg(
-                                BACKPACK_RPLY_ENHANCE_BLOODPACT, [0], []))
-                            send(MSG_RPC, backpack_msg(
-                                BACKPACK_CHANGE, [0],
-                                [ps.backpacks_all_json(
-                                    state, {ps.BP_STORAGE_BLOODPACT}),
-                                 ps.backpack_info_json(state)]))
-                            send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
-                                                   [ps.currency_json(state)]))
-                    elif (index == BACKPACK_SERVER
-                          and cmd == BACKPACK_REQ_ENHANCE_SOULFRAG):
-                        # SendEnhanceSoulFragReq(itemUID, cnt): intargs=[levels],
-                        # strargs=[mirror uid]. Storage 3 AND storage 1 both change
-                        # (the mirror levels, the Soul Essence is spent), so the 145
-                        # push carries both.
-                        uid = strargs[0] if strargs else ""
-                        levels = intargs[0] if intargs else 0
-                        try:
-                            entry, gained, coins, essence = ps.upgrade_soulmirror(
-                                state, uid, levels)
-                        except (LookupError, ValueError) as exc:
-                            log(f"    !! soulmirror upgrade refused for "
-                                f"{uid!r}: {exc}")
-                        else:
-                            ps.save(state)
-                            log(f"    -> {uid} +{gained} lv "
-                                f"(now {entry['attr'][ps.RUNE_ATTR_LEVEL]}) for "
-                                f"{coins} coins + {essence} essence")
-                            # **intargs[0] MUST be 1.** HandleEnhanceSoulFragRply
-                            # (0x18EBC14) treats anything else as failure: it skips
-                            # straight to PanelWaitingBlock.Close() and returns, which
-                            # looks exactly like the click doing nothing. On 1 it
-                            # deserializes strargs[0] as a BackpackItemData, converts it
-                            # with BackpackItemDataToItemStructGem and dispatches
-                            # BackpackEvent 7 -- the event ShowEnhanceResult listens on.
-                            send(MSG_RPC, backpack_msg(
-                                BACKPACK_RPLY_ENHANCE_SOULFRAG, [1],
-                                [json.dumps(entry, separators=(",", ":"))]))
-                            send(MSG_RPC, backpack_msg(
-                                BACKPACK_CHANGE, [0],
-                                [ps.backpacks_all_json(
-                                    state,
-                                    {ps.BP_STORAGE_SOULFRAG, ps.BP_STORAGE_NORMAL}),
-                                 ps.backpack_info_json(state)]))
-                            send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
-                                                   [ps.currency_json(state)]))
-                    elif (index == BACKPACK_SERVER
-                          and cmd == BACKPACK_REQ_QUERY_BOX):
-                        # RequesQueryBoxList(itemId) -> intargs=[item id].
-                        # HandleQueryBoxRply (0x18EC148) reads strargs[0] as
-                        # List<List<uint>> and calls
-                        # PanelItemInfo.ShowBoxItemInfoPopup(intargs[0], list) --
-                        # note intargs[0] there is a **box_type**, not the item id.
-                        #
-                        # Box CONTENTS are not in the client data. item 1001 is
-                        # `_class 2` (box) with `_param1 5211`, and 5211 resolves to an
-                        # equipment row whose suit has 257 members -- the actual drop
-                        # table was live-ops, like the gacha boxes and the roulette. So
-                        # answer with an EMPTY list: ShowMultipleItemInfo takes the
-                        # multi-item path (a null list would throw, an empty one is
-                        # fine), the popup opens with the item's own name/description
-                        # and an empty grid, and it can be dismissed. Inventing plausible
-                        # contents would show the player a preview that is simply wrong.
-                        item_id = intargs[0] if intargs else 0
-                        # Box contents are OUR data -- they were live-ops and are in no
-                        # design form -- so answer from the same tables a purchase pays
-                        # out of. That is what keeps Drop Info honest: what the preview
-                        # lists is exactly what buying hands over. An unknown box still
-                        # answers with an empty list, which opens the popup with the
-                        # item's own name and an empty grid rather than throwing.
-                        contents = ps.box_contents(item_id)
-                        log(f"    -> box {item_id}: {len(contents)} entries")
-                        send(MSG_RPC, backpack_msg(
-                            BACKPACK_RPLY_QUERY_BOX, [item_id],
-                            [json.dumps(contents, separators=(",", ":"))]))
                     elif index == OFA_SERVER and cmd == OFA_REQ_CONTENT:
                         # Opening any OFA banner (`RequestServerOFAContent: <id>` in
                         # logcat) asks for its content; unanswered, the bulletin panel
@@ -3230,129 +3454,6 @@ def handle(conn, addr):
                         send(MSG_RPC, uint_msg(
                             OFA_CLIENT, OFA_RPLY_CONTENT, [ofa_id],
                             [str(shop_id), ""]))
-                    elif index == SHOP_SERVER and cmd == SHOP_REQ_SYNC:
-                        # intargs = [refreshFlag, ShopVersion], and the client tells us
-                        # which case it wants: LOGIN sends [0, 0], the store panel sends
-                        # [1, 1]. Reply intargs[0] picks the event HandleLoginSync
-                        # dispatches -- 0 -> OPEN_SHOP_FINISH(1), non-zero ->
-                        # UPDATE_SHOP_LIST(12). The login sync WAITS on
-                        # OPEN_SHOP_FINISH, so hardcoding 1 hangs the whole login on
-                        # "Subsystem 'PlayerShop' still in syncing"; but the store panel
-                        # needs UPDATE_SHOP_LIST or it never rebuilds its banner list.
-                        # Echoing the flag serves both.
-                        #
-                        # ShopVersion must DIFFER from the client's current value or
-                        # HandleLoginSync skips the rebuild entirely, so bump it.
-                        flag = intargs[0] if intargs else 0
-                        log(f"    -> shop sync (flag {flag} -> ShopEvent "
-                            f"{'UPDATE_SHOP_LIST' if flag else 'OPEN_SHOP_FINISH'})")
-                        send(MSG_RPC, uint_msg(
-                            SHOP_CLIENT, SHOP_RPLY_SYNC, [flag, shop_version()],
-                            [ps.shop_json(), "{}"]))
-                    elif index == SHOP_SERVER and cmd == SHOP_REQ_BUY:
-                        # SendBuyCmd(goodsID, count) -- no shop id, goods ids are global.
-                        gid = intargs[0] if intargs else 0
-                        cnt = intargs[1] if len(intargs) > 1 else 1
-                        ok, shop_id, why, new_chars = ps.buy_shop_goods(
-                            state, gid, cnt)
-                        if ok:
-                            ps.save(state)
-                            log(f"    -> bought {cnt}x goods {gid} from shop {shop_id}"
-                                + (f", cast reward {new_chars}" if new_chars else ""))
-                        else:
-                            log(f"    -> buy REFUSED goods {gid} x{cnt} -- {why}")
-                        # Reply 513 (case 513 in PlayerShop.OnClientCmdReceived):
-                        #   intargs[0] = SHOP id   -- looked up in _shopDic
-                        #   intargs[1] = goods id
-                        #   intargs[2] = granted ITEM id    } only read when Count >= 3;
-                        #   intargs[3] = granted ITEM count } they build the List<ItemStruct>
-                        #                                     behind the "you received"
-                        #                                     popup, which is why a
-                        #                                     2-int reply bought the item
-                        #                                     silently with no animation.
-                        #   strargs[0] = updated Dictionary<int, GoodsBuyData>
-                        item_id, item_cnt = ps.goods_reward(state, gid, cnt)
-                        # A BUNDLE pays several things, so its confirmation goes out as
-                        # a drop-item popup listing every line. Reply 513 then carries
-                        # only two intargs -- with fewer than three it deliberately
-                        # shows nothing, which is what stops the two popups stacking.
-                        lines = ps.goods_bundle_lines(state, gid) if ok else []
-                        send(MSG_RPC, uint_msg(
-                            SHOP_CLIENT, SHOP_RPLY_BUY,
-                            ([shop_id or 0, gid] if len(lines) > 1
-                             else [shop_id or 0, gid, item_id, item_cnt]),
-                            [ps.shop_bought_json(state, shop_id or 0)]))
-                        if len(lines) > 1:
-                            send(MSG_RPC, backpack_msg(
-                                BACKPACK_RPLY_DROP_ITEM, [],
-                                [json.dumps({str(i): c for i, c in lines},
-                                            separators=(",", ":"))]))
-                        if ok:
-                            send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
-                                                   [ps.currency_json(state)]))
-                            send(MSG_RPC, backpack_msg(
-                                84, [1],
-                                [ps.backpack_json(state, ps.BP_STORAGE_NORMAL)]))
-                            # A ★5 card on the Medal of Pride tab is an `_action 1`
-                            # CAST, so it arrives the same way a quest cast reward
-                            # does -- Char `create`, which stores it and plays the
-                            # single-pull reveal. See CHAR_RPLY_CREATE.
-                            if new_chars:
-                                send(MSG_RPC, uint_msg(
-                                    PLAYER_CHAR, CHAR_RPLY_CREATE, [],
-                                    [ps.char_create_json(state, new_chars)]))
-                            # Stamina bundles pay ENERGY, which the client caches
-                            # from the login sync like everything else.
-                            send(MSG_RPC, uint_msg(0xAE487D79, 512, [],
-                                                   [ps.energy_json(state)]))
-                            # buy_shop_goods credited any "go and exchange X" quest
-                            # watching this goods id. The counter only becomes visible
-                            # -- and the goal only becomes claimable -- once the client
-                            # is told: AnalysisQuest rebuilds the claimable list from
-                            # this payload. Without it the player buys the item and the
-                            # goal sits there unchanged.
-                            send(MSG_RPC, quest_sync_msg(state))
-                    elif index == SHOP_SERVER and cmd == SHOP_REQ_GOODS_TO_SHOP:
-                        # "Which shop sells goods N, and which tab is it on?"
-                        # EnterSpecificStore needs BOTH, and the handler bails unless
-                        # intargs has two entries -- one is not a partial answer, it is
-                        # no answer. A goods id we do not sell gets no reply, since
-                        # navigating somewhere arbitrary is worse than not moving.
-                        goods_id = intargs[0] if intargs else 0
-                        shop_id, row = ps.find_shop_goods(state, goods_id)
-                        if row:
-                            log(f"    -> goods {goods_id} is in shop {shop_id} "
-                                f"tab {row[9]}")
-                            send(MSG_RPC, uint_msg(
-                                SHOP_CLIENT, SHOP_RPLY_GOODS_TO_SHOP,
-                                [shop_id, row[9]], []))
-                        else:
-                            log(f"    -> goods {goods_id} is in no shop we serve")
-                    elif index == SHOP_SERVER and cmd == SHOP_REQ_QUERY_COUPON:
-                        # Drop Info on a selector. UNANSWERED THIS LOCKS THE CLIENT:
-                        # the popup is already open behind a modal overlay and only
-                        # the reply builds its contents, so the player is left with an
-                        # undismissable dark screen. Reply even when we do not model
-                        # that selector -- an empty list opens the popup with the
-                        # item's own name and an empty grid, which closes normally.
-                        item_id = intargs[0] if intargs else 0
-                        contents = ps.box_contents(item_id)
-                        log(f"    -> selector {item_id}: {len(contents)} choices")
-                        send(MSG_RPC, uint_msg(
-                            SHOP_CLIENT, SHOP_RPLY_QUERY_COUPON, [item_id],
-                            [json.dumps(contents, separators=(",", ":"))]))
-                    elif index == SHOP_SERVER and cmd == SHOP_REQ_SYNC_GOODS:
-                        # Opening a store tab. Without this the panel calls
-                        # PanelWaitingBlock.Open(-1.0, 0) -- an indefinite, input-blocking
-                        # overlay with NO timeout -- and waits here forever, which locks
-                        # the whole client.
-                        shop_id = intargs[0] if intargs else 0
-                        sync_bought = intargs[1] if len(intargs) > 1 else 0
-                        log(f"    -> shop goods sync for shop {shop_id}")
-                        send(MSG_RPC, uint_msg(
-                            SHOP_CLIENT, SHOP_RPLY_SYNC_GOODS,
-                            [shop_id, sync_bought],
-                            ps.shop_goods_json(state, shop_id)))
                     elif index == CHALLENGE_SERVER and cmd == CHALLENGE_REQ_SYNC:
                         # Guild Weekly home. SyncChallengeDataReply tests
                         # `intargs.Count == 5 && strargs.Count == 1` and logs-and-
