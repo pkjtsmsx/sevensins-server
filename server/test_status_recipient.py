@@ -128,6 +128,33 @@ def check_passives_read_the_granting_fragment():
           f"got {who!r} -- 賦予自身黃金豪腕狀態")
 
 
+def check_unnamed_traits_survive_a_by_stat_clause():
+    """A clause that describes a status by EFFECT must not sink the passive's traits.
+
+    Gabriel (SP) II's prose says "increases the caster's SPD by 30% for 1 turn" and
+    never names `Linear Speedup`, the row that does exactly that. Unmatched, that one
+    clause tripped the all-or-nothing rule and threw away every unnamed status on the
+    passive -- including `Steady (SP)`, "Move Gauge will not decrease", the boss's
+    defence against gauge lock. Seen on a phone 2026-08-26.
+    """
+    rows = dd.rows("skill") or {}
+    spec = cs.compile_skill(rows, 100001132, {})
+    by = {(e.get("status") or {}).get("name"): e for e in spec["effects"]}
+    ls, st = by.get("Linear Speedup") or {}, by.get("Steady (SP)") or {}
+    check("Linear Speedup is claimed by stat at battle start for 1 turn",
+          ls.get("trigger") == "battle_start" and ls.get("trigger_source") == "prose_by_stat"
+          and (ls.get("numbers") or {}).get("duration") == 1, str(ls.get("numbers")))
+    check("Steady (SP) becomes a permanent trait on the caster",
+          st.get("trigger") == "battle_start" and st.get("recipient") == "caster"
+          and (st.get("numbers") or {}).get("permanent") is True, str(st.get("numbers")))
+    # Lucifer's passive is the same shape and carries a 2-turn figure to keep.
+    spec = cs.compile_skill(rows, 1000131, {})
+    by = {(e.get("status") or {}).get("name"): e for e in spec["effects"]}
+    w = by.get("Fallen Angel Wings") or {}
+    check("Lucifer's SPD buff keeps its stated 2 turns",
+          (w.get("numbers") or {}).get("duration") == 2, str(w.get("numbers")))
+
+
 def check_a_condition_never_supplies_the_recipient():
     """The single highest-value invariant here, stated as a rule rather than a case.
 
@@ -190,6 +217,7 @@ def check_the_qualifier_is_stripped():
 def main():
     for fn in (check_hand_read_cases,
                check_passives_read_the_granting_fragment,
+               check_unnamed_traits_survive_a_by_stat_clause,
                check_a_condition_never_supplies_the_recipient,
                check_side_vocabulary_is_complete_for_this_pack,
                check_a_list_separator_does_not_split_a_shared_grant,

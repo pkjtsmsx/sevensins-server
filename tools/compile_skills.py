@@ -1490,6 +1490,68 @@ def annotate_passive(r, spec, rows=None):
         return any(key in got or got in key for got in claimed)
 
     unclaimed = [c for c in clauses if not _is_claimed(c)]
+
+    # CLAIM BY STAT before giving up. A clause can describe a status by its EFFECT
+    # rather than its name -- Gabriel (SP) II's prose says "increases the caster's SPD
+    # by 30% for 1 turn (unremovable)" and never says "Linear Speedup", the row that
+    # does exactly that. Unmatched, that one clause tripped the conservative rule
+    # below and threw away EVERY unnamed status on the passive -- including
+    # `Steady (SP)`, "Move Gauge will not decrease", the boss's whole defence against
+    # gauge lock. On a phone (2026-08-26) the tier-1 AI then knocked her gauge back
+    # every turn and she never took one: 110 rounds, 87 party actions, zero of hers.
+    #
+    # The match is deliberately narrow: the status's own description and the clause
+    # must name the SAME stat and the SAME direction, and exactly one clause may fit.
+    _STAT = re.compile(r"\b(HP|ATK|DEF|SPD|CR[TI]|CDI)\b", re.I)
+    _UP = re.compile(r"increas|rais|\bup\b|提升|增加|上升", re.I)
+    _DOWN = re.compile(r"decreas|reduc|lower|\bdown\b|下降|減少|降低", re.I)
+
+    def _stat_dir(text):
+        m = _STAT.search(text or "")
+        if not m:
+            return None
+        stat = m.group(1).upper().replace("CRT", "CRI")
+        return (stat, "up" if _UP.search(text) else "down" if _DOWN.search(text) else None)
+
+    for e, name in list(deferred):
+        if e.get("op") != "apply_status" or not unclaimed:
+            continue
+        srow = (rows or {}).get((e.get("status") or {}).get("id")) or {}
+        want = _stat_dir(srow.get("_note1_en") or "")
+        if not want or want[1] is None:
+            continue
+        fits = [c for c in unclaimed if _stat_dir(c) == want]
+        if len(fits) != 1:
+            continue
+        clause = fits[0]
+        unclaimed.remove(clause)
+        claimed.add(_norm_clause(clause))
+        deferred.remove((e, name))
+        trigger = passive_trigger(clause)
+        if trigger is None and _ALWAYS_ON.search(clause):
+            trigger = "battle_start"
+        e["trigger"] = trigger
+        e["trigger_source"] = "prose_by_stat" if trigger else None
+        who = _who_in(clause)
+        if who:
+            sel = dict(e.get("select") or {})
+            sel.setdefault("who", who)
+            e["select"] = sel
+        e["conditional"] = False
+        # The clause carries the timing the status row cannot: "for 2 turns" /
+        # "(2回合)", or "the entire battle" / "整場戰鬥". Without this a claimed
+        # 2-turn SPD buff would fall to the engine's unstated-duration default.
+        nums = e.setdefault("numbers", {})
+        dm = re.search(r"(\d+)\s*(?:turns?|回合)", clause)
+        if dm:
+            nums["duration"] = int(dm.group(1))
+            nums["permanent"] = False
+        elif re.search(r"entire battle|whole battle|整場|持續整場", clause, re.I):
+            nums["duration"] = None
+            nums["permanent"] = True
+        unmodelled.append({"effect": name, "why": "claimed by stat, not by name",
+                           "clause": clause[:160]})
+
     for e, name in deferred:
         cat = ((e.get("status") or {}).get("category") or "").lower()
         if unclaimed:

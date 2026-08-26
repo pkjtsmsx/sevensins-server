@@ -294,8 +294,12 @@ def check_passives_fire_at_battle_start():
     forever = [(u.order, s.name) for u in battle.units.values()
                for s in u.statuses
                if isinstance(s, est2.Active) and s.remaining is None]
+    # Pride Mark: "Proves that [Lucifer the Pride] is on our field" -- a kit marker,
+    # permanent by nature. It only started compiling once the passive compiler learned
+    # to claim a clause by stat (Lucifer's SPD buff), which freed the unnamed traits on
+    # that passive from the all-or-nothing drop.
     known_permanent = {"Field Angel", "The Divine", "Stun/Confuse Immunity",
-                       "Swift Blade", "Return", "Elite", "CC Immunity"}
+                       "Swift Blade", "Return", "Elite", "CC Immunity", "Pride Mark"}
     unexpected = [(o, n) for o, n in forever
                   if not any(k.lower() in (n or "").lower() for k in known_permanent)]
     check("only deliberately-permanent statuses last the whole battle",
