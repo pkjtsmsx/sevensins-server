@@ -25,7 +25,6 @@ from .core import (
     RUNE_BONUS_ATTRS,
     RUNE_MAX_LEVEL,
     char_equips,
-    uid,
 )
 
 

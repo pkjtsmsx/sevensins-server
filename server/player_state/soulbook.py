@@ -16,7 +16,6 @@ from .core import (
     char_star,
     helper_uid,
     karma_of,
-    uid,
 )
 
 

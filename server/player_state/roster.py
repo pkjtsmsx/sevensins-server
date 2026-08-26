@@ -24,7 +24,6 @@ from .core import (
     grant_reward,
     quest_completed,
     save,
-    uid,
 )
 
 
