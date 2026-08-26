@@ -101,6 +101,33 @@ def check_hand_read_cases():
         check(f"{sid} {en} -> {want!r}", got == want, f"got {got!r} -- {why}")
 
 
+def check_passives_read_the_granting_fragment():
+    """passive_who must use the same reader as status_target, not the first mention.
+
+    Gabriel (SP), the Guild Weekly boss, seen on a phone 2026-08-25: her passive names
+    暈眩 twice -- once as what she is IMMUNE to, once as what she INFLICTS on the enemy's
+    fastest TEC casts -- and the first-mention reader made her daze HERSELF for her
+    opening turns. The saved battle showed Daze Immunity and Daze on her at once.
+    """
+    rows = dd.rows("skill") or {}
+    for sid, label in ((100001131, "Halo of Pure Heart (SP)"),
+                       (100001132, "Halo of Pure Heart (SP) II")):
+        r = rows.get(sid) or {}
+        for zh, en, want, why in (
+                ("暈眩", "Daze", "enemy", "對敵方「技」屬性速度最高的2人附加暈眩"),
+                ("免疫暈眩", "Daze Immunity", "self", "自身免疫暈眩"),
+                ("撼地鐵拳", "Power Fist", "enemy", "對敵方全體附加「撼地鐵拳」")):
+            who, _dis = cs.passive_who(r, en, zh)
+            check(f"{label}: {en} -> {want!r}", who == want, f"got {who!r} -- {why}")
+    # The other direction of the same bug: a self-grant that the old reader sent to the
+    # enemy because an enemy word came first in the sentence.
+    r = rows.get(next(s for s, rr in rows.items()
+                      if (rr.get("_name_en") or "") == "Monk of Wisdom III"))
+    who, _dis = cs.passive_who(r, "Golden Wrist", "黃金豪腕(7)")
+    check("Monk of Wisdom III: Golden Wrist -> 'self'", who == "self",
+          f"got {who!r} -- 賦予自身黃金豪腕狀態")
+
+
 def check_a_condition_never_supplies_the_recipient():
     """The single highest-value invariant here, stated as a rule rather than a case.
 
@@ -162,6 +189,7 @@ def check_the_qualifier_is_stripped():
 
 def main():
     for fn in (check_hand_read_cases,
+               check_passives_read_the_granting_fragment,
                check_a_condition_never_supplies_the_recipient,
                check_side_vocabulary_is_complete_for_this_pack,
                check_a_list_separator_does_not_split_a_shared_grant,

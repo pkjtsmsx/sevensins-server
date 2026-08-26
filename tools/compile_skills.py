@@ -1304,10 +1304,20 @@ def passive_who(r, name, zh_name=None):
     rather than merely being consulted. The disagreement is recorded so the count of them
     is a thing we can look at rather than a thing we assume is small.
     """
-    en = _who_in(_fragment_for(_clause_for(r.get("_note1_en") or "", name), name))
-    zh = None
-    if zh_name:
-        zh = _who_in(_fragment_for(_clause_for(r.get("_note1") or "", zh_name), zh_name))
+    # `_who_for`, the same reader status_target uses -- NOT `_fragment_for` on the first
+    # mention. A status is routinely named twice in one passive, once as something the
+    # holder is IMMUNE to and once as something it INFLICTS, and the first mention wins
+    # the old way. Gabriel (SP), the Guild Weekly boss, is the case: her prose reads
+    #
+    #     鋼鐵身軀：戰鬥開始時，自身免疫暈眩，持續3回合。
+    #     撼地鐵拳：戰鬥開始時，對敵方「技」屬性速度最高的2人附加暈眩(1回合)
+    #
+    # and the first fragment naming 暈眩 is the immunity, so Daze came out as `self`:
+    # the boss dazed HERSELF for her opening turns. Seen on a phone 2026-08-25 -- the
+    # saved battle showed her carrying Daze Immunity and Daze at once. `_who_for` picks
+    # the fragment with a GRANTING verb (附加), and 免疫 is deliberately not one.
+    en = _who_for(r.get("_note1_en"), name)
+    zh = _who_for(r.get("_note1"), zh_name) if zh_name else None
     if zh and en and zh != en:
         return zh, True
     return (zh or en), False
