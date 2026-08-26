@@ -1700,6 +1700,36 @@ class Unit(_engine_core.Unit):
         # Mobs pass nothing and are unaffected.
         gear = gear_bonus or {}
         self.gear_bonus = dict(gear)
+        # SECONDARY STATS. engine.formula has always modelled crit rate, crit damage,
+        # pierce and effect accuracy -- `getattr(caster, "cri", None)` at formula.py:184
+        # and the `ehit`/`eanti` pair in effect_lands -- but nothing ever SET them, so
+        # they read off a Unit that had no such attributes and every cast in the game
+        # fought at the BASE_CRIT_RATE fallback with no crit-damage scaling at all.
+        #
+        # SCALE: these are CharAttribute.PercentStyleAttrs, stored MULTIPLIED BY TEN
+        # (150 renders as "15.0%" -- char_flv 2000128 says 15% where _flvBonus says
+        # 150), so /1000 converts a design value into the 0..1 fraction formula wants.
+        #
+        # THE SPLIT BETWEEN None AND 0.0 IS THE ENGINE'S CONTRACT, NOT A CHOICE HERE.
+        # `_engine_core.Unit` declares `cri: Optional[float] = None` and every other one
+        # as `float = 0.0`, and the two are read differently on purpose:
+        #
+        #   cri  -- `BASE_CRIT_RATE if crit_rate is None else float(crit_rate)`.
+        #           None MEANS "use the base rate". Assigning 0.0 for an unpaid cri
+        #           therefore does not preserve behaviour, it silently drops EVERY unit
+        #           in the game, mobs included, from the 5% base crit to 0%.
+        #   rest -- added and subtracted directly (`1.0 + caster.cdi - target.cdr`,
+        #           `mitigation(..., caster.prc)`, `chance + ehit - eanti`), so a None
+        #           there is a TypeError mid-fight. Absent genuinely means "no bonus".
+        _cri = gear.get("cri")
+        self.cri = None if _cri is None else _cri / 1000.0
+        for _attr in ("cdi", "cdr", "prc", "ehit", "eanti"):
+            setattr(self, _attr, gear.get(_attr, 0) / 1000.0)
+        #
+        # Today the only source that reaches here is the Consonance ladder's rungs 28
+        # and 30 (roster._annotate_consonance). Starshard/soulmirror CRI/CDI sub-stats
+        # are still dropped by gear.equipped_stat_bonus -- see the stale comment there;
+        # wiring those up is its own piece of work, not this one.
         self.max_hp = stats["hp"] + bonus.get("hp", 0) + gear.get("hp", 0)
         self.hp = self.max_hp
         self.atk = stats["atk"] + bonus.get("atk", 0) + gear.get("atk", 0)
@@ -1861,8 +1891,25 @@ class Unit(_engine_core.Unit):
             "hp": self.hp if current else self.max_hp,
             "atk": self.atk, "def": self.defence, "spd": self.spd,
             "scv": int(self.scv) if current else SCV_FULL,
-            "cri": 0, "tgn": 0, "cdi": 0, "cdr": 0, "prc": 0,
-            "ehit": 0, "eanti": 0, "ddi": 0, "ddr": 0,
+            # Report what the unit actually carries. These are real fields the client
+            # renders in the stat popup, and sending 0 while the engine fought with a
+            # real value is what made the panel disagree with the damage.
+            #
+            # Back to the DESIGN scale (x10) the client expects -- the inverse of the
+            # /1000 in __init__. `cri` is None when nothing paid it; the wire has no way
+            # to say "use the engine default", so an unpaid cri goes out as 0 and the
+            # popup shows the pack's own number rather than our BASE_CRIT_RATE, which is
+            # a design choice of ours and not something the client should be told.
+            #
+            # tgn/ddi/ddr stay 0: nothing in the pack pays them yet.
+            "cri": int(round((self.cri or 0.0) * 1000)),
+            "tgn": 0,
+            "cdi": int(round(self.cdi * 1000)),
+            "cdr": int(round(self.cdr * 1000)),
+            "prc": int(round(self.prc * 1000)),
+            "ehit": int(round(self.ehit * 1000)),
+            "eanti": int(round(self.eanti * 1000)),
+            "ddi": 0, "ddr": 0,
         }
 
     def battle_char_data(self, owner_uid=""):

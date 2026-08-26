@@ -1276,10 +1276,18 @@ def equipped_stat_bonus(state, entry, base):
     the lobby's ▲ deltas read: a 34% ATK set on 2693 base ATK shows ▲915, not ▲34.
     Returned already rounded to ints so battle can add them directly.
 
-    **CRI/CDI/EHIT/EANTI are deliberately dropped here.** The battle engine has no
-    crit or effect-hit model at all (`Battle.damage` is atk x ratio x defence), so
-    there is nowhere honest to put them; they are carried in `equipped_attr_totals`
-    for whatever adds one.
+    **CRI/CDI/EHIT/EANTI are still dropped here, and that is now a GAP, not a
+    decision.** The reason given used to be that the battle engine had no crit or
+    effect-hit model. That stopped being true at the engine cutover: `engine.formula`
+    models all four (`strike` reads `cri`/`cdi`/`cdr`/`prc`, `effect_lands` reads
+    `ehit`/`eanti`), and `battle.Unit` now consumes them off this very dict -- so a
+    starshard's crit sub-stat is the one stat on the piece that still does nothing.
+    They remain in `equipped_attr_totals`, which is where to pick them up.
+
+    Not fixed in the same pass as the Unit wiring on purpose: the pieces roll CRI at
+    `_AttrInitV` values up to 9990 (see repair_equipment_rolls -- that is CRI+999.0%),
+    so turning them on is a balance question that wants its own look, not a one-line
+    addition here.
     """
     totals = equipped_attr_totals(state, entry)
     flat = {
