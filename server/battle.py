@@ -188,8 +188,12 @@ def bloodpact_aura(item_id, level):
         band = BLOODPACT_LV_MAX / BLOODPACT_AURA_RANKS
         rank = min(BLOODPACT_AURA_RANKS, int(max(0, level) // band) + 1)
     else:
-        rank = _clamp(int((dd.row("item", int(item_id)) or {}).get("_rarity") or 1),
-                      1, BLOODPACT_AURA_RANKS)
+        # This branch had called a `_clamp` that exists nowhere: a NameError waiting
+        # behind the flip switch above, invisible for as long as the default held, and
+        # invisible to lint because titan_server's star import had switched pyflakes'
+        # undefined-name check off. Found the day that import became explicit.
+        rarity = int((dd.row("item", int(item_id)) or {}).get("_rarity") or 1)
+        rank = max(1, min(BLOODPACT_AURA_RANKS, rarity))
     return (family, rank)
 
 

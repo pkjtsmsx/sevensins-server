@@ -46,7 +46,6 @@ from .core import (
     rune_uid,
     soulfrag_slot,
     spend_item,
-    uid,
     unequip_everywhere,
 )
 

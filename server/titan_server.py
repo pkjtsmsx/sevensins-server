@@ -50,7 +50,13 @@ except ImportError:                                                    # noqa: B
 # wire.py. `import *` is scoped by wire's __all__, so this pulls exactly the named
 # primitives (make_rpc, rpc_pack, pb_field_bytes, RC4, ...) and nothing else, which
 # is why every call site below stays unchanged.
-from wire import *                                                    # noqa: F401,F403
+# Explicit, not `import *`. The star form disabled pyflakes' undefined-name check for
+# this ENTIRE module ("unable to detect undefined names"), which is how ten references
+# to a bare `cx` in lifted handlers got past every static check and would have been a
+# NameError on the first fight started -- see the registry migration commits. With the
+# list spelled out, an undefined name is a lint error again, across all 3,900 lines.
+from wire import (RC4, KEY_C2S, KEY_S2C, HDR_LEN, MSG_LOGIN, MSG_RPC, chksum,
+                  login_reply, make_header, make_rpc, parse_rpc, pb_parse, rpc_pack)
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 22110
 LOG = os.path.join(os.path.dirname(__file__), "titan_server.log")
