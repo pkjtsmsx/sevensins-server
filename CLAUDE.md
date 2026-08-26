@@ -102,9 +102,12 @@ Where a fix changes behaviour, prove the test would have failed before it. For t
 `_report` crash the test asserts `fire()` really returns both row shapes, and the pre-fix
 unpack was demonstrated to raise on the same rows.
 
-**`python3 tools/run_tests.py` runs every `server/test_*.py`** and exits non-zero if any
-fails. Use it rather than a shell loop: nine of the suites print nothing on success, so
-only the exit code says whether they passed.
+**`python3 tools/run_tests.py` lints `server/` with pyflakes, then runs every
+`server/test_*.py`**, and exits non-zero if either fails. Use it rather than a shell
+loop: nine of the suites print nothing on success, so only the exit code says whether
+they passed. The lint is not decoration -- an undefined name is a `NameError` the
+phone finds for you, and the tree has had one hiding behind a config flag
+(`battle.py`'s `_clamp`, commit 02a5ee9). Do not silence it with a star import.
 
 **`tools/battle_fuzz.py` is the regression net** — thousands of randomised fights checking
 wire invariants, state and save/restore. Run it after anything touching battle. When a bug

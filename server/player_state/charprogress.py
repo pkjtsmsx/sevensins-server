@@ -14,7 +14,6 @@ from .core import (
     MAX_STAR,
     SUPER_LIMIT_DEFINE,
     _char_data_json,
-    add_char,
     char_rarity,
     grant_karma,
     has_item,

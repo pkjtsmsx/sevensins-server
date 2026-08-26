@@ -8,7 +8,6 @@ import json, time
 
 from .core import (
     grant_reward,
-    uid,
 )
 
 

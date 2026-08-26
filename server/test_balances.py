@@ -193,9 +193,8 @@ def check_rev1_clamp_is_repaired():
         by rev 2 a balance above the starter is diamonds the player EARNED. Confiscating
         those would be a worse bug than the one being fixed.
     """
-    from player_state.core import (_default, _seed_roster, migrate_starting_balances,
-                                   STARTER_DIAMONDS, STARTER_DIAMONDS_REV1,
-                                   BALANCE_REVISION)
+    from player_state.core import (migrate_starting_balances, STARTER_DIAMONDS,
+                                   STARTER_DIAMONDS_REV1, BALANCE_REVISION)
 
     def acct(rev, diamonds):
         st = _default(1); _seed_roster(st)
@@ -260,9 +259,9 @@ def check_rank_up_pushes_the_new_cap():
     182 at rank 17 -- so the rank-up screen animates numbers the header contradicts until
     the next relaunch.
     """
-    from player_state.core import (_default, _seed_roster, grant_player_xp,
-                                   stamina_cap_for_level, stamina_recovered_on_rank_up,
-                                   player_level_xp_cap, ENERGY_ACTION)
+    from player_state.core import (grant_player_xp, stamina_cap_for_level,
+                                   stamina_recovered_on_rank_up, player_level_xp_cap,
+                                   ENERGY_ACTION)
     st = _default(1000050); _seed_roster(st)
     slot = st["energy"][str(ENERGY_ACTION)]
     lv0 = int(st["level"]["lv"])

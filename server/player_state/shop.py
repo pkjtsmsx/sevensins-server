@@ -17,7 +17,6 @@ from .core import (
     bump_quest_counter,
     rune_slot,
     grant_reward,
-    item_count,
     spend_cost,
 )
 
