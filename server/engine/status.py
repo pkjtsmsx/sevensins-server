@@ -192,25 +192,102 @@ def apply_event(unit, event, caster=None):
     return active
 
 
+# What each immunity status blocks, derived once from its registry row.
+#
+# THE BUG THIS REPLACES: is_immune compared the immunity's NAME against the incoming
+# status's CATEGORY -- and every control status is category `misc`, so "misc" was looked
+# for inside "daze immunity", never found, and the immunity was inert. Found on a phone
+# 2026-08-26: the Guild Weekly boss opens with `Daze Immunity` and was dazed anyway.
+# Only the `CC Immunity` family ever worked, through its special-cased "cc" rule. At
+# that point the registry held 82 named immunities applied by 1,082 compiled effects
+# (977 of them passives), all decoration.
+#
+# Subjects come from BOTH the name and the description, because the registry spells
+# immunities two ways: 80 are named for their subject ("Freeze Immunity",
+# "Charm/Confuse/Headwind Immunity") and 38 say it only in prose ("Undying Hellfire":
+# "Gains immunity to Freeze effect", "Antibody": "immunity to all crowd control").
+# "All control/CC/immobilization" collapses to the KIND rule the CC family already
+# used; "all DoT" likewise. -> (frozenset of name stems, frozenset of blocked kinds).
+_IMM_SUBJECTS = {}
+
+# "Gains immunity to Enchant, Charm and Femme Fatale." / "immune to Absolute Zero (SP)
+# and Freeze for four turns" -- the subject list follows "immun* to". The first cut of
+# this parser instead captured whatever PRECEDED "immun", which turned Power Glove's
+# "all allies are immune" into the stems {"all allies are", "in battle"}.
+# The capture must run THROUGH a parenthetical, not stop at it -- "immune to Absolute
+# Zero (SP) and Freeze for four turns" names two statuses, and stopping at `(` kept
+# only the first. Qualifiers like (SP) are stripped per-part by _add instead.
+_IMM_FROM_DESC = re.compile(
+    r"immun\w*\s+to\s+(.+?)(?:\s+effects?\b|\s+for\s|[.。]|$)", re.I)
+_IMM_ALL_KINDS = (
+    (re.compile(r"all (?:crowd.control|control|cc|immobilization)", re.I), "control"),
+    (re.compile(r"all DoT|all damage.over.time", re.I), "dot"),
+)
+_IMM_QUALIFIER = re.compile(r"\s*[(（][^)）]*[)）]\s*|\s+(?:UL|SP|[IVX]+)\s*$")
+_IMM_NAME_PREFIX = re.compile(r"^(.*?)\s*immunity\b|[(（]\s*(.*?)\s*immunity\s*[)）]",
+                              re.I)
+
+
+def _immunity_subjects(status_id, name):
+    key = int(status_id or 0)
+    if key in _IMM_SUBJECTS:
+        return _IMM_SUBJECTS[key]
+    row = _registry(key)
+    name = name or row.get("name") or ""
+    desc = row.get("description") or ""
+    stems, kinds = set(), set()
+    for rx, kind in _IMM_ALL_KINDS:
+        if rx.search(name) or rx.search(desc):
+            kinds.add(kind)
+    if re.search(r"\bcc\b|crowd", name.lower()):
+        kinds.add("control")
+
+    def _add(listing):
+        for part in re.split(r"[/,]| and ", listing or ""):
+            part = _IMM_QUALIFIER.sub("", part.strip().strip(".")).strip().lower()
+            if part and part not in ("all", "the", "a", "an"):
+                stems.add(part)
+
+    # From the NAME: "Charm/Confuse/Headwind Immunity", "Kneel Down!(Charm Immunity)".
+    m = _IMM_NAME_PREFIX.search(name)
+    if m:
+        _add(m.group(1) or m.group(2))
+    # From the DESCRIPTION: "Gains immunity to Confuse and Deteriorate." -- 38 of the
+    # registry's immunities state their subject only here.
+    for m in _IMM_FROM_DESC.finditer(desc):
+        _add(m.group(1))
+    got = (frozenset(stems), frozenset(kinds))
+    _IMM_SUBJECTS[key] = got
+    return got
+
+
 def is_immune(unit, row):
     """Does an existing immunity block this application?
 
-    Deliberately narrow: only a status whose own registry `kind` is `immunity` and whose
-    name names the incoming category blocks it. A broad "any immunity blocks anything"
-    rule would make CC Immunity block buffs.
+    An immunity blocks the statuses it NAMES (loose match either way, qualifiers
+    stripped -- `Freeze Immunity` blocks `Freeze UL`) and the KINDS it claims wholesale
+    ("all control effects"). Still deliberately narrow the other way: a buff is never
+    blocked, so a mis-parsed subject cannot turn an immunity into a buff-eater.
     """
-    incoming = (row.get("category") or "").lower()
     incoming_kind = (row.get("kind") or "").lower()
-    if incoming in ("buff", "stat_up", "heal_over_time", "shield"):
-        return False
+    incoming_cat = (row.get("category") or "").lower()
+    incoming_name = _IMM_QUALIFIER.sub("", (row.get("name") or "").lower()).strip()
+    helpful = incoming_cat in ("buff", "stat_up", "heal_over_time", "shield")
     for st in unit.statuses:
         if not isinstance(st, Active) or st.kind != "immunity":
             continue
-        name = (st.name or "").lower()
-        if "cc" in name or "crowd" in name:
-            if incoming_kind == "control":
+        stems, kinds = _immunity_subjects(st.status_id, st.name)
+        # An EXPLICIT name match wins even over a "helpful" category, because the
+        # category is itself prose-derived and sometimes wrong -- Headwind, a
+        # gauge-block debuff, is category `shield` in the registry, and the guard
+        # below would have let it through a literal "Headwind Immunity". Naming the
+        # status is the strongest evidence there is about what the immunity means.
+        for stem in stems:
+            if incoming_name and (stem in incoming_name or incoming_name in stem):
                 return True
-        if incoming and incoming in name:
+        # The WHOLESALE rules ("all control", CC) stay behind the guard: they are
+        # derived, and a derived rule must never turn an immunity into a buff-eater.
+        if not helpful and incoming_kind in kinds:
             return True
     return False
 
