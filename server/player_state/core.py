@@ -512,7 +512,11 @@ def _save_locked(state):
     p = path_for(state["player_id"])
     tmp = p + ".tmp"
     with open(tmp, "w") as f:
-        json.dump(state, f, indent=1, sort_keys=True)
+        # Compact, not indented: 56% of the bytes of `indent=1` on a seeded account, and
+        # this runs on every mutation -- 68 call sites, up to ten of them during one
+        # login -- onto phone flash. Nobody reads the file by hand; the save editor
+        # parses it. `sort_keys` stays so two saves of the same state are byte-identical.
+        json.dump(state, f, sort_keys=True, separators=(",", ":"))
     os.replace(tmp, p)          # atomic, so a crash mid-write can't truncate the file
 
 
