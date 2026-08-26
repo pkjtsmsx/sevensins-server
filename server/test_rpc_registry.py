@@ -59,8 +59,17 @@ def check_registry_shape():
     # The chain must no longer carry what the table answers, or the two could drift.
     src = open(os.path.join(HERE, "titan_server.py"), encoding="utf-8").read()
     for name in ("PLAYER_MAIL_SERVER", "GUILD_SERVER", "PLAYER_CHAR_SERVER",
-                 "BACKPACK_SERVER", "SHOP_SERVER"):
+                 "BACKPACK_SERVER", "SHOP_SERVER", "PLAYER_STAGE_SERVER",
+                 "PLAYER_GACHA_SERVER", "CHALLENGE_SERVER", "PLAYER_QUEST_SERVER",
+                 "PLAYER_JSAGENT_SERVER", "OFA_SERVER", "PLAYER_SESSION_SERVER"):
         check(f"no {name} branch is left in the chain", f"index == {name}" not in src)
+    # What remains in the chain is exactly what cannot leave it: Battle (a dispatcher of
+    # its own, gated on a live fight), the sync-reply table, and fire-and-forget.
+    import re
+    left = re.findall(r"^ {20}elif \(?index == (\S+)", src, re.M)
+    check("only the Battle branch still dispatches on index in the chain",
+          left == ["bt.BATTLE_SERVER_INDEX"], str(left))
+    check("the registry holds 75 pairs", len(ts.HANDLERS) == 75, str(len(ts.HANDLERS)))
 
     dup = False
     try:
@@ -98,10 +107,21 @@ def check_registered_handlers_answer():
     n = c.rpc(ts.BACKPACK_SERVER, ts.BACKPACK_REQ_QUERY_BOX, [1001])
     check("Backpack box query is answered", c.wait_frames(n + 1) and c.got[n] == MSG_RPC)
 
-    # Something the table does NOT have still reaches the chain: the heartbeat.
+    # Stage: the tutorial fight, which REBINDS the connection's battle. This is the
+    # branch that could not leave the chain while `cur_battle` was a local of handle(),
+    # and the one a wrong `r.cx` rewrite would crash -- which pyflakes cannot see,
+    # because `from wire import *` disables its undefined-name check.
+    n = c.rpc(ts.PLAYER_STAGE_SERVER, ts.STAGE_REQ_NEWBIE)
+    check("Stage newbie fight starts (execute reply + BattleDatas)",
+          c.wait_frames(n + 2) and c.got[n:n + 2] == [MSG_RPC, MSG_RPC], str(c.got[n:]))
+    # ...and the Battle chain branch now reads cx.battle: a READY for the fight.
+    n = c.rpc(ts.bt.BATTLE_SERVER_INDEX, ts.bt.REQ_READY, [1])
+    check("the Battle branch sees the battle the handler started",
+          c.wait_frames(n + 1) and c.got[n] == MSG_RPC, str(c.got[n:]))
+
+    # The heartbeat is registered too now; the chain keeps only what cannot leave it.
     n = c.rpc(ts.PLAYER_SESSION_SERVER, ts.SESSION_HEARTBEAT_REQUEST)
-    check("an unregistered cmd still falls through to the chain",
-          c.wait_frames(n + 1) and c.got[n] == MSG_RPC)
+    check("heartbeat is answered", c.wait_frames(n + 1) and c.got[n] == MSG_RPC)
 
     check("the connection survived all of it", c.close())
     log = open(ts.LOG).read()

@@ -1586,22 +1586,40 @@ def heartbeat_reply(req_id):
 # symptom of the table being control flow. With the registry, coverage is exactly
 # `set(client_cmds) - set(HANDLERS)`.
 #
-# MIGRATED ONE SUBSYSTEM AT A TIME. The chain in handle() still answers most commands;
-# a registered pair is looked up FIRST, so a subsystem moves here by lifting its
-# branches into functions and deleting them from the chain -- nothing else changes.
-# Mail and Guild came first because they touch only what `Rpc` carries. Login stays in
-# the chain: it REBINDS `state` and `cur_battle`, which a handler cannot do to a local.
-# Battle stays in battle_replies(), which is a dispatcher of its own for good reason.
+# MIGRATED ONE SUBSYSTEM AT A TIME, and now complete: every (index, cmd) pair the
+# server answers is in this table except Battle, which stays in battle_replies() -- a
+# dispatcher of its own, gated on a live fight, and keyed on more than (index, cmd).
+# Login is not an RPC at all (MSG_LOGIN) and REBINDS `state`, so it stays in handle().
+# A registered pair is looked up FIRST; the chain below it holds only Battle, the
+# sync-reply table and FIRE_AND_FORGET. tools/lift_rpc_handlers.py is how the branches
+# got here, and test_rpc_registry.py drives one frame per subsystem through a socket.
 HANDLERS = {}
+
+
+class Conn:
+    """Per-connection state a handler may CHANGE, as opposed to read.
+
+    `battle` is the live fight, or None. It used to be a local of handle() named
+    `cur_battle`, which meant the two branches that start a fight -- Stage execute and
+    the Guild Weekly -- could never leave the chain: a function cannot rebind a caller's
+    local. Kept off `session` deliberately: that dict is published to disk as JSON for
+    the save editor's is-anyone-playing check, and a Battle object would break the
+    publish silently (it is wrapped in a bare except).
+    """
+    __slots__ = ("battle",)
+
+    def __init__(self):
+        self.battle = None
 
 
 class Rpc:
     """One request, as a registered handler sees it. `send` is the connection's."""
-    __slots__ = ("state", "session", "send", "index", "cmd", "rid",
+    __slots__ = ("state", "session", "cx", "send", "index", "cmd", "rid",
                  "intargs", "strargs", "strargs2")
 
-    def __init__(self, state, session, send, index, cmd, rid, intargs, strargs, strargs2):
-        self.state, self.session, self.send = state, session, send
+    def __init__(self, state, session, cx, send, index, cmd, rid, intargs, strargs,
+                 strargs2):
+        self.state, self.session, self.cx, self.send = state, session, cx, send
         self.index, self.cmd, self.rid = index, cmd, rid
         self.intargs, self.strargs, self.strargs2 = intargs, strargs, strargs2
 
@@ -2928,6 +2946,628 @@ def shop_sync_goods(r):
 
 
 
+# ---- Stage -----------------------------------------------------------------------------
+@rpc(PLAYER_STAGE_SERVER, STAGE_REQ_AVG_SYNC)
+def stage_avg_sync(r):
+    # HandleAVGSyncReplyCmd wants EXACTLY 4 ints, and it **SKIPS
+    # intArgs[0]**:
+    #
+    #     _avgRecord[0] = intArgs[1]
+    #     _avgRecord[1] = intArgs[2]
+    #     _avgRecord[2] = intArgs[3]
+    #
+    # so the payload is shifted by one and slot 0 is unread. Sending
+    # [chosen, unlocks, 0, 0] therefore landed `unlocks` (4321) in
+    # the LOCKED-OPTION field and 0 in the unlock digits: 10^(4321-1)
+    # overflows to infinity, the digit lookup yields 0, and
+    # UpdateAVGOptionLockState's else-branch locks nothing at all --
+    # every option stayed selectable no matter what we put in [0].
+    # That is why a decided scene re-opened even once the value
+    # itself was right.
+    #
+    # _avgRecord[0] -- the option already chosen, **1-BASED**, 0 for
+    #   undecided. UpdateAVGOptionLockState computes 10^(v-1) to pick
+    #   the unlock digit, and treats <= 0 as "nothing chosen".
+    #   The CHOICE REQUEST is 0-based (RequestServerAvgSelectOption
+    #   passes SelectedIndex straight into EndingOptions[]), so the
+    #   two directions disagree -- hence avg_choice_wire's +1.
+    # _avgRecord[1] -- which options are UNLOCKED, as decimal digits:
+    #   digit i is `tag[1] / 10^i % 10` and unlocks
+    #   _btnOptions[digit - 1]. 4321 unlocks options 1..4; scenes with
+    #   fewer buttons never read the higher digits. 0 locks the lot.
+    diff = int(r.state.get("avg_difficulty", 1))
+    chosen, unlocks = ps.avg_sync_tags(r.state, r.rid, diff)
+    log(f"    -> avg sync reply (avg {r.rid}, difficulty {diff}, "
+        f"locked option {chosen or 'none'}, unlock mask {unlocks})")
+    r.send(MSG_RPC, uint64_msg(PLAYER_STAGE, STAGE_RPLY_AVG_SYNC,
+                             [0, chosen, unlocks, 0],
+                             [], req_id=r.rid))
+
+
+@rpc(PLAYER_STAGE_SERVER, STAGE_REQ_AVG_CHOICE)
+def stage_avg_choice(r):
+    # MUST be exactly 4 ints: HandleAVGChoice only calls
+    # PanelAvg.SetRewardInfo(currencySP, value, charID, favour)
+    # on that path, and SetRewardInfo is what lets the scene
+    # continue -- any other arg count hits a bare `return` and
+    # the AVG hangs on the choice.
+    #
+    # [currencyType, currencyValue, charID, fexp]. charID is a
+    # DesignRoleModelInfoForm row -- an ordinary char id, NOT the
+    # avg_role id an older note here guessed at.
+    #
+    # Which option pays what is NOT recoverable: the per-option
+    # values lived on the original server and the `avg` design form
+    # is not even in our pack. KARMA_REWARDS is therefore keyed off
+    # footage; anything not in it falls back to the default so the
+    # story still pays out and keeps moving. The avg id is logged so
+    # new decisions can be added as they are observed.
+    # Unlike the AVG *sync* request, which carries the scene in the
+    # request id, RequestServerAvgSelectOption puts BOTH values in
+    # intargs -- [avgID, optionIndex] -- and leaves the request id 0.
+    # The option index is 0-based.
+    avg_id = r.intargs[0] if r.intargs else 0
+    option = r.intargs[1] if len(r.intargs) > 1 else 0
+    cur_type, cur_val, char_id, fexp = ps.karma_reward(avg_id, option)
+    # A scene pays once. Re-deciding is only possible on another
+    # difficulty, and set_avg_choice is what enforces that.
+    diff = int(r.state.get("avg_difficulty", 1))
+    first_time = ps.set_avg_choice(r.state, avg_id, option, diff)
+    if not first_time:
+        cur_val = fexp = 0
+    if cur_val:
+        ps.grant_currency(r.state, cur_type, cur_val)
+    karma = ps.grant_karma(r.state, char_id, fexp) if fexp else None
+    ps.save(r.state)
+    log(f"    -> avg choice reply (avg {avg_id} diff {diff}, "
+        f"option {option}"
+        f"{'' if first_time else ', ALREADY DECIDED - no payout'}): "
+        f"currency {cur_type}x{cur_val}, char {char_id} +{fexp} "
+        f"karma -> {karma}")
+    r.send(MSG_RPC, uint64_msg(PLAYER_STAGE, STAGE_RPLY_AVG_CHOICE,
+                             [cur_type, cur_val, char_id, fexp], [],
+                             req_id=r.rid))
+    # the banner is display-only; the grant only sticks if the
+    # currency and the CharIDData karma are pushed back
+    if cur_val:
+        r.send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
+                               [ps.currency_json(r.state)]))
+    if fexp:
+        r.send(MSG_RPC, uint_msg(0x771EA36E, 528, [1, 1],
+                               [ps.char_json(r.state)]))
+    # Crossing a Karma rank pays that rank's Rank Bonus row, and a
+    # single grant can cross several at once. Push whatever buckets
+    # they landed in or the payout exists only server-side.
+    for _b in karma_reward_msgs(r.state, karma):
+        r.send(MSG_RPC, _b)
+
+
+@rpc(PLAYER_STAGE_SERVER, STAGE_REQ_AUTO_START, STAGE_REQ_AUTO_SYNC, STAGE_REQ_AUTO_STOP)
+def stage_auto_start(r):
+    now = int(time.time())
+    if r.cmd == STAGE_REQ_AUTO_START:
+        stage_id = r.intargs[0] if r.intargs else 0
+        count = r.intargs[1] if len(r.intargs) > 1 else 1
+        coupon = bool(r.intargs[2]) if len(r.intargs) > 2 else False
+        ok, why = ps.autorun_start(r.state, stage_id, count,
+                                   coupon, now)
+        if not ok:
+            log(f"    -> auto play REFUSED {stage_id} x{count} "
+                f"-- {why}")
+            r.send(MSG_RPC, stage_sync_msg(r.state))
+            return
+        ps.save(r.state)
+        job = r.state["autorun"]
+        log(f"    -> auto play started: stage {stage_id} x{count}"
+            f"{' (express)' if coupon else ''}, due in "
+            f"{job['duetime'] - now}s")
+        # NO toast here -- 401 says "Completed", which is a lie
+        # until the timer runs out. The syncs below are what tell
+        # the panel a sweep is running.
+    elif r.cmd == STAGE_REQ_AUTO_STOP:
+        stopped = ps.autorun_cancel(r.state)
+        if stopped:
+            elapsed = max(0, now - int(stopped["starttime"]))
+            done = ps.autorun_runs_elapsed(stopped, now)
+            paid = autorun_payout(r.state, stopped["stage_id"], done)
+            ps.save(r.state)
+            log(f"    -> auto play stopped: stage "
+                f"{stopped['stage_id']} after {done}/"
+                f"{stopped['count']} runs ({elapsed}s)")
+            # EXACTLY three intargs, or HandleAutoStop bails.
+            r.send(MSG_RPC, uint64_msg(
+                PLAYER_STAGE, STAGE_RPLY_AUTO_STOP,
+                [int(stopped["stage_id"]), int(done),
+                 int(elapsed)], []))
+            for m in paid:
+                r.send(MSG_RPC, m)
+    # Settle a finished sweep before answering, so the client is
+    # told about the rewards in the same breath as the new state.
+    done = autorun_settle(r.state, now)
+    r.send(MSG_RPC, stage_sync_msg(r.state))
+    r.send(MSG_RPC, auto_sync_msg(r.state))
+    for m in done:
+        r.send(MSG_RPC, m)
+
+
+@rpc(PLAYER_STAGE_SERVER, STAGE_REQ_GET_DROPS)
+def stage_get_drops(r):
+    stage_id = r.intargs[0] if r.intargs else 0
+    drops = bt.stage_drop_preview(stage_id)
+    log(f"    -> drop info for stage {stage_id}: {drops}")
+    r.send(MSG_RPC, uint64_msg(
+        PLAYER_STAGE, STAGE_RPLY_GET_DROPS, [stage_id],
+        [json.dumps(drops, separators=(",", ":"))]))
+
+
+@rpc(PLAYER_STAGE_SERVER, STAGE_REQ_EXECUTE, STAGE_REQ_NEWBIE)
+def stage_execute(r):
+    # Execute carries [stage_id, team]; the newbie variant sends no
+    # args at all and always means the tutorial stage.
+    #
+    # **The team arg is 1-BASED and we were ignoring it**, so every
+    # fight fielded formation 0 however the player had switched
+    # teams. `RequestServerStageExecuteByAutoLoop` (0x180C5C8)
+    # sends `loopData.teamID + 1`, and teamID is the 0-based
+    # formation index -- hence the -1 here. Remembered in state so
+    # the XP payout and a resumed battle use the same party.
+    stage_id = r.intargs[0] if r.intargs else NEWBIE_STAGE_ID
+    team_ix = (int(r.intargs[1]) - 1) if len(r.intargs) > 1 else 0
+    team_ix = max(0, min(team_ix,
+                         len(r.state.get("formations") or [0]) - 1))
+    r.state["battle_team_index"] = team_ix
+    # A daily-dungeon stage (_ap_type 2) costs one of item _ap_v1 --
+    # the Training Gym Pass and friends. Charge it here, or every
+    # run is free and the counter never moves.
+    # "[Daily] Spend Stamina x500" counts the stamina a run WOULD
+    # cost (the stage row's `_ap`). We never actually deduct stamina
+    # -- the energy sync hands out 999 and ordinary runs are free --
+    # so crediting the notional cost is the only way that mission can
+    # move without changing the economy.
+    srow = bt.dd.row("stage", stage_id) or {}
+    # Which difficulty the AVG decisions of this run belong to.
+    # Stages 1101/1201/1301 are the SAME scene ("Third Faction",
+    # 1-1) at _difficulty 1/2/3 and share their AVG ids, so the scene
+    # alone cannot tell them apart -- and a choice is permanent PER
+    # DIFFICULTY, with three difficulties and three options meaning
+    # one option each. The AVG sync request carries only the scene,
+    # so the difficulty has to be remembered from the stage entry.
+    r.state["avg_difficulty"] = int(srow.get("_difficulty") or 1)
+    ap = int(srow.get("_ap") or 0)
+    if ap and int(srow.get("_ap_type") or 0) != 2:
+        ps.bump_quest_counter(r.state, ps.QUEST_CASE_SPEND_ITEM, ap,
+                              case_v1=ps.STAMINA_ITEM_ID)
+    cost = ps.stage_ap_cost(srow)
+    if cost:
+        iid, n = cost
+        if ps.spend_item(r.state, iid, n):
+            ps.save(r.state)
+            log(f"    -> charged {n}x item {iid} to enter "
+                f"stage {stage_id} (left {ps.item_count(r.state, iid)})")
+            r.send(MSG_RPC, backpack_msg(
+                84, [1],
+                [ps.backpack_json(r.state, ps.BP_STORAGE_NORMAL)]))
+        else:
+            log(f"    -> stage {stage_id} entry REFUSED -- no "
+                f"item {iid}")
+    party = ps.battle_team(r.state, team_ix)
+    log(f"    -> stage execute reply (stage {stage_id}, "
+        f"team {team_ix + 1}: "
+        f"{[e.get('uid') if isinstance(e, dict) else e for e in party]})")
+    r.send(MSG_RPC, stage_execute_reply())
+    r.cx.battle = bt.Battle(stage_id, party,
+                           r.state.get("team_level", 1),
+                           r.state.get("team_star"),
+                           r.state.get("team_super_star", 0),
+                           int(r.state.get("book_rank", 0)))
+    # Persist immediately: a server restart between this and the
+    # FIRST attack must still have something to resume, not just
+    # ones after the player's first action.
+    ps.save_battle(r.state, r.cx.battle)
+    ps.save(r.state)
+    log(f"    -> start battle: wave 1/{r.cx.battle.wave_max}, "
+        f"units {sorted(r.cx.battle.units)}")
+    r.send(MSG_RPC, start_battle_msg(r.cx.battle))
+
+
+# ---- Gacha -----------------------------------------------------------------------------
+@rpc(PLAYER_GACHA_SERVER, GACHA_REQ_DRAW_ROULETTE)
+def gacha_draw_roulette(r):
+    box_id = r.intargs[0] if r.intargs else 101
+    ok, results, why = ps.roulette_draw(r.state, box_id)
+    if ok:
+        ps.save(r.state)
+        log(f"    -> roulette {box_id} drew {results}")
+        r.send(MSG_RPC, uint_msg(
+            PLAYER_GACHA, GACHA_RPLY_ROULETTE_OK, [box_id],
+            [json.dumps(results, separators=(",", ":")),
+             json.dumps(ps.roulette_info(r.state, box_id),
+                        separators=(",", ":"))]))
+        # The winnings only exist client-side once we re-push the
+        # bucket they landed in; the panel updates neither by itself.
+        # Push both -- a slot can pay coin/diamond (currency) or
+        # scrolls and orbs (backpack).
+        r.send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
+                               [ps.currency_json(r.state)]))
+        r.send(MSG_RPC, backpack_msg(
+            84, [1],
+            [ps.backpack_json(r.state, ps.BP_STORAGE_NORMAL)]))
+    else:
+        log(f"    -> roulette {box_id} refused: {why}")
+        r.send(MSG_RPC, uint_msg(
+            PLAYER_GACHA, GACHA_RPLY_ROULETTE_FAIL,
+            [box_id], []))
+
+
+@rpc(PLAYER_GACHA_SERVER, GACHA_REQ_DRAW)
+def gacha_draw(r):
+    # A redraw box rolls for free and commits on RedrawSave.
+    # TODO: the banner now offers four buttons (free daily / 600
+    # diamonds / 1 scroll / 10 scrolls) but we still always roll 10
+    # and charge scrolls in gacha_commit. Log the request so the
+    # box id + draw type + cost category can be read off a real
+    # press and the charge wired to the button actually used.
+    # intargs = [boxId, drawIndex], drawIndex 1-based into that
+    # box's cost_tbl -- so it names both the price AND whether this
+    # is a single or a ten-pull.
+    box_id = r.intargs[0] if r.intargs else ps.GACHA_BOX_ID
+    draw_ix = r.intargs[1] if len(r.intargs) > 1 else 1
+    cost_item, price, count = ps.gacha_cost_row(
+        r.state, box_id, draw_ix)
+    log(f"    -> gacha draw box {box_id} option {draw_ix}: "
+        f"{count} pull(s) for {price}x item {cost_item}")
+    if price == 0 and ps.gacha_free_available(r.state):
+        ps.use_gacha_free(r.state)
+        log("    -> that was the free daily pull")
+    results = ps.gacha_draw(r.state, count,
+                            cost=(cost_item, price),
+                            box_id=box_id)
+    # Only the tutorial box re-rolls. Every other banner has NO
+    # commit command of its own -- RedrawBoxDoGetDraw (20) is
+    # redraw-only -- so a regular pull has to be granted here or it
+    # is displayed and then silently dropped.
+    if not ps.gacha_is_redraw_box(box_id):
+        kept = ps.gacha_commit(r.state)
+        log(f"    -> gacha draw box {box_id} committed: {kept}")
+    else:
+        log(f"    -> gacha draw (pending): {results}")
+    ps.save(r.state)
+    r.send(MSG_RPC, uint_msg(
+        PLAYER_GACHA, GACHA_RPLY_DRAW, [1, 0, 0, 0, 0],
+        [ps.gacha_box_json(r.state, box_id),
+         json.dumps(results, separators=(",", ":"))]))
+    if not ps.gacha_is_redraw_box(box_id):
+        # Push whatever the pull actually changed.
+        if ps.gacha_is_soulmirror_box(box_id):
+            # BACKPACK_CHANGE, not the bare storage sync: cmd 86
+            # carries the item list only, so the Soulmirror panel's
+            # "n/999" (GetBpFixCount -> the cmd-83 INFO rows) kept
+            # the pre-pull figure until some later fuse/dismantle/
+            # upgrade happened to resend the infos. 145 carries
+            # both and raises BackpackEvent 1, the one an open
+            # panel refreshes on.
+            r.send(MSG_RPC, backpack_msg(
+                BACKPACK_CHANGE, [0],
+                [ps.backpacks_all_json(
+                    r.state, {ps.BP_STORAGE_SOULFRAG}),
+                 ps.backpack_info_json(r.state)]))
+        else:
+            r.send(MSG_RPC, uint_msg(
+                PLAYER_CHAR, 528, [1, 1],
+                [ps.char_json(r.state)]))
+        r.send(MSG_RPC, backpack_msg(
+            84, [1],
+            [ps.backpack_json(r.state, ps.BP_STORAGE_NORMAL)]))
+        r.send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
+                               [ps.currency_json(r.state)]))
+
+
+@rpc(PLAYER_GACHA_SERVER, GACHA_REQ_REDRAW_GET)
+def gacha_redraw_get(r):
+    # Collect!: commit the pending roll, charge it, count the pull.
+    box_id = r.intargs[0] if r.intargs else ps.GACHA_BOX_ID
+    kept = ps.gacha_commit(r.state)
+    ps.save(r.state)
+    log(f"    -> redraw commit (box {box_id}): kept {len(kept)}, "
+        f"gacha count {r.state.get('gacha_count')}")
+    # Push the updated collections BEFORE the reply. The 277 is
+    # what sends the client back to the Goal panel, and although
+    # PanelGoalQuest.OnQuestSynced does MarkUIDirty, a sync that
+    # lands after the panel has already rebuilt is missed -- the
+    # step only appeared after leaving and re-entering.
+    r.send(MSG_RPC, uint_msg(PLAYER_CHAR, 528, [1, 1],
+                           [ps.char_json(r.state)]))
+    r.send(MSG_RPC, backpack_msg(84, [1],
+                               [ps.backpack_json(r.state, 1)]))
+    r.send(MSG_RPC, quest_sync_msg(r.state))
+    r.send(MSG_RPC, uint_msg(PLAYER_GACHA,
+                           GACHA_RPLY_REDRAW_GET, [box_id], []))
+    # The gacha sync goes LAST. ReceiveRedrawBoxDoGetDraw looks the
+    # box up via GachaBoxIDToIndex[box_id], so pushing a box list
+    # that no longer contains it (the tutorial box is replaced by
+    # the standing banners once gacha_count > 0) makes the 277
+    # throw and Collect! silently do nothing. Sending it after also
+    # refreshes PanelGacha's scroll label, which only redraws off
+    # the gacha sync path (UpdateGachaToken).
+    r.send(MSG_RPC, uint_msg(PLAYER_GACHA, 257, [1, 1],
+                           [ps.gacha_json(r.state)]))
+
+
+@rpc(PLAYER_GACHA_SERVER, GACHA_REQ_REDRAW_SAVE)
+def gacha_redraw_save(r):
+    box_id = r.intargs[0] if r.intargs else ps.GACHA_BOX_ID
+    hist = r.state.get("gacha_pending") or []
+    log(f"    -> redraw save-to-history (box {box_id})")
+    r.send(MSG_RPC, uint_msg(
+        PLAYER_GACHA, GACHA_RPLY_REDRAW_SAVE, [box_id],
+        [json.dumps(hist, separators=(",", ":"))]))
+
+
+# ---- Challenge -------------------------------------------------------------------------
+@rpc(CHALLENGE_SERVER, CHALLENGE_REQ_SYNC)
+def challenge_sync(r):
+    # Guild Weekly home. SyncChallengeDataReply tests
+    # `intargs.Count == 5 && strargs.Count == 1` and logs-and-
+    # returns on anything else, so the counts are not advisory.
+    ints = ps.challenge_sync_intargs(r.state)
+    ps.save(r.state)
+    log(f"    -> challenge sync: best {ints[1]}, "
+        f"reset in {ints[3]}s, boss group "
+        f"{ps.challenge_weekday()}")
+    r.send(MSG_RPC, sint_msg(
+        CHALLENGE_CLIENT, CHALLENGE_RPLY_SYNC, ints,
+        [ps.challenge_stages_json(r.state)]))
+    # A day that ended while the account was away has already been
+    # PAID by the rollover inside challenge_sync_intargs; 785 is
+    # only the announcement. It is server-initiated with no request
+    # of its own, so the panel opening is the natural moment: the
+    # player is looking at the raid, and PanelItemMsg is loaded.
+    #
+    # ChallengeRewardGetReply wants EXACTLY 2 ints and 2 strings and
+    # returns silently otherwise. It then shows the item popup twice
+    # -- "Previous personal score: {0}" then "Previous Guild Score:
+    # {0}" -- so this is the notice that the sweep happened.
+    pending = ps.take_pending_settlement(r.state)
+    if pending:
+        p_ints, p_strs = pending
+        ps.save(r.state)
+        log(f"    -> challenge settlement announced: "
+            f"personal {p_ints[0]}, guild {p_ints[1]}")
+        r.send(MSG_RPC, sint_msg(
+            CHALLENGE_CLIENT, ps.CHALLENGE_RPLY_REWARD_GET,
+            p_ints, p_strs))
+
+
+@rpc(CHALLENGE_SERVER, CHALLENGE_REQ_FIGHT)
+def challenge_fight(r):
+    # **intargs = [use_bc, mode]** -- the difficulty is [1], not
+    # [0]. No stage id is sent; we re-derive it from the same
+    # (weekday, difficulty) the client used, so the two agree by
+    # construction rather than by trust.
+    difficulty = r.intargs[1] if len(r.intargs) > 1 else 1
+    stage_id, why = ps.start_challenge(r.state, difficulty)
+    if not stage_id:
+        log(f"    -> guild weekly REFUSED (difficulty "
+            f"{difficulty}) -- {why}")
+        # There is no error command in ChallengeRpcClientCmd, so
+        # there is nothing to unblock: the panel never opened a
+        # waiting overlay for this. Re-sync so the "n / 3
+        # challenges" count on screen matches the truth.
+        r.send(MSG_RPC, sint_msg(
+            CHALLENGE_CLIENT, CHALLENGE_RPLY_SYNC,
+            ps.challenge_sync_intargs(r.state),
+            [ps.challenge_stages_json(r.state)]))
+    else:
+        # "[Weekly] Challenge the Guild Boss 7 times" (10042) and
+        # its monthly twin. `_case_id` 2001 keys on the ENTRY ITEM
+        # in `_case_v1` -- pass it, or the coin/gem rows that share
+        # the case advance too.
+        bumped = ps.bump_quest_counter(
+            r.state, ps.QUEST_CASE_GUILD_BOSS,
+            case_v1=ps.CHALLENGE_PASS_ITEM)
+        if bumped:
+            log(f"    -> guild boss quest counters {bumped}")
+        # **The raid fields its OWN team, not the last one used.**
+        # InitTeamIndex case 8 puts the Guild Weekly on a dedicated
+        # saved team per weekday boss (`weekday + 9`), and the Edit
+        # button on the Preparation panel edits exactly that one.
+        # This used to read `battle_team_index`, which is set by the
+        # ordinary stage-execute path -- so the raid fought with
+        # whatever team the last CAMPAIGN stage used and editing the
+        # raid team changed the panel and nothing else. Unlike a
+        # stage execute, cmd 528 carries no team index, so we have to
+        # derive the same number the client did.
+        team_ix = ps.challenge_formation_index()
+        team_ix = max(0, min(int(team_ix),
+                             len(r.state.get("formations") or [0]) - 1))
+        # Remembered so the XP payout and a resumed fight use the
+        # same party, exactly as the stage path does.
+        r.state["battle_team_index"] = team_ix
+        party = ps.battle_team(r.state, team_ix)
+        ps.save(r.state)
+        log(f"    -> guild weekly: stage {stage_id} "
+            f"(day {ps.challenge_weekday()}, difficulty "
+            f"{difficulty}), passes left "
+            f"{ps.item_count(r.state, ps.CHALLENGE_PASS_ITEM)}")
+        # The pass just left the bag and the label reads it live.
+        r.send(MSG_RPC, backpack_msg(
+            84, [1],
+            [ps.backpack_json(r.state, ps.BP_STORAGE_NORMAL)]))
+        r.send(MSG_RPC, stage_execute_reply())
+        r.cx.battle = bt.Battle(stage_id, party,
+                               r.state.get("team_level", 1),
+                               r.state.get("team_star"),
+                               r.state.get("team_super_star", 0),
+                               int(r.state.get("book_rank", 0)))
+        ps.save_battle(r.state, r.cx.battle)
+        ps.save(r.state)
+        log(f"    -> start battle: wave 1/"
+            f"{r.cx.battle.wave_max}, units "
+            f"{sorted(r.cx.battle.units)}")
+        r.send(MSG_RPC, start_battle_msg(r.cx.battle))
+
+
+@rpc(CHALLENGE_SERVER, CHALLENGE_REQ_RANK_GUILD)
+def challenge_rank_guild(r):
+    # The leaderboard tab. A guild of one has one entry, and the
+    # client fills in the name/portrait from the member list it
+    # already has -- ChallengeRanking's only [JsonProperty] fields
+    # are uid/rank/hs.
+    r.send(MSG_RPC, sint_msg(
+        CHALLENGE_CLIENT, CHALLENGE_RPLY_RANK_GUILD, [],
+        [ps.challenge_rank_json(r.state)]))
+
+
+# ---- Quest -----------------------------------------------------------------------------
+@rpc(PLAYER_QUEST_SERVER, QUEST_REQ_COMPLETED)
+def quest_completed(r):
+    # intargs = the quest ids being claimed.
+    rewards, new_chars = ps.complete_quests(r.state, r.intargs)
+    ps.save(r.state)
+    log(f"    -> quests claimed: {rewards}")
+    # Claiming the last newbie quest ends the tutorial -> revert the
+    # boosted starter casts to base and re-sync so the lobby matches.
+    if ps.maybe_reset_tutorial_casts(r.state):
+        ps.save(r.state)
+        log("    -> tutorial complete: starter casts reset to base")
+        r.send(MSG_RPC, uint_msg(0x771EA36E, 528, [1, 1],
+                               [ps.char_json(r.state)]))
+    # **A cast reward arrives through Char `create` (529), not the
+    # reward popup.** receivedCreateChar (0x16992F0) deserialises
+    # strargs[0] as Dictionary<uid, CharData>, AddChar's each one
+    # into charDic and dispatches CharEvent 4 -- that is what both
+    # grants the character and drives the single-pull reveal the
+    # live game plays on claim. The quest reply (513) only ever
+    # builds an ItemPopupInfo, so it cannot deliver a cast: its
+    # CharDatas field is never set on that path.
+    # Sent BEFORE the reward reply so the reveal leads and the item
+    # popup follows, which is the order the footage shows.
+    if new_chars:
+        log(f"    -> cast reward: granted {new_chars}")
+        r.send(MSG_RPC, uint_msg(
+            PLAYER_CHAR, CHAR_RPLY_CREATE, [],
+            [ps.char_create_json(r.state, new_chars)]))
+    triples = [v for r in rewards for v in r]
+    r.send(MSG_RPC, uint_msg(PLAYER_QUEST, QUEST_RPLY_REWARD,
+                           triples, []))
+    # A BUNDLE reward pays several things, and reply 513's triples
+    # carry only the headline. The live claim popup shows every
+    # line side by side (★4 Jacqueline AND Evolution Gem x1200), so
+    # follow up with the drop-item popup that can list them all --
+    # the same message the storefront bundles use.
+    for _q, r.rid, _c in rewards:
+        lines = ps.goods_payout_lines(
+            r.state, (bt.dd.row("quest", _q) or {}).get("_item_id"))
+        if len(lines) > 1:
+            r.send(MSG_RPC, backpack_msg(
+                BACKPACK_RPLY_DROP_ITEM, [],
+                [json.dumps({str(i): c for i, c in lines},
+                            separators=(",", ":"))]))
+    r.send(MSG_RPC, quest_sync_msg(r.state))
+    # The reward popup is display only and the client caches the bag
+    # and the currencies from the login sync, so without these the
+    # granted items exist ONLY server-side -- which is why the gacha
+    # still read 0 scrolls right after the 1-1 goal paid out 10.
+    # Count the bundle's LINES, not just its headline: a bundle
+    # whose head is a cast would otherwise report "backpack" for a
+    # payout that actually moved currency or energy.
+    paid = [(iid, cnt) for _q, iid, cnt in rewards if iid and cnt]
+    for _q, _rid, _c in rewards:
+        paid += ps.goods_payout_lines(
+            r.state, (bt.dd.row("quest", _q) or {}).get("_item_id"))
+    buckets = {ps.item_bucket(iid) for iid, cnt in paid if iid and cnt}
+    if "backpack" in buckets:
+        r.send(MSG_RPC, backpack_msg(
+            84, [1],
+            [ps.backpack_json(r.state, ps.BP_STORAGE_NORMAL)]))
+    if "currency" in buckets:
+        r.send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
+                               [ps.currency_json(r.state)]))
+    if "energy" in buckets:
+        r.send(MSG_RPC, uint_msg(0xAE487D79, 512, [],
+                               [ps.energy_json(r.state)]))
+    if "equipment" in buckets:
+        # A goal that pays a starshard rolls a real instance into
+        # storage 2; BACKPACK_CHANGE carries the list AND the info
+        # rows the "Inventory n/999" counter reads.
+        r.send(MSG_RPC, backpack_msg(
+            BACKPACK_CHANGE, [0],
+            [ps.backpacks_all_json(r.state,
+                                   {ps.BP_STORAGE_EQUIPMENT}),
+             ps.backpack_info_json(r.state)]))
+
+
+# ---- Jsagent ---------------------------------------------------------------------------
+@rpc(PLAYER_JSAGENT_SERVER, JSAGENT_ULTRA_TRANSCEND)
+def jsagent_ultra_transcend(r):
+    # Ultra Transcend, routed through PlayerJSAgent (the super-limit
+    # UI is Puerts JS, so it never touches a CharRpc command).
+    #   strargs[0] group = ["PlayerChar"]  (JS module)
+    #   strargs[1] group = [target uid, ...duplicate material uids]
+    module = r.strargs[0] if r.strargs else "PlayerChar"
+    uids = list(r.strargs2 or [])
+    tgt = uids[0] if uids else ""
+    ok, used, lv, coins = ps.ultra_transcend(r.state, tgt, uids[1:])
+    if ok:
+        ps.save(r.state)
+        e = r.state["roster"].get(tgt, {})
+        log(f"    -> ultra transcend {tgt} -> super_limit "
+            f"{e.get('super_limit')} (+{lv} lv, ate {len(used)} "
+            f"dupes for {coins} coins)")
+        # 545 shares receivedOneCharAndRemove, so one message both
+        # updates the cast (super_limit rides in dbdata) and deletes
+        # the consumed duplicates from charDic.
+        r.send(MSG_RPC, uint_msg(
+            PLAYER_CHAR, 545, [],
+            [ps.char_data_json(r.state, tgt)] + used))
+        r.send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
+                               [ps.currency_json(r.state)]))
+    else:
+        log(f"    -> ultra transcend REFUSED tgt={tgt!r} "
+            f"mats={uids[1:]} -- not rarity 5, not duplicates, "
+            f"at cap, or not enough coins")
+    # Echo back on the JSAgent client index so the JS side of the
+    # panel stops waiting. PAYLOAD IS A GUESS: the listener lives in
+    # Puerts JS which does not ship in the APK, so the shape cannot
+    # be read -- mirroring the request (same module, same cmd, same
+    # uid list) is the most defensible thing to send.
+    r.send(MSG_RPC, jsagent_msg(JSAGENT_ULTRA_TRANSCEND, module,
+                              [], uids))
+
+
+# ---- Ofa -------------------------------------------------------------------------------
+@rpc(OFA_SERVER, OFA_REQ_CONTENT)
+def ofa_content(r):
+    # Opening any OFA banner (`RequestServerOFAContent: <id>` in
+    # logcat) asks for its content; unanswered, the bulletin panel
+    # opens empty -- the black screen behind the roulette entry.
+    # HandleSyncOFAContent, disassembled at 0x1960978:
+    #   intargs[0] = the OFAID, echoed back. It also flips that
+    #     banner's Status to 2 in Static/EventBannerDic.
+    #   strargs[0] = a SHOP ID as a decimal string -- Int32.Parse'd,
+    #     then PlayerShop.ShopDic is given an empty ShopData if it has
+    #     no entry for it. The `oneforall` row's `_shop_cond` is that
+    #     id, and it is **0** for the roulette entry (200019).
+    #   strargs[1] = REQUIRED (it indexes [1] before checking) and is
+    #     the goods-bought dict; the empty string is special-cased to
+    #     mean "clear it", which is what we want.
+    # Send EXACTLY two strargs: counts of 3 and >=4 take extra
+    # branches that consume strargs[2] and beyond.
+    ofa_id = r.intargs[0] if r.intargs else 0
+    shop_id = ps.ofa_shop_cond(ofa_id)
+    log(f"    -> OFA content for {ofa_id} (shop {shop_id})")
+    r.send(MSG_RPC, uint_msg(
+        OFA_CLIENT, OFA_RPLY_CONTENT, [ofa_id],
+        [str(shop_id), ""]))
+
+
+# ---- Session ---------------------------------------------------------------------------
+@rpc(PLAYER_SESSION_SERVER, SESSION_HEARTBEAT_REQUEST)
+def session_heartbeat_request(r):
+    r.send(MSG_RPC, heartbeat_reply(r.rid))
+
+
+
 def recv_exact(conn, n):
     buf = b""
     while len(buf) < n:
@@ -2941,7 +3581,7 @@ def recv_exact(conn, n):
 def handle(conn, addr):
     log(f"[+] CONNECT from {addr}")
     c2s, s2c = RC4(KEY_C2S), RC4(KEY_S2C)
-    state, cur_battle = None, None
+    state, cx = None, Conn()        # cx.battle was the local `cx.battle` -- see Conn
     last_rpc = None                 # (index, cmd, intargs, strargs) most recently parsed
     conn.settimeout(120)
     # Announce the connection before login: an editor asking "is anyone playing?" must
@@ -3077,10 +3717,10 @@ def handle(conn, addr):
                 saved = ps.saved_battle(state)
                 if saved:
                     try:
-                        cur_battle = bt.restore_battle(saved)
+                        cx.battle = bt.restore_battle(saved)
                         log(f"    -> resumed in-progress battle: stage "
-                            f"{cur_battle.stage_id}, wave "
-                            f"{cur_battle.wave}/{cur_battle.wave_max}")
+                            f"{cx.battle.stage_id}, wave "
+                            f"{cx.battle.wave}/{cx.battle.wave_max}")
                     except Exception:                             # noqa: BLE001
                         log("    -> saved battle could not be restored, dropping it")
                         ps.clear_battle(state)
@@ -3109,588 +3749,18 @@ def handle(conn, addr):
                     if handler is not None:
                         # Registered subsystems answer from the table (see HANDLERS);
                         # everything below is the chain they are being lifted out of.
-                        handler(Rpc(state, session, send, index, cmd, rid,
+                        handler(Rpc(state, session, cx, send, index, cmd, rid,
                                     intargs, strargs, strargs2))
-                    elif index == PLAYER_SESSION_SERVER and cmd == SESSION_HEARTBEAT_REQUEST:
-                        send(MSG_RPC, heartbeat_reply(rid))
-                    elif index == PLAYER_STAGE_SERVER and cmd == STAGE_REQ_AVG_SYNC:
-                        # HandleAVGSyncReplyCmd wants EXACTLY 4 ints, and it **SKIPS
-                        # intArgs[0]**:
-                        #
-                        #     _avgRecord[0] = intArgs[1]
-                        #     _avgRecord[1] = intArgs[2]
-                        #     _avgRecord[2] = intArgs[3]
-                        #
-                        # so the payload is shifted by one and slot 0 is unread. Sending
-                        # [chosen, unlocks, 0, 0] therefore landed `unlocks` (4321) in
-                        # the LOCKED-OPTION field and 0 in the unlock digits: 10^(4321-1)
-                        # overflows to infinity, the digit lookup yields 0, and
-                        # UpdateAVGOptionLockState's else-branch locks nothing at all --
-                        # every option stayed selectable no matter what we put in [0].
-                        # That is why a decided scene re-opened even once the value
-                        # itself was right.
-                        #
-                        # _avgRecord[0] -- the option already chosen, **1-BASED**, 0 for
-                        #   undecided. UpdateAVGOptionLockState computes 10^(v-1) to pick
-                        #   the unlock digit, and treats <= 0 as "nothing chosen".
-                        #   The CHOICE REQUEST is 0-based (RequestServerAvgSelectOption
-                        #   passes SelectedIndex straight into EndingOptions[]), so the
-                        #   two directions disagree -- hence avg_choice_wire's +1.
-                        # _avgRecord[1] -- which options are UNLOCKED, as decimal digits:
-                        #   digit i is `tag[1] / 10^i % 10` and unlocks
-                        #   _btnOptions[digit - 1]. 4321 unlocks options 1..4; scenes with
-                        #   fewer buttons never read the higher digits. 0 locks the lot.
-                        diff = int(state.get("avg_difficulty", 1))
-                        chosen, unlocks = ps.avg_sync_tags(state, rid, diff)
-                        log(f"    -> avg sync reply (avg {rid}, difficulty {diff}, "
-                            f"locked option {chosen or 'none'}, unlock mask {unlocks})")
-                        send(MSG_RPC, uint64_msg(PLAYER_STAGE, STAGE_RPLY_AVG_SYNC,
-                                                 [0, chosen, unlocks, 0],
-                                                 [], req_id=rid))
-                    elif index == PLAYER_STAGE_SERVER and cmd == STAGE_REQ_AVG_CHOICE:
-                        # MUST be exactly 4 ints: HandleAVGChoice only calls
-                        # PanelAvg.SetRewardInfo(currencySP, value, charID, favour)
-                        # on that path, and SetRewardInfo is what lets the scene
-                        # continue -- any other arg count hits a bare `return` and
-                        # the AVG hangs on the choice.
-                        #
-                        # [currencyType, currencyValue, charID, fexp]. charID is a
-                        # DesignRoleModelInfoForm row -- an ordinary char id, NOT the
-                        # avg_role id an older note here guessed at.
-                        #
-                        # Which option pays what is NOT recoverable: the per-option
-                        # values lived on the original server and the `avg` design form
-                        # is not even in our pack. KARMA_REWARDS is therefore keyed off
-                        # footage; anything not in it falls back to the default so the
-                        # story still pays out and keeps moving. The avg id is logged so
-                        # new decisions can be added as they are observed.
-                        # Unlike the AVG *sync* request, which carries the scene in the
-                        # request id, RequestServerAvgSelectOption puts BOTH values in
-                        # intargs -- [avgID, optionIndex] -- and leaves the request id 0.
-                        # The option index is 0-based.
-                        avg_id = intargs[0] if intargs else 0
-                        option = intargs[1] if len(intargs) > 1 else 0
-                        cur_type, cur_val, char_id, fexp = ps.karma_reward(avg_id, option)
-                        # A scene pays once. Re-deciding is only possible on another
-                        # difficulty, and set_avg_choice is what enforces that.
-                        diff = int(state.get("avg_difficulty", 1))
-                        first_time = ps.set_avg_choice(state, avg_id, option, diff)
-                        if not first_time:
-                            cur_val = fexp = 0
-                        if cur_val:
-                            ps.grant_currency(state, cur_type, cur_val)
-                        karma = ps.grant_karma(state, char_id, fexp) if fexp else None
-                        ps.save(state)
-                        log(f"    -> avg choice reply (avg {avg_id} diff {diff}, "
-                            f"option {option}"
-                            f"{'' if first_time else ', ALREADY DECIDED - no payout'}): "
-                            f"currency {cur_type}x{cur_val}, char {char_id} +{fexp} "
-                            f"karma -> {karma}")
-                        send(MSG_RPC, uint64_msg(PLAYER_STAGE, STAGE_RPLY_AVG_CHOICE,
-                                                 [cur_type, cur_val, char_id, fexp], [],
-                                                 req_id=rid))
-                        # the banner is display-only; the grant only sticks if the
-                        # currency and the CharIDData karma are pushed back
-                        if cur_val:
-                            send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
-                                                   [ps.currency_json(state)]))
-                        if fexp:
-                            send(MSG_RPC, uint_msg(0x771EA36E, 528, [1, 1],
-                                                   [ps.char_json(state)]))
-                        # Crossing a Karma rank pays that rank's Rank Bonus row, and a
-                        # single grant can cross several at once. Push whatever buckets
-                        # they landed in or the payout exists only server-side.
-                        for _b in karma_reward_msgs(state, karma):
-                            send(MSG_RPC, _b)
-                    elif (index == PLAYER_GACHA_SERVER
-                          and cmd == GACHA_REQ_DRAW_ROULETTE):
-                        box_id = intargs[0] if intargs else 101
-                        ok, results, why = ps.roulette_draw(state, box_id)
-                        if ok:
-                            ps.save(state)
-                            log(f"    -> roulette {box_id} drew {results}")
-                            send(MSG_RPC, uint_msg(
-                                PLAYER_GACHA, GACHA_RPLY_ROULETTE_OK, [box_id],
-                                [json.dumps(results, separators=(",", ":")),
-                                 json.dumps(ps.roulette_info(state, box_id),
-                                            separators=(",", ":"))]))
-                            # The winnings only exist client-side once we re-push the
-                            # bucket they landed in; the panel updates neither by itself.
-                            # Push both -- a slot can pay coin/diamond (currency) or
-                            # scrolls and orbs (backpack).
-                            send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
-                                                   [ps.currency_json(state)]))
-                            send(MSG_RPC, backpack_msg(
-                                84, [1],
-                                [ps.backpack_json(state, ps.BP_STORAGE_NORMAL)]))
-                        else:
-                            log(f"    -> roulette {box_id} refused: {why}")
-                            send(MSG_RPC, uint_msg(
-                                PLAYER_GACHA, GACHA_RPLY_ROULETTE_FAIL,
-                                [box_id], []))
-                    elif index == PLAYER_GACHA_SERVER and cmd == GACHA_REQ_DRAW:
-                        # A redraw box rolls for free and commits on RedrawSave.
-                        # TODO: the banner now offers four buttons (free daily / 600
-                        # diamonds / 1 scroll / 10 scrolls) but we still always roll 10
-                        # and charge scrolls in gacha_commit. Log the request so the
-                        # box id + draw type + cost category can be read off a real
-                        # press and the charge wired to the button actually used.
-                        # intargs = [boxId, drawIndex], drawIndex 1-based into that
-                        # box's cost_tbl -- so it names both the price AND whether this
-                        # is a single or a ten-pull.
-                        box_id = intargs[0] if intargs else ps.GACHA_BOX_ID
-                        draw_ix = intargs[1] if len(intargs) > 1 else 1
-                        cost_item, price, count = ps.gacha_cost_row(
-                            state, box_id, draw_ix)
-                        log(f"    -> gacha draw box {box_id} option {draw_ix}: "
-                            f"{count} pull(s) for {price}x item {cost_item}")
-                        if price == 0 and ps.gacha_free_available(state):
-                            ps.use_gacha_free(state)
-                            log("    -> that was the free daily pull")
-                        results = ps.gacha_draw(state, count,
-                                                cost=(cost_item, price),
-                                                box_id=box_id)
-                        # Only the tutorial box re-rolls. Every other banner has NO
-                        # commit command of its own -- RedrawBoxDoGetDraw (20) is
-                        # redraw-only -- so a regular pull has to be granted here or it
-                        # is displayed and then silently dropped.
-                        if not ps.gacha_is_redraw_box(box_id):
-                            kept = ps.gacha_commit(state)
-                            log(f"    -> gacha draw box {box_id} committed: {kept}")
-                        else:
-                            log(f"    -> gacha draw (pending): {results}")
-                        ps.save(state)
-                        send(MSG_RPC, uint_msg(
-                            PLAYER_GACHA, GACHA_RPLY_DRAW, [1, 0, 0, 0, 0],
-                            [ps.gacha_box_json(state, box_id),
-                             json.dumps(results, separators=(",", ":"))]))
-                        if not ps.gacha_is_redraw_box(box_id):
-                            # Push whatever the pull actually changed.
-                            if ps.gacha_is_soulmirror_box(box_id):
-                                # BACKPACK_CHANGE, not the bare storage sync: cmd 86
-                                # carries the item list only, so the Soulmirror panel's
-                                # "n/999" (GetBpFixCount -> the cmd-83 INFO rows) kept
-                                # the pre-pull figure until some later fuse/dismantle/
-                                # upgrade happened to resend the infos. 145 carries
-                                # both and raises BackpackEvent 1, the one an open
-                                # panel refreshes on.
-                                send(MSG_RPC, backpack_msg(
-                                    BACKPACK_CHANGE, [0],
-                                    [ps.backpacks_all_json(
-                                        state, {ps.BP_STORAGE_SOULFRAG}),
-                                     ps.backpack_info_json(state)]))
-                            else:
-                                send(MSG_RPC, uint_msg(
-                                    PLAYER_CHAR, 528, [1, 1],
-                                    [ps.char_json(state)]))
-                            send(MSG_RPC, backpack_msg(
-                                84, [1],
-                                [ps.backpack_json(state, ps.BP_STORAGE_NORMAL)]))
-                            send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
-                                                   [ps.currency_json(state)]))
-                    elif index == PLAYER_GACHA_SERVER and cmd == GACHA_REQ_REDRAW_GET:
-                        # Collect!: commit the pending roll, charge it, count the pull.
-                        box_id = intargs[0] if intargs else ps.GACHA_BOX_ID
-                        kept = ps.gacha_commit(state)
-                        ps.save(state)
-                        log(f"    -> redraw commit (box {box_id}): kept {len(kept)}, "
-                            f"gacha count {state.get('gacha_count')}")
-                        # Push the updated collections BEFORE the reply. The 277 is
-                        # what sends the client back to the Goal panel, and although
-                        # PanelGoalQuest.OnQuestSynced does MarkUIDirty, a sync that
-                        # lands after the panel has already rebuilt is missed -- the
-                        # step only appeared after leaving and re-entering.
-                        send(MSG_RPC, uint_msg(PLAYER_CHAR, 528, [1, 1],
-                                               [ps.char_json(state)]))
-                        send(MSG_RPC, backpack_msg(84, [1],
-                                                   [ps.backpack_json(state, 1)]))
-                        send(MSG_RPC, quest_sync_msg(state))
-                        send(MSG_RPC, uint_msg(PLAYER_GACHA,
-                                               GACHA_RPLY_REDRAW_GET, [box_id], []))
-                        # The gacha sync goes LAST. ReceiveRedrawBoxDoGetDraw looks the
-                        # box up via GachaBoxIDToIndex[box_id], so pushing a box list
-                        # that no longer contains it (the tutorial box is replaced by
-                        # the standing banners once gacha_count > 0) makes the 277
-                        # throw and Collect! silently do nothing. Sending it after also
-                        # refreshes PanelGacha's scroll label, which only redraws off
-                        # the gacha sync path (UpdateGachaToken).
-                        send(MSG_RPC, uint_msg(PLAYER_GACHA, 257, [1, 1],
-                                               [ps.gacha_json(state)]))
-                    elif index == PLAYER_GACHA_SERVER and cmd == GACHA_REQ_REDRAW_SAVE:
-                        box_id = intargs[0] if intargs else ps.GACHA_BOX_ID
-                        hist = state.get("gacha_pending") or []
-                        log(f"    -> redraw save-to-history (box {box_id})")
-                        send(MSG_RPC, uint_msg(
-                            PLAYER_GACHA, GACHA_RPLY_REDRAW_SAVE, [box_id],
-                            [json.dumps(hist, separators=(",", ":"))]))
-                    elif index == PLAYER_QUEST_SERVER and cmd == QUEST_REQ_COMPLETED:
-                        # intargs = the quest ids being claimed.
-                        rewards, new_chars = ps.complete_quests(state, intargs)
-                        ps.save(state)
-                        log(f"    -> quests claimed: {rewards}")
-                        # Claiming the last newbie quest ends the tutorial -> revert the
-                        # boosted starter casts to base and re-sync so the lobby matches.
-                        if ps.maybe_reset_tutorial_casts(state):
-                            ps.save(state)
-                            log("    -> tutorial complete: starter casts reset to base")
-                            send(MSG_RPC, uint_msg(0x771EA36E, 528, [1, 1],
-                                                   [ps.char_json(state)]))
-                        # **A cast reward arrives through Char `create` (529), not the
-                        # reward popup.** receivedCreateChar (0x16992F0) deserialises
-                        # strargs[0] as Dictionary<uid, CharData>, AddChar's each one
-                        # into charDic and dispatches CharEvent 4 -- that is what both
-                        # grants the character and drives the single-pull reveal the
-                        # live game plays on claim. The quest reply (513) only ever
-                        # builds an ItemPopupInfo, so it cannot deliver a cast: its
-                        # CharDatas field is never set on that path.
-                        # Sent BEFORE the reward reply so the reveal leads and the item
-                        # popup follows, which is the order the footage shows.
-                        if new_chars:
-                            log(f"    -> cast reward: granted {new_chars}")
-                            send(MSG_RPC, uint_msg(
-                                PLAYER_CHAR, CHAR_RPLY_CREATE, [],
-                                [ps.char_create_json(state, new_chars)]))
-                        triples = [v for r in rewards for v in r]
-                        send(MSG_RPC, uint_msg(PLAYER_QUEST, QUEST_RPLY_REWARD,
-                                               triples, []))
-                        # A BUNDLE reward pays several things, and reply 513's triples
-                        # carry only the headline. The live claim popup shows every
-                        # line side by side (★4 Jacqueline AND Evolution Gem x1200), so
-                        # follow up with the drop-item popup that can list them all --
-                        # the same message the storefront bundles use.
-                        for _q, rid, _c in rewards:
-                            lines = ps.goods_payout_lines(
-                                state, (bt.dd.row("quest", _q) or {}).get("_item_id"))
-                            if len(lines) > 1:
-                                send(MSG_RPC, backpack_msg(
-                                    BACKPACK_RPLY_DROP_ITEM, [],
-                                    [json.dumps({str(i): c for i, c in lines},
-                                                separators=(",", ":"))]))
-                        send(MSG_RPC, quest_sync_msg(state))
-                        # The reward popup is display only and the client caches the bag
-                        # and the currencies from the login sync, so without these the
-                        # granted items exist ONLY server-side -- which is why the gacha
-                        # still read 0 scrolls right after the 1-1 goal paid out 10.
-                        # Count the bundle's LINES, not just its headline: a bundle
-                        # whose head is a cast would otherwise report "backpack" for a
-                        # payout that actually moved currency or energy.
-                        paid = [(iid, cnt) for _q, iid, cnt in rewards if iid and cnt]
-                        for _q, _rid, _c in rewards:
-                            paid += ps.goods_payout_lines(
-                                state, (bt.dd.row("quest", _q) or {}).get("_item_id"))
-                        buckets = {ps.item_bucket(iid) for iid, cnt in paid if iid and cnt}
-                        if "backpack" in buckets:
-                            send(MSG_RPC, backpack_msg(
-                                84, [1],
-                                [ps.backpack_json(state, ps.BP_STORAGE_NORMAL)]))
-                        if "currency" in buckets:
-                            send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
-                                                   [ps.currency_json(state)]))
-                        if "energy" in buckets:
-                            send(MSG_RPC, uint_msg(0xAE487D79, 512, [],
-                                                   [ps.energy_json(state)]))
-                        if "equipment" in buckets:
-                            # A goal that pays a starshard rolls a real instance into
-                            # storage 2; BACKPACK_CHANGE carries the list AND the info
-                            # rows the "Inventory n/999" counter reads.
-                            send(MSG_RPC, backpack_msg(
-                                BACKPACK_CHANGE, [0],
-                                [ps.backpacks_all_json(state,
-                                                       {ps.BP_STORAGE_EQUIPMENT}),
-                                 ps.backpack_info_json(state)]))
-                    elif index == PLAYER_JSAGENT_SERVER and cmd == JSAGENT_ULTRA_TRANSCEND:
-                        # Ultra Transcend, routed through PlayerJSAgent (the super-limit
-                        # UI is Puerts JS, so it never touches a CharRpc command).
-                        #   strargs[0] group = ["PlayerChar"]  (JS module)
-                        #   strargs[1] group = [target uid, ...duplicate material uids]
-                        module = strargs[0] if strargs else "PlayerChar"
-                        uids = list(strargs2 or [])
-                        tgt = uids[0] if uids else ""
-                        ok, used, lv, coins = ps.ultra_transcend(state, tgt, uids[1:])
-                        if ok:
-                            ps.save(state)
-                            e = state["roster"].get(tgt, {})
-                            log(f"    -> ultra transcend {tgt} -> super_limit "
-                                f"{e.get('super_limit')} (+{lv} lv, ate {len(used)} "
-                                f"dupes for {coins} coins)")
-                            # 545 shares receivedOneCharAndRemove, so one message both
-                            # updates the cast (super_limit rides in dbdata) and deletes
-                            # the consumed duplicates from charDic.
-                            send(MSG_RPC, uint_msg(
-                                PLAYER_CHAR, 545, [],
-                                [ps.char_data_json(state, tgt)] + used))
-                            send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
-                                                   [ps.currency_json(state)]))
-                        else:
-                            log(f"    -> ultra transcend REFUSED tgt={tgt!r} "
-                                f"mats={uids[1:]} -- not rarity 5, not duplicates, "
-                                f"at cap, or not enough coins")
-                        # Echo back on the JSAgent client index so the JS side of the
-                        # panel stops waiting. PAYLOAD IS A GUESS: the listener lives in
-                        # Puerts JS which does not ship in the APK, so the shape cannot
-                        # be read -- mirroring the request (same module, same cmd, same
-                        # uid list) is the most defensible thing to send.
-                        send(MSG_RPC, jsagent_msg(JSAGENT_ULTRA_TRANSCEND, module,
-                                                  [], uids))
-                    elif index == OFA_SERVER and cmd == OFA_REQ_CONTENT:
-                        # Opening any OFA banner (`RequestServerOFAContent: <id>` in
-                        # logcat) asks for its content; unanswered, the bulletin panel
-                        # opens empty -- the black screen behind the roulette entry.
-                        # HandleSyncOFAContent, disassembled at 0x1960978:
-                        #   intargs[0] = the OFAID, echoed back. It also flips that
-                        #     banner's Status to 2 in Static/EventBannerDic.
-                        #   strargs[0] = a SHOP ID as a decimal string -- Int32.Parse'd,
-                        #     then PlayerShop.ShopDic is given an empty ShopData if it has
-                        #     no entry for it. The `oneforall` row's `_shop_cond` is that
-                        #     id, and it is **0** for the roulette entry (200019).
-                        #   strargs[1] = REQUIRED (it indexes [1] before checking) and is
-                        #     the goods-bought dict; the empty string is special-cased to
-                        #     mean "clear it", which is what we want.
-                        # Send EXACTLY two strargs: counts of 3 and >=4 take extra
-                        # branches that consume strargs[2] and beyond.
-                        ofa_id = intargs[0] if intargs else 0
-                        shop_id = ps.ofa_shop_cond(ofa_id)
-                        log(f"    -> OFA content for {ofa_id} (shop {shop_id})")
-                        send(MSG_RPC, uint_msg(
-                            OFA_CLIENT, OFA_RPLY_CONTENT, [ofa_id],
-                            [str(shop_id), ""]))
-                    elif index == CHALLENGE_SERVER and cmd == CHALLENGE_REQ_SYNC:
-                        # Guild Weekly home. SyncChallengeDataReply tests
-                        # `intargs.Count == 5 && strargs.Count == 1` and logs-and-
-                        # returns on anything else, so the counts are not advisory.
-                        ints = ps.challenge_sync_intargs(state)
-                        ps.save(state)
-                        log(f"    -> challenge sync: best {ints[1]}, "
-                            f"reset in {ints[3]}s, boss group "
-                            f"{ps.challenge_weekday()}")
-                        send(MSG_RPC, sint_msg(
-                            CHALLENGE_CLIENT, CHALLENGE_RPLY_SYNC, ints,
-                            [ps.challenge_stages_json(state)]))
-                        # A day that ended while the account was away has already been
-                        # PAID by the rollover inside challenge_sync_intargs; 785 is
-                        # only the announcement. It is server-initiated with no request
-                        # of its own, so the panel opening is the natural moment: the
-                        # player is looking at the raid, and PanelItemMsg is loaded.
-                        #
-                        # ChallengeRewardGetReply wants EXACTLY 2 ints and 2 strings and
-                        # returns silently otherwise. It then shows the item popup twice
-                        # -- "Previous personal score: {0}" then "Previous Guild Score:
-                        # {0}" -- so this is the notice that the sweep happened.
-                        pending = ps.take_pending_settlement(state)
-                        if pending:
-                            p_ints, p_strs = pending
-                            ps.save(state)
-                            log(f"    -> challenge settlement announced: "
-                                f"personal {p_ints[0]}, guild {p_ints[1]}")
-                            send(MSG_RPC, sint_msg(
-                                CHALLENGE_CLIENT, ps.CHALLENGE_RPLY_REWARD_GET,
-                                p_ints, p_strs))
-                    elif index == CHALLENGE_SERVER and cmd == CHALLENGE_REQ_FIGHT:
-                        # **intargs = [use_bc, mode]** -- the difficulty is [1], not
-                        # [0]. No stage id is sent; we re-derive it from the same
-                        # (weekday, difficulty) the client used, so the two agree by
-                        # construction rather than by trust.
-                        difficulty = intargs[1] if len(intargs) > 1 else 1
-                        stage_id, why = ps.start_challenge(state, difficulty)
-                        if not stage_id:
-                            log(f"    -> guild weekly REFUSED (difficulty "
-                                f"{difficulty}) -- {why}")
-                            # There is no error command in ChallengeRpcClientCmd, so
-                            # there is nothing to unblock: the panel never opened a
-                            # waiting overlay for this. Re-sync so the "n / 3
-                            # challenges" count on screen matches the truth.
-                            send(MSG_RPC, sint_msg(
-                                CHALLENGE_CLIENT, CHALLENGE_RPLY_SYNC,
-                                ps.challenge_sync_intargs(state),
-                                [ps.challenge_stages_json(state)]))
-                        else:
-                            # "[Weekly] Challenge the Guild Boss 7 times" (10042) and
-                            # its monthly twin. `_case_id` 2001 keys on the ENTRY ITEM
-                            # in `_case_v1` -- pass it, or the coin/gem rows that share
-                            # the case advance too.
-                            bumped = ps.bump_quest_counter(
-                                state, ps.QUEST_CASE_GUILD_BOSS,
-                                case_v1=ps.CHALLENGE_PASS_ITEM)
-                            if bumped:
-                                log(f"    -> guild boss quest counters {bumped}")
-                            # **The raid fields its OWN team, not the last one used.**
-                            # InitTeamIndex case 8 puts the Guild Weekly on a dedicated
-                            # saved team per weekday boss (`weekday + 9`), and the Edit
-                            # button on the Preparation panel edits exactly that one.
-                            # This used to read `battle_team_index`, which is set by the
-                            # ordinary stage-execute path -- so the raid fought with
-                            # whatever team the last CAMPAIGN stage used and editing the
-                            # raid team changed the panel and nothing else. Unlike a
-                            # stage execute, cmd 528 carries no team index, so we have to
-                            # derive the same number the client did.
-                            team_ix = ps.challenge_formation_index()
-                            team_ix = max(0, min(int(team_ix),
-                                                 len(state.get("formations") or [0]) - 1))
-                            # Remembered so the XP payout and a resumed fight use the
-                            # same party, exactly as the stage path does.
-                            state["battle_team_index"] = team_ix
-                            party = ps.battle_team(state, team_ix)
-                            ps.save(state)
-                            log(f"    -> guild weekly: stage {stage_id} "
-                                f"(day {ps.challenge_weekday()}, difficulty "
-                                f"{difficulty}), passes left "
-                                f"{ps.item_count(state, ps.CHALLENGE_PASS_ITEM)}")
-                            # The pass just left the bag and the label reads it live.
-                            send(MSG_RPC, backpack_msg(
-                                84, [1],
-                                [ps.backpack_json(state, ps.BP_STORAGE_NORMAL)]))
-                            send(MSG_RPC, stage_execute_reply())
-                            cur_battle = bt.Battle(stage_id, party,
-                                                   state.get("team_level", 1),
-                                                   state.get("team_star"),
-                                                   state.get("team_super_star", 0),
-                                                   int(state.get("book_rank", 0)))
-                            ps.save_battle(state, cur_battle)
-                            ps.save(state)
-                            log(f"    -> start battle: wave 1/"
-                                f"{cur_battle.wave_max}, units "
-                                f"{sorted(cur_battle.units)}")
-                            send(MSG_RPC, start_battle_msg(cur_battle))
-                    elif index == CHALLENGE_SERVER and cmd == CHALLENGE_REQ_RANK_GUILD:
-                        # The leaderboard tab. A guild of one has one entry, and the
-                        # client fills in the name/portrait from the member list it
-                        # already has -- ChallengeRanking's only [JsonProperty] fields
-                        # are uid/rank/hs.
-                        send(MSG_RPC, sint_msg(
-                            CHALLENGE_CLIENT, CHALLENGE_RPLY_RANK_GUILD, [],
-                            [ps.challenge_rank_json(state)]))
-                    elif (index == PLAYER_STAGE_SERVER
-                          and cmd in (STAGE_REQ_AUTO_START, STAGE_REQ_AUTO_SYNC,
-                                      STAGE_REQ_AUTO_STOP)):
-                        now = int(time.time())
-                        if cmd == STAGE_REQ_AUTO_START:
-                            stage_id = intargs[0] if intargs else 0
-                            count = intargs[1] if len(intargs) > 1 else 1
-                            coupon = bool(intargs[2]) if len(intargs) > 2 else False
-                            ok, why = ps.autorun_start(state, stage_id, count,
-                                                       coupon, now)
-                            if not ok:
-                                log(f"    -> auto play REFUSED {stage_id} x{count} "
-                                    f"-- {why}")
-                                send(MSG_RPC, stage_sync_msg(state))
-                                continue
-                            ps.save(state)
-                            job = state["autorun"]
-                            log(f"    -> auto play started: stage {stage_id} x{count}"
-                                f"{' (express)' if coupon else ''}, due in "
-                                f"{job['duetime'] - now}s")
-                            # NO toast here -- 401 says "Completed", which is a lie
-                            # until the timer runs out. The syncs below are what tell
-                            # the panel a sweep is running.
-                        elif cmd == STAGE_REQ_AUTO_STOP:
-                            stopped = ps.autorun_cancel(state)
-                            if stopped:
-                                elapsed = max(0, now - int(stopped["starttime"]))
-                                done = ps.autorun_runs_elapsed(stopped, now)
-                                paid = autorun_payout(state, stopped["stage_id"], done)
-                                ps.save(state)
-                                log(f"    -> auto play stopped: stage "
-                                    f"{stopped['stage_id']} after {done}/"
-                                    f"{stopped['count']} runs ({elapsed}s)")
-                                # EXACTLY three intargs, or HandleAutoStop bails.
-                                send(MSG_RPC, uint64_msg(
-                                    PLAYER_STAGE, STAGE_RPLY_AUTO_STOP,
-                                    [int(stopped["stage_id"]), int(done),
-                                     int(elapsed)], []))
-                                for m in paid:
-                                    send(MSG_RPC, m)
-                        # Settle a finished sweep before answering, so the client is
-                        # told about the rewards in the same breath as the new state.
-                        done = autorun_settle(state, now)
-                        send(MSG_RPC, stage_sync_msg(state))
-                        send(MSG_RPC, auto_sync_msg(state))
-                        for m in done:
-                            send(MSG_RPC, m)
-                    elif index == PLAYER_STAGE_SERVER and cmd == STAGE_REQ_GET_DROPS:
-                        stage_id = intargs[0] if intargs else 0
-                        drops = bt.stage_drop_preview(stage_id)
-                        log(f"    -> drop info for stage {stage_id}: {drops}")
-                        send(MSG_RPC, uint64_msg(
-                            PLAYER_STAGE, STAGE_RPLY_GET_DROPS, [stage_id],
-                            [json.dumps(drops, separators=(",", ":"))]))
-                    elif index == PLAYER_STAGE_SERVER and cmd in (
-                            STAGE_REQ_EXECUTE, STAGE_REQ_NEWBIE):
-                        # Execute carries [stage_id, team]; the newbie variant sends no
-                        # args at all and always means the tutorial stage.
-                        #
-                        # **The team arg is 1-BASED and we were ignoring it**, so every
-                        # fight fielded formation 0 however the player had switched
-                        # teams. `RequestServerStageExecuteByAutoLoop` (0x180C5C8)
-                        # sends `loopData.teamID + 1`, and teamID is the 0-based
-                        # formation index -- hence the -1 here. Remembered in state so
-                        # the XP payout and a resumed battle use the same party.
-                        stage_id = intargs[0] if intargs else NEWBIE_STAGE_ID
-                        team_ix = (int(intargs[1]) - 1) if len(intargs) > 1 else 0
-                        team_ix = max(0, min(team_ix,
-                                             len(state.get("formations") or [0]) - 1))
-                        state["battle_team_index"] = team_ix
-                        # A daily-dungeon stage (_ap_type 2) costs one of item _ap_v1 --
-                        # the Training Gym Pass and friends. Charge it here, or every
-                        # run is free and the counter never moves.
-                        # "[Daily] Spend Stamina x500" counts the stamina a run WOULD
-                        # cost (the stage row's `_ap`). We never actually deduct stamina
-                        # -- the energy sync hands out 999 and ordinary runs are free --
-                        # so crediting the notional cost is the only way that mission can
-                        # move without changing the economy.
-                        srow = bt.dd.row("stage", stage_id) or {}
-                        # Which difficulty the AVG decisions of this run belong to.
-                        # Stages 1101/1201/1301 are the SAME scene ("Third Faction",
-                        # 1-1) at _difficulty 1/2/3 and share their AVG ids, so the scene
-                        # alone cannot tell them apart -- and a choice is permanent PER
-                        # DIFFICULTY, with three difficulties and three options meaning
-                        # one option each. The AVG sync request carries only the scene,
-                        # so the difficulty has to be remembered from the stage entry.
-                        state["avg_difficulty"] = int(srow.get("_difficulty") or 1)
-                        ap = int(srow.get("_ap") or 0)
-                        if ap and int(srow.get("_ap_type") or 0) != 2:
-                            ps.bump_quest_counter(state, ps.QUEST_CASE_SPEND_ITEM, ap,
-                                                  case_v1=ps.STAMINA_ITEM_ID)
-                        cost = ps.stage_ap_cost(srow)
-                        if cost:
-                            iid, n = cost
-                            if ps.spend_item(state, iid, n):
-                                ps.save(state)
-                                log(f"    -> charged {n}x item {iid} to enter "
-                                    f"stage {stage_id} (left {ps.item_count(state, iid)})")
-                                send(MSG_RPC, backpack_msg(
-                                    84, [1],
-                                    [ps.backpack_json(state, ps.BP_STORAGE_NORMAL)]))
-                            else:
-                                log(f"    -> stage {stage_id} entry REFUSED -- no "
-                                    f"item {iid}")
-                        party = ps.battle_team(state, team_ix)
-                        log(f"    -> stage execute reply (stage {stage_id}, "
-                            f"team {team_ix + 1}: "
-                            f"{[e.get('uid') if isinstance(e, dict) else e for e in party]})")
-                        send(MSG_RPC, stage_execute_reply())
-                        cur_battle = bt.Battle(stage_id, party,
-                                               state.get("team_level", 1),
-                                               state.get("team_star"),
-                                               state.get("team_super_star", 0),
-                                               int(state.get("book_rank", 0)))
-                        # Persist immediately: a server restart between this and the
-                        # FIRST attack must still have something to resume, not just
-                        # ones after the player's first action.
-                        ps.save_battle(state, cur_battle)
-                        ps.save(state)
-                        log(f"    -> start battle: wave 1/{cur_battle.wave_max}, "
-                            f"units {sorted(cur_battle.units)}")
-                        send(MSG_RPC, start_battle_msg(cur_battle))
-                    elif (index == bt.BATTLE_SERVER_INDEX and cur_battle
+                    elif (index == bt.BATTLE_SERVER_INDEX and cx.battle
                           and cmd != bt.REQ_BATTLE_SYNC):
-                        bodies = list(battle_replies(cur_battle, cmd, intargs,
+                        bodies = list(battle_replies(cx.battle, cmd, intargs,
                                                      strargs, state, ps.uid(state)))
                         # The inspector, when ARMED, takes ownership of the reply and
                         # releases it on a step. It never blocks this thread -- the
                         # heartbeat shares this socket and the client times out on its
                         # own if we stop reading. Disarmed, this is a no-op and the
                         # battle path is byte-for-byte unchanged.
-                        if binspect.intercept(bodies, send, cur_battle,
+                        if binspect.intercept(bodies, send, cx.battle,
                                               {"cmd": cmd, "intargs": list(intargs),
                                                "strargs": list(strargs),
                                                "player": ps.uid(state)}):
@@ -3718,13 +3788,13 @@ def handle(conn, addr):
                                 # finished battle went straight back into the save.
                                 # Every restart then offered to "Continue the Fight",
                                 # and accepting replayed a fight already won.
-                                if cur_battle is not None:
-                                    cur_battle.finished = True
+                                if cx.battle is not None:
+                                    cx.battle.finished = True
                                 ps.clear_battle(state)
-                            elif getattr(cur_battle, "finished", False):
+                            elif getattr(cx.battle, "finished", False):
                                 pass          # never re-save a finished fight
                             else:
-                                ps.save_battle(state, cur_battle)
+                                ps.save_battle(state, cx.battle)
                             ps.save(state)
                     elif state and (index, cmd) in build_sync_replies(state):
                         # Rebuild per request rather than caching at login: the payloads

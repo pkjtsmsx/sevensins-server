@@ -27,6 +27,11 @@ subsystem in the table is counted exactly, and once the chain is empty every reg
 `handled_pairs()` can be deleted. `test_rpc_registry.py` drives real frames through
 `handle()` so a registered pair that never fires cannot read as handled.
 
+Later the same day: **the chain is empty.** All 75 (index, cmd) pairs are in
+`HANDLERS`; `handle()` is 300 lines (from ~2,000) and dispatches on index only for
+Battle, which stays in `battle_replies()`. The regex scanners in `handled_pairs()` are
+now only reached for Battle and the `build_sync_replies` table.
+
 > Prioritise by what actually fires, not by tier alone. `grep -oE "no handler for
 > index=0x[0-9a-f]+ cmd=[0-9]+" server/titan_server.log | sort | uniq -c | sort -rn`
 > ranks the real gaps; cross-reference `re/rpc_subsystems.txt` for the index names.

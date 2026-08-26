@@ -24,7 +24,12 @@ P = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "s
 LIFT = {name: name.replace("PLAYER_", "").replace("_SERVER", "").title() for name in sys.argv[1:]}
 if not LIFT:
     sys.exit(__doc__)
-RENAME = {"state", "intargs", "strargs", "strargs2", "rid", "cmd", "session", "send"}
+# handle() local -> what a handler reads it as. `cur_battle` is the one that is not a
+# plain attribute: it became Conn.battle so a handler can REBIND it (start a fight).
+RENAME = {n: "r." + n for n in ("state", "intargs", "strargs", "strargs2", "rid", "cmd",
+                                 "session", "send")}
+RENAME["cur_battle"] = "r.cx.battle"
+RENAME["cx"] = "r.cx"                 # the chain itself now says cx.battle
 lines = open(P).read().split("\n")
 IND = " " * 20
 head_re = re.compile(r"^ {20}elif (\(?)index == (\w+)")
@@ -56,14 +61,41 @@ while i < len(lines):
     else:
         i += 1
 
+def _inside_loop(lines, row):
+    """Is line `row` lexically inside a for/while that starts within these lines?"""
+    ind = len(lines[row]) - len(lines[row].lstrip())
+    for j in range(row - 1, -1, -1):
+        t = lines[j]
+        if not t.strip():
+            continue
+        jind = len(t) - len(t.lstrip())
+        if jind < ind:
+            if re.match(r"\s*(for|while)\b", t):
+                return True
+            ind = jind          # left that block; keep walking out
+    return False
+
+
 def rewrite_names(src):
+    """Rename handle() locals by TOKEN, and turn a loop-level `continue` into `return`.
+
+    In the chain a `continue` means "stop handling this RPC" -- it continues the
+    `for raw_rpc` loop. In a function that is `return`. But only when the `continue`
+    is not inside a loop OF THE BODY'S OWN, where it means what it says; that case is
+    refused rather than guessed.
+    """
     toks = list(tokenize.generate_tokens(io.StringIO(src).readline))
     out = src.split("\n"); edits = []
     for t in toks:
         if t.type == tokenize.NAME and t.string in RENAME:
-            edits.append((t.start[0] - 1, t.start[1], t.end[1]))
-    for row, a, b in sorted(edits, reverse=True):
-        out[row] = out[row][:a] + "r." + out[row][a:b] + out[row][b:]
+            edits.append((t.start[0] - 1, t.start[1], t.end[1], RENAME[t.string]))
+        elif t.type == tokenize.NAME and t.string == "continue":
+            if _inside_loop(out, t.start[0] - 1):
+                sys.exit(f"refusing: `continue` inside a loop of the body at:\n"
+                         + out[t.start[0] - 1])
+            edits.append((t.start[0] - 1, t.start[1], t.end[1], "return"))
+    for row, a, b, rep in sorted(edits, reverse=True):
+        out[row] = out[row][:a] + rep + out[row][b:]
     return "\n".join(out)
 
 existing = set(re.findall(r"^def (\w+)", open(P).read(), re.M))
