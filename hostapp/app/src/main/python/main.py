@@ -2,15 +2,19 @@
 
 Runs both servers on the phone so the game needs nothing else:
 
-  * titan_server on 0.0.0.0:22110 -- the game protocol. A RAW TCP socket, which is why
-    Android's cleartext rules never apply to it.
-  * bundle_server on 0.0.0.0:8088 -- asset bundles over plain HTTP, matching the CDN
+  * titan_server on 127.0.0.1:22110 -- the game protocol. A RAW TCP socket, which is
+    why Android's cleartext rules never apply to it.
+  * bundle_server on 127.0.0.1:8088 -- asset bundles over plain HTTP, matching the CDN
     host patched into the game APK (see server/patch_cdn_config.py).
   * save_editor on 127.0.0.1:8099 -- the account editor, opened in the phone's own
-    browser by the "Edit save" button. LOOPBACK ONLY, unlike the other two: it rewrites
-    saves with no authentication and the phone sits on networks its owner does not
-    control. It is the only way to reach an account on an unrooted device, where
-    <filesDir> is unreadable to every file manager and USB tool.
+    browser by the "Edit save" button. It is the only way to reach an account on an
+    unrooted device, where <filesDir> is unreadable to every file manager and USB tool.
+
+All three are LOOPBACK ONLY. None of them authenticates -- the game socket loads whatever
+account the login token names -- and the phone sits on networks its owner does not
+control. The game runs on this same device and its design pack points at 127.0.0.1, so
+nothing else ever needs the ports. The first two used to listen on every interface;
+SEVENSINS_BIND=0.0.0.0 restores that for a phone deliberately hosting for another device.
 
 Both are pure stdlib, so this app carries no pip dependencies at all -- unlike reTBHost,
 which needed a hand-built pydantic-core wheel. That holds only while design_data never
@@ -280,15 +284,23 @@ def start_server(data_dir):
     import titan_server
     import save_editor
 
+    # LOOPBACK, both of them. The game runs on this same phone and its design pack
+    # points at 127.0.0.1 (docs/GAME_SERVER.md), so nothing else ever needs to reach
+    # these ports -- and the game socket has no authentication at all: whoever can
+    # connect can load and rewrite any account by number. The editor below was always
+    # loopback for exactly that reason; these two were on every interface. SEVENSINS_BIND
+    # widens it for the one case that wants this phone to host for another device.
+    bind = os.environ.get("SEVENSINS_BIND") or "127.0.0.1"
+
     def run_titan():
         try:
-            titan_server.main(TITAN_PORT)
+            titan_server.main(TITAN_PORT, bind)
         except Exception:                       # noqa: BLE001 -- surface, never die silent
             record_exception("titan")
 
     def run_bundles():
         try:
-            bundle_server.serve(BUNDLE_PORT, os.environ["SEVENSINS_PATCH_ROOT"])
+            bundle_server.serve(BUNDLE_PORT, os.environ["SEVENSINS_PATCH_ROOT"], bind)
         except Exception:                       # noqa: BLE001
             record_exception("bundles")
 

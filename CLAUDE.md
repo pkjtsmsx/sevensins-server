@@ -209,6 +209,13 @@ every device on the channel.
 
 Two consequences that follow, and one that does not:
 
+- **The game socket authenticates nothing.** The login "password" is never read, and
+  `titan_token_<pid>` selects which account to load, so anything that can reach port
+  22110 can load and rewrite any account by number. On the phone all three servers
+  therefore bind **127.0.0.1** (the game is on the same device and its pack points at
+  loopback); the desktop default stays `0.0.0.0` because the AVD reaches the host as
+  10.0.2.2. `SEVENSINS_BIND` overrides either. Do not make the phone default wider to
+  "fix" a connection problem -- that problem is the pack's `_address`, not the bind.
 - `UPDATE_URL` is **hardcoded in the APK**, so pointing an installed device at a different
   update host needs a rebuild and reinstall — device access, not repo access. That is a
   real protection and worth preserving; resist making it a runtime setting.

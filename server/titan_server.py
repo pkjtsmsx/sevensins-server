@@ -3686,14 +3686,26 @@ def _publish_sessions_locked():
         pass                    # advisory only; never take the server down over it
 
 
-def main(port=None):
+# Where to listen. This socket has NO authentication: the login "password" is never
+# read, and `titan_token_<pid>` selects which account to load, so anything that can reach
+# the port can load and mutate any account by number. On a desktop the AVD reaches the
+# host as 10.0.2.2, so all interfaces is required there and is the default. The phone
+# passes 127.0.0.1 -- the game runs on the same device and its design pack points at
+# loopback (docs/GAME_SERVER.md), and the phone sits on networks its owner does not
+# control. SEVENSINS_BIND overrides either, for the one case that wants a phone to host
+# for a second device.
+DEFAULT_BIND = "0.0.0.0"
+
+
+def main(port=None, host=None):
     global _listener
+    host = os.environ.get("SEVENSINS_BIND") or host or DEFAULT_BIND
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("0.0.0.0", port or PORT))
+    srv.bind((host, port or PORT))
     srv.listen(8)
     _listener = srv
-    log(f"[*] TitanStack server listening on 0.0.0.0:{port or PORT}")
+    log(f"[*] TitanStack server listening on {host}:{port or PORT}")
     # The inspector starts DISARMED: intercept() returns immediately and the battle path
     # is unchanged until someone arms it from the UI. Loopback only -- it can rewrite
     # live battle traffic.
