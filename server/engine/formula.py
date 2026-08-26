@@ -144,16 +144,39 @@ def effective_atk(unit):
     return float(unit.atk) * _status.stat_multiplier(unit, "ATK")
 
 
+def effective_def(unit):
+    """DEF after the unit's active statuses -- the mirror of effective_atk.
+
+    A DEF-scaling kit is a whole archetype, not an edge case: **472 damage effects
+    across 102 skill groups** carry `basis: "DEF"`, and those casts buff their own DEF
+    precisely because it is their damage stat.
+    """
+    from . import status as _status
+    return float(unit.defence) * _status.stat_multiplier(unit, "DEF")
+
+
 def _basis_value(basis, caster, target):
     """The stat a coefficient multiplies.
 
     `MAX_HP` coefficients read the TARGET's pool -- "deals 20% of the target's Max HP as
     damage" is how the pack words them -- while ATK/DEF read the caster.
+
+    BOTH caster stats are status-modified. They used to disagree: ATK went through
+    effective_atk() and picked up Might/Iron Wrist/Keen, while DEF was read RAW off the
+    unit. For an ATK-scaling cast the asymmetry is invisible; a DEF-scaling one got
+    nothing at all from its own DEF buffs -- Harden, Tough, Defense Tips and every DEF
+    set bonus were cosmetic on the exact characters whose damage they exist to drive.
+    Not "does no damage": damage that never responds to the buffs the kit is built on.
+
+    Note this is the CASTER's DEF as an ATTACK stat. The TARGET's DEF is applied
+    separately in strike() as mitigation and was already status-aware there -- which is
+    why a DEF Break on a victim always worked while a DEF buff on the attacker did not,
+    and why this was hard to see from the outside.
     """
     if basis == "MAX_HP":
         return float(target.max_hp)
     if basis == "DEF":
-        return float(caster.defence)
+        return effective_def(caster)
     return effective_atk(caster)
 
 
