@@ -325,10 +325,16 @@ def tick_damage(unit):
 
 
 def tick_duration(unit):
-    """Spend one of this unit's turns off every status it holds. -> expired names.
+    """Spend one of this unit's turns off every status it holds. -> expired Actives.
 
     Called once the turn is resolved -- including a turn that was SKIPPED, since a
     skipped turn still counts against a duration or a stun would never wear off.
+
+    Returns the expired Active objects, not names: the caller must be able to tell the
+    CLIENT, and the wire row needs the status id. Discarding this return is how a
+    Freeze that had expired server-side stayed drawn on the boss with "1 turn left" on
+    a real phone (2026-08-26) -- the client never counts a server-round status down
+    itself, it waits for the round-0 removal row, and nothing ever sent one.
     """
     expired = []
     for st in list(unit.statuses):
@@ -337,7 +343,7 @@ def tick_duration(unit):
         st.remaining = int(st.remaining) - 1
         if st.remaining <= 0:
             unit.statuses.remove(st)
-            expired.append(st.name)
+            expired.append(st)
     return expired
 
 

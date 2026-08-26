@@ -2463,6 +2463,19 @@ class Battle:
             "team_skill": [],
         }, separators=(",", ":"))
 
+    def _queue_expired(self, unit, expired):
+        """Queue a round-0 removal row for every status that just fell off `unit`.
+
+        The client keeps a status drawn until a row says otherwise -- it does not
+        count server rounds down on its own (docs: status wire, 0 = remove). Every
+        expiry path must therefore come through here; a removal that stays
+        server-side is an icon that stays on the phone.
+        """
+        self._queue_status_rows([
+            {"target": unit.order, "status_id": st.status_id, "applied": False}
+            for st in expired or []
+            if getattr(st, "status_id", None) is not None])
+
     def _queue_status_rows(self, changes):
         """Queue out-of-band status changes, collapsing repeats.
 
@@ -2734,8 +2747,12 @@ class Battle:
             _engine_passives.fire_all(
                 _engine_passives.AFTER_ACTION, [acted], list(self.units.values()),
                 fired=getattr(self, "_passives_fired", None))
-            # A resolved turn spends a turn of the actor's own statuses.
-            _engine_status.tick_duration(acted)
+            # A resolved turn spends a turn of the actor's own statuses -- and the
+            # client is TOLD what fell off. It never counts a server-round status down
+            # itself: it waits for the round-0 removal row, and discarding this return
+            # left a boss wearing an expired Freeze icon "1 turn" forever on a real
+            # phone (2026-08-26). Same on the two other expiry paths below.
+            self._queue_expired(acted, _engine_status.tick_duration(acted))
         self._age_gauge_blocks()
         self._roll_turn_order()
         self.round += 1
@@ -2772,6 +2789,7 @@ class Battle:
                 st.remaining = int(st.remaining) - 1
                 if st.remaining <= 0:
                     unit.statuses.remove(st)
+                    self._queue_expired(unit, [st])
 
     def _start_of_turn(self, _depth=0):
         """DoT/HoT ticks for whoever is now at the front of the queue, then skip its
@@ -2816,8 +2834,11 @@ class Battle:
                 self._queue_status_rows(_engine_status.run_nested(u))
         if _engine_status.is_immobilized(unit):
             unit.tick_cooldowns()
-            # The skipped turn still spends a turn of every status.
-            _engine_status.tick_duration(unit)
+            # The skipped turn still spends a turn of every status. This is THE path a
+            # control status expires on -- the holder cannot act, so its only turns are
+            # skipped ones -- which is why an unsent removal showed up as a permanently
+            # frozen boss rather than as some lesser stale icon.
+            self._queue_expired(unit, _engine_status.tick_duration(unit))
             # A skipped turn still costs the gauge, or the queue never moves on.
             unit.scv = 0.0
             self._roll_turn_order()
