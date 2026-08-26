@@ -102,6 +102,10 @@ Where a fix changes behaviour, prove the test would have failed before it. For t
 `_report` crash the test asserts `fire()` really returns both row shapes, and the pre-fix
 unpack was demonstrated to raise on the same rows.
 
+**`python3 tools/run_tests.py` runs every `server/test_*.py`** and exits non-zero if any
+fails. Use it rather than a shell loop: nine of the suites print nothing on success, so
+only the exit code says whether they passed.
+
 **`tools/battle_fuzz.py` is the regression net** — thousands of randomised fights checking
 wire invariants, state and save/restore. Run it after anything touching battle. When a bug
 escapes it, add the invariant that would have caught it: a unit sitting out a whole fight
