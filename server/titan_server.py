@@ -56,11 +56,49 @@ PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 22110
 LOG = os.path.join(os.path.dirname(__file__), "titan_server.log")
 
 
+# Whether every frame's body is written to the log as hex. Off by default: it is the
+# single biggest thing in the file (a 49 MB titan_server.log was almost entirely hex),
+# and the decoded `RPC index=.. cmd=.. int=.. str=..` line that always follows carries
+# what a reader wants day to day. Turn it on when reverse-engineering a new command --
+# the raw bytes are exactly what that work needs and nothing else records them.
+LOG_BODIES = os.environ.get("SEVENSINS_LOG_BODIES", "") not in ("", "0", "false", "no")
+
+# Rotation. `main.py` on the phone rotates crash.log at 256K and says "a phone should
+# not grow a log"; this file grows far faster and had no cap at all. One generation is
+# kept (`.1`), which is enough to read what led up to a restart.
+LOG_MAX_BYTES = 4 * 1024 * 1024
+_log_lock = threading.Lock()
+
+
+def _rotate_log_locked():
+    try:
+        if os.path.getsize(LOG) <= LOG_MAX_BYTES:
+            return
+    except OSError:
+        return
+    try:
+        os.replace(LOG, LOG + ".1")
+    except OSError:
+        pass                    # a log that cannot rotate must never take the server down
+
+
 def log(s):
     line = time.strftime("%H:%M:%S ") + s
     print(line, flush=True)
-    with open(LOG, "a") as f:
-        f.write(line + "\n")
+    # One lock across every connection thread: a per-line `open(..., "a")` from N
+    # threads is fine for short lines, but a rotate racing a write loses lines.
+    with _log_lock:
+        _rotate_log_locked()
+        with open(LOG, "a") as f:
+            f.write(line + "\n")
+
+
+def log_frame(direction, mtype, body):
+    """The `[<]`/`[>]` line for one frame. Hex only when LOG_BODIES is on."""
+    if LOG_BODIES:
+        log(f"[{direction}] type={mtype} size={len(body)} body={body.hex()}")
+    else:
+        log(f"[{direction}] type={mtype} size={len(body)}")
 
 
 # ---- session RPC (application layer; the primitives it uses are from wire) -----
@@ -1575,7 +1613,7 @@ def handle(conn, addr):
         frame = make_header(mtype, len(body)) + body
         with send_lock:
             conn.sendall(s2c.crypt(frame))
-        log(f"[>] type={mtype} size={len(body)} body={body.hex()}")
+        log_frame(">", mtype, body)
 
     try:
         while True:
@@ -1592,7 +1630,7 @@ def handle(conn, addr):
                     f"check KeyC2S")
                 return
             body = c2s.crypt(recv_exact(conn, size)) if size else b""
-            log(f"[<] type={mtype} size={size} body={body.hex()}")
+            log_frame("<", mtype, body)
 
             msg = pb_parse(body)
             if mtype == MSG_LOGIN:
