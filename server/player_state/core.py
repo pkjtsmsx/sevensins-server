@@ -1474,8 +1474,14 @@ def char_flv_need_xp(rarity, lv):
 # A Karma rank's reward lives on the `char_flv` row for that (char, rank), and
 # `_unlock_type` says what kind it is: **5 pays `_bonus_item_id` x `_bonus_item_cnt`**
 # (2416 rows -- every "Obtain Diamond x50" on the Rank Bonus list), 2 unlocks a Kizuna
-# Quest, 3/6 are stat bonuses the client derives itself. Only type 5 is ours to hand
-# over. Reported 2026-08-18: ranking a cast up paid nothing at all.
+# Quest, 3/6 are stat bonuses. Only type 5 is an ITEM to hand over, which is all this
+# function is about. Reported 2026-08-18: ranking a cast up paid nothing at all.
+#
+# This used to say the 3/6 stat rows were "derived by the client". That was wrong and
+# it hid a second bug for months: CharData's HP/ATK/DEF/SPD/CRI/CDI are all
+# `[JsonProperty]` (il2cpp dump), so the client renders whatever the SERVER sends and
+# derives nothing. The stat rungs are paid by roster._annotate_consonance, off the
+# cast's own `char._flvBonus` ladder -- see the evidence block there.
 KARMA_UNLOCK_ITEM = 5
 
 

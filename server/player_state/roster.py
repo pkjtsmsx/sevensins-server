@@ -205,6 +205,114 @@ def battle_team(state, index=0):
     return party or list(state.get("team", []))
 
 
+# ---- Consonance (Karma) stat rewards ----------------------------------------
+#
+# DEAD DATA, NOW READ. Every playable cast carries a Karma reward ladder in
+# `char._flvBonus`, and nothing in the server had ever read it -- a grep for `_flvBonus`
+# across the whole tree returned no hits at all. The gift path that RAISES Karma is
+# fully implemented (charprogress.py, with the x10 favourite-gift multiplier), so Karma
+# climbed, the Consonance panel promised the reward, and no stat ever moved.
+#
+# Format: rungs joined by "_", each "karmaLevel,attrType,value" --
+#     Lucifer  3,1,3060_10,2,420_17,3,360_23,5,275_28,6,150_30,8,150
+#
+# EVIDENCE, tier 2 and tier 4, and it is decisive. The attr types are `CharAttribute`
+# in the il2cpp dump (`HP=1 ATK=2 DEF=3 SPD=5 CRI=6 CDI=8`), and every rung has a
+# matching `char_flv` row whose own prose states the same number:
+#
+#     _flvBonus rung        char_flv row   _text_en
+#     3,1,3060              2000103        "Lucifer's HP increases 3060"
+#     10,2,420              2000110        "Lucifer's ATK increases 420"
+#     17,3,360              2000117        "Lucifer's DEF increases 360"
+#     23,5,275              2000123        "Lucifer's SPD increases 275"
+#     28,6,150              2000128        "Lucifer's CRT increases 15%"     <- x10 scale
+#     30,8,150              2000130        "Lucifer's CRIT Hit DMG increases 15%"
+#
+# The last two are where the x10 percent scale is PROVEN rather than assumed: the row
+# says 15%, the ladder says 150. That is `CharAttribute.PercentStyleAttrs`, and it is
+# the same scale `equipment_bonus` uses (see gear.repair_equipment_rolls, where
+# `_AttrInitV` 9990 renders as "CRI+999.0%").
+#
+# RUNGS ARE CUMULATIVE, not replacements. 106 of the 122 ladders repeat an attribute --
+# Panagia has HP at rung 3 AND rung 14 -- and both char_flv rows read "HP increases
+# 1960" (增加, "increases"), not a running total. So they sum.
+#
+# All 122 casts have a ladder and they differ per cast, so this is a per-cast table and
+# not one shared curve. Nothing here is invented: every number is the design row's own.
+FLV_ATTR_HP, FLV_ATTR_ATK, FLV_ATTR_DEF = 1, 2, 3
+FLV_ATTR_SPD, FLV_ATTR_CRI, FLV_ATTR_CDI = 5, 6, 8
+
+# Maps CharAttribute types onto the keys battle.Unit already sums out of `gear_bonus`.
+# Those six are the ONLY types that appear across all 122 ladders (checked; 0 malformed
+# rungs), so an unmapped type is a pack change, not a gap -- it is dropped rather than
+# guessed at.
+FLV_ATTR_KEYS = {
+    FLV_ATTR_HP: "hp", FLV_ATTR_ATK: "atk", FLV_ATTR_DEF: "def",
+    FLV_ATTR_SPD: "spd", FLV_ATTR_CRI: "cri", FLV_ATTR_CDI: "cdi",
+}
+
+
+def parse_flv_bonus(raw):
+    """-> [(karma level, attr type, value)] from a `_flvBonus` string. Never raises."""
+    out = []
+    for part in str(raw or "").split("_"):
+        bits = [b for b in part.split(",") if b.strip()]
+        if len(bits) != 3:
+            continue
+        try:
+            out.append((int(bits[0]), int(bits[1]), int(bits[2])))
+        except ValueError:
+            continue
+    return out
+
+
+def consonance_bonus(char_id, karma_level):
+    """-> {stat key: total} for every Karma rung this cast has reached.
+
+    hp/atk/def/spd come out in the same flat units `gear_bonus` already uses. cri/cdi
+    stay in the DESIGN scale (x10, so 150 = 15%); they are converted where they are
+    consumed -- battle.Unit for the engine, and back again for the wire. Keeping the
+    design number intact here is what lets a later reader check it against the row.
+    """
+    row = bt.dd.row("char", int(char_id or 0)) or {}
+    totals = {}
+    for level, attr, value in parse_flv_bonus(row.get("_flvBonus")):
+        if int(karma_level or 0) < level:
+            continue
+        key = FLV_ATTR_KEYS.get(attr)
+        if key:
+            totals[key] = totals.get(key, 0) + value
+    return totals
+
+
+def _annotate_consonance(state, entry):
+    """Fold the cast's Karma rewards into its gear bonus.
+
+    Merged into `gear_bonus` rather than carried on a second channel because
+    battle.Unit already sums that dict into max_hp/atk/defence/spd -- a parallel channel
+    would need every one of those call sites changed and would be one more thing to
+    forget. `consonance_bonus` is kept alongside it so a reader can still see WHICH part
+    of a cast's total came from Karma rather than from equipment.
+
+    No double-count: nothing in battle.py applies Karma stats, and CharData's
+    HP/ATK/DEF/SPD/CRI/CDI are all `[JsonProperty]` (il2cpp dump), i.e. read straight
+    off what the server sends rather than derived client-side.
+    """
+    from .core import karma_of
+    try:
+        level = (karma_of(state, entry.get("id")) or {}).get("flv", 1)
+    except Exception:                       # noqa: BLE001 -- never break a party build
+        return
+    bonus = consonance_bonus(entry.get("id"), level)
+    if not bonus:
+        return
+    merged = dict(entry.get("gear_bonus") or {})
+    for key, value in bonus.items():
+        merged[key] = merged.get(key, 0) + value
+    entry["gear_bonus"] = merged
+    entry["consonance_bonus"] = bonus
+
+
 def _annotate_gear(state, entry):
     """Resolve the cast's equipped starshards/soulmirrors into a flat stat bonus.
 
@@ -220,6 +328,10 @@ def _annotate_gear(state, entry):
     star = entry.get("star") or bt._default_star(row)
     base = bt._grow(row, star, entry.get("lv", 1), entry.get("super_star") or 0)
     entry["gear_bonus"] = gear.equipped_stat_bonus(state, entry, base)
+    # Consonance rides on top of equipment -- see the block above. Done here rather than
+    # at the call sites because every path that builds a battle party goes through
+    # _annotate_gear, and a cast with no gear at all still has a Karma ladder.
+    _annotate_consonance(state, entry)
 
 
 def _annotate_bloodpact(state, entry):
