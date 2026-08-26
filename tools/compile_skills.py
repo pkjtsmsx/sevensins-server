@@ -150,14 +150,35 @@ EFFECT_WORD = {
 
 _GAUGE_WORD = EFFECT_WORD["modify_gauge"]
 _GAUGE_PCT = re.compile(r"(\d+(?:\.\d+)?)\s*%")
-_GAUGE_SELF = re.compile(r"caster|self|its own|自身|我方自身", re.I)
-_GAUGE_ALLY = re.compile(r"\ball(y|ies)\b|我方", re.I)
-_GAUGE_ENEMY = re.compile(r"enem|敵方|对方", re.I)
+# The side words, in both languages. Counted over every `_note1` in the pack before
+# being written down, because two of these were missing and one was in the wrong script:
+#
+#   自身  8,173 in 4,067 skills      我方  8,324 in 5,549      敵方  4,924 in 3,727
+#   自己  2,697 in 2,276 skills  <-- was absent from _GAUGE_SELF entirely
+#   敵人    862 in   671 skills  <-- was absent from _GAUGE_ENEMY entirely
+#   己方     25 in    25 skills  <-- was absent from _GAUGE_ALLY
+#   對方     31 in    31 skills  <-- _GAUGE_ENEMY carried the SIMPLIFIED 对方, and this
+#                                    pack is traditional, so it never matched anything
+#
+# The enemy list is the one that must not be short. `_who_in` tests enemy FIRST and
+# `status_target` treats an enemy hit as "fall through to the skill's own targets", so a
+# missed enemy word lets an ally word later in the same clause win -- which redirects a
+# debuff onto the player's own party. That is the dangerous direction, and 敵人 alone
+# appears in 671 skills.
+_GAUGE_SELF = re.compile(r"caster|self|its own|自身|自己|我方自身", re.I)
+_GAUGE_ALLY = re.compile(r"\ball(y|ies)\b|我方|己方", re.I)
+_GAUGE_ENEMY = re.compile(r"enem|敵方|敵人|對方|对方", re.I)
 # "the caster's Max HP", "its own ATK", "the target's SPD" -- the owner of a STAT the
 # magnitude is computed from, which is not the same thing as the recipient.
 _POSSESSIVE_SOURCE = re.compile(
     r"\b(?:the\s+)?(?:caster|self|its\s+own|target|enemy|ally)'?s?\s+"
     r"(?:max(?:imum)?\s*)?(?:HP|ATK|DEF|SPD|CRI|CRT)\b", re.I)
+
+# Where `status_target` recorded the English translation naming a different side than
+# the original. Reported at the end of a compile rather than swallowed -- section 3 says
+# these are real and there were 20 known ones in a corpus sweep, so a count that grows
+# silently is exactly what we do not want.
+_WHO_DISAGREEMENTS = []
 
 _MINUS_PCT = re.compile(r"-\s*\d+(?:\.\d+)?\s*%")
 # "increases the Move Gauge of all allies (EXCLUDING THE CASTER) by 10%" -- the excluded
@@ -603,7 +624,10 @@ def effects(rows, r):
                         "chance": op == OP_APPLY_CHANCE,
                         "conditional": is_conditional(r, meta.get("name")),
                         "requires": condition_requires(r, meta.get("name")),
-                        "recipient": status_target(r, meta.get("name")),
+                        # The status row's `_name` is the ORIGINAL-language name, which
+                        # status_target needs to find the clause in `_note1`.
+                        "recipient": status_target(r, meta.get("name"),
+                                                   (rows.get(aid) or {}).get("_name")),
                         "removes": status_removes(r, meta.get("name")),
                         "status": meta,
                         # Per-(skill, status): no column carries these, and they change
@@ -824,33 +848,207 @@ _AFFECTED = re.compile(
 _SELF_WORDS = {"caster", "self"}
 
 
-def status_target(r, status_name):
-    """-> who a status is applied to: "caster", "allies", "targets", or None.
+# Verbs that GRANT a status, as opposed to testing for one. 擁有/若 ("has"/"if") are
+# deliberately absent: a fragment that only tests for the status is a condition, and its
+# side words describe who must be holding it, not who is about to receive it.
+_GRANT_VERB = re.compile(
+    r"附加|賦予|給予|獲得|得到|疊加|張開|施加"
+    r"|\bgrant|\bgains?\b|\bapplie|\bapply\b|\binflict|\bcasts?\b|\breceive", re.I)
 
-    **The recipient is not the skill's target.** This has now caused three live bugs in
-    a row -- a move gauge handed to the enemy it was cast at, a heal that restored the
-    raid boss, and Metatron's "Cast Serum Injection on up to 1 allies with the highest
-    ATK" buffing the boss instead. An attack skill routinely aims at an enemy and applies
-    something to its own side.
 
-    Read from the sentence naming the status, the same way its duration and condition
-    are. `None` means the prose does not say, and the engine falls back to the skill's
-    targets -- which is right for the ordinary "inflicts X on the target" case.
+# Like _FRAGMENT_SPLIT but WITHOUT 、 -- and that difference is the whole point.
+#
+# 、 is the Chinese LIST separator, not a clause separator: it enumerates nouns that
+# share one verb and one recipient. Splitting on it tears a shared grant apart and
+# leaves every item after the first as a bare noun with nothing attached to it:
+#
+#   行動前對我方全體附加貫通、祝福
+#   |________ grants ALL ALLIES ______|  |__ a bare list tail __|
+#
+# so Blessing came back with no recipient while Penetrate, one item earlier in the same
+# list, correctly came back as allies. Same for 使自己獲得加速、毅然.
+_CLAUSE_SPLIT = re.compile(r",\s*|\s+and\s+|;\s*|，|並|且|。|；|！|？", re.I)
+
+
+_SENTENCE_END = re.compile(r"[。；！？.!?]")
+# "on the target", 對目標 -- a stated recipient that is not one of the three SIDES.
+_EXPLICIT_TARGET = re.compile(r"\btargets?\b|目標|對象|敵人|敵方", re.I)
+
+
+def _split_fragments(clause):
+    """-> the clause as a list of fragments, in order."""
+    parts, last = [], 0
+    for m in _CLAUSE_SPLIT.finditer(clause):
+        parts.append(clause[last:m.start()])
+        last = m.end()
+    parts.append(clause[last:])
+    return parts
+
+
+def _fragments_naming(clause, name):
+    """-> [(index, fragment)] for every clause-level fragment mentioning `name`."""
+    want = name.lower()
+    return [(i, p) for i, p in enumerate(_split_fragments(clause))
+            if want in p.lower()]
+
+
+def _who_with_inheritance(parts, i):
+    """-> the side governing fragment `i`, looking back for the verb it hangs off.
+
+    A fragment that names NEITHER a side NOR a granting verb is a bare list tail: the
+    verb and the recipient are on the head of its list, one or more fragments back.
+    English does this with "and" exactly as Chinese does it with 、 --
+
+        grants the caster The Bride │ CC Immunity effects
+        |__ verb + recipient _______| |__ names neither __|
+
+    -- and "CC Immunity" alone answered None while "The Bride", one item earlier in the
+    same list, answered caster. Walking back finds the head.
+
+    Deliberately narrow, because inheriting a recipient is exactly the kind of guess
+    that puts a party buff on a boss: it only runs when the naming fragment says nothing
+    at all, it stops at the first fragment that DOES grant, and it never crosses a
+    sentence boundary into a different statement.
     """
-    clause = _clause_for(r.get("_note1_en") or "", status_name)
+    here = _who_in(parts[i])
+    if here or _GRANT_VERB.search(parts[i]):
+        return here
+    # A tail that names the TARGET has stated its recipient and must not inherit:
+    #
+    #     grants the caster Iron Wrist │ 2 stacks of Beer on the target
+    #                                     ^^^^^^^^^^^^^^ says who, just not in the
+    #                                                    self/ally/enemy vocabulary
+    #
+    # `_who_in` has no token for "target" -- deliberately, since "the skill's target" is
+    # the FALLBACK rather than a named side -- so without this the walk-back sails past
+    # an explicit recipient and hands Beer to its caster. Returning None here is that
+    # same fallback, which is what the prose actually asked for.
+    if _EXPLICIT_TARGET.search(parts[i]):
+        return None
+    for j in range(i - 1, -1, -1):
+        if _SENTENCE_END.search(parts[j]):
+            break
+        if _GRANT_VERB.search(parts[j]):
+            return _who_in(parts[j])
+    return None
+
+
+def _who_for(note, name):
+    """-> the side named in the fragment that grants `name`, or None if it is not named.
+
+    THE MISS MUST NOT FALL BACK TO THE WHOLE CLAUSE. `_fragment_for` returns its input
+    unchanged when it cannot find the name, which is a sane default for a narrowing
+    helper and a disastrous one here: `_who_in` then reads side words from anywhere in
+    the sentence, including from a CONDITION that names the caster.
+
+    Status rows are named with a stack qualifier -- `激痛(5)`, `蓄勢(3)`, `加速(5)` --
+    that the prose never writes, so the name is missed on exactly the statuses that
+    stack. `_clause_for` already strips it to find the sentence; this has to strip it
+    again to find the fragment, or every stacking status reads the whole sentence.
+
+    Prelude is the case that proves the cost. Its clause is
+
+        造成傷害時附加激痛效果，若自身擁有可解除的「持續傷害」狀態，...
+        ^^^^ inflicts Agony (on the target)   ^^^^ "if the CASTER has..." -- a condition
+
+    With `激痛(5)` the name is not found, the whole sentence is read, the condition's
+    自身 wins, and Agony -- a DEF debuff -- is recorded as landing on its own caster.
+    With the qualifier stripped the fragment is the first clause alone and the answer is
+    correctly None.
+    """
+    if not note or not name:
+        return None
+    clause = _clause_for(note, name)
     if not clause:
         return None
-    # Enemy wins when both appear: "grants all allies X and inflicts Y on all enemies"
-    # is two clauses in one sentence, and the status we are asked about is usually the
-    # one nearer its own verb -- so prefer the explicit ally/self wording only when no
-    # enemy wording is present.
-    if _GAUGE_ENEMY.search(clause):
-        return None
-    if _GAUGE_SELF.search(clause):
-        return "caster"
-    if _GAUGE_ALLY.search(clause):
-        return "allies"
+    bare = re.sub(r"\s*[(（][^)）]*[)）]\s*$", "", name).strip()
+    for want in (name, bare):
+        if not want or want.lower() not in clause.lower():
+            continue
+        parts = _split_fragments(clause)
+        frags = _fragments_naming(clause, want)
+        if not frags:
+            continue
+        # PICK THE FRAGMENT THAT GRANTS, not the first one that mentions the name.
+        # `_clause_for` already prefers the SENTENCE where a granting verb precedes the
+        # name; the same rule is needed one level down, because a status is routinely
+        # named twice in one sentence -- once as a condition and once as the thing
+        # applied -- and it is also routinely a substring of the clause's own label.
+        #
+        #   盛怒萬解：...都將為自身疊加1層「盛怒」
+        #   ^^^^ the LABEL contains the status name    ^^^^ the fragment that grants it
+        #
+        #   若...目標擁有全傷害激減，使我方全體獲得全傷害激減
+        #   ^^^^ a CONDITION (擁有 = "has")   ^^^^ the grant (獲得 = "gains")
+        #
+        # Taking the first match answered None for both -- Wrath stopped landing on its
+        # own caster and Delusion's party-wide damage reduction stopped being party-wide.
+        for _i, frag in frags:
+            if _GRANT_VERB.search(frag):
+                return _who_in(frag)
+        return _who_with_inheritance(parts, frags[0][0])
+    # NEITHER spelling appears literally, yet `_clause_for` still found a clause -- so it
+    # matched through one of its own aliases. That is the immunity shape: the row is
+    # NAMED "Charm/Confuse/Headwind Immunity" and the prose DESCRIBES it as "the caster
+    # permanently gains immunity to Confuse, Charm and Headwind", sharing no substring
+    # with the name at all. Narrowing cannot find what is not there, so fall back to
+    # `_fragment_for`, which is what this function did before narrowing existed.
+    #
+    # This fires only when both spellings miss, so it cannot reintroduce the whole-clause
+    # read that the qualifier stripping above exists to prevent -- those names ARE found.
+    clause_l = clause.lower()
+    if not any(w and w.lower() in clause_l for w in (name, bare)):
+        return _who_in(_fragment_for(clause, bare or name))
     return None
+
+
+def status_target(r, status_name, zh_name=None):
+    """-> who a status is applied to: "caster", "allies", "targets", or None.
+
+    **The recipient is not the skill's target.** This has now caused four live bugs in
+    a row -- a move gauge handed to the enemy it was cast at, a heal that restored the
+    raid boss, Metatron's "Cast Serum Injection on up to 1 allies with the highest ATK"
+    buffing the boss instead, and 127 buffs (plus 182 shields) granted to whoever the
+    caster had just hit. An attack skill routinely aims at an enemy and applies
+    something to its own side.
+
+    Two things this used to get wrong, both of which `passive_who` in this same file has
+    always got right -- it reads the ORIGINAL language and it narrows to the fragment
+    naming the status. This function did neither, and the two failures compound:
+
+    READ THE CHINESE (section 3). `_note1` is the original and `_note1_en` a
+    translation, so the original wins outright on a disagreement. Recorded rather than
+    silently preferred, so the count of disagreements stays visible.
+
+    NARROW TO THE FRAGMENT. `_clause_for` splits on `[.!?]`, which is English
+    punctuation -- a Chinese line has none of it, so the whole line comes back as one
+    "sentence" and any side word anywhere in it wins. Shark Shark Attack IV is the case
+    that shows the cost:
+
+        行動開始前對我方全體附加超級防曬乳，…，若攻擊時自身擁有5層Reload，…
+                    ^^^^ recipient: all allies      ^^^^ a CONDITION, 44 chars later
+
+    Reading the whole line matched 自身 from the condition and answered "caster" -- a
+    wrong answer, which is worse than the None it used to return from the English. The
+    `_fragment_for` narrowing that passives already use picks the right half.
+
+    `_who_in` is used rather than testing the three regexes here, because it also strips
+    the exclusion parenthetical ("all allies EXCLUDING the caster") and the possessive
+    stat source ("the caster's Max HP" names whose ATK the magnitude reads, not who
+    receives it) -- neither of which this function used to account for.
+
+    `None` still means the prose does not say, and the engine falls back to the skill's
+    targets -- right for the ordinary "inflicts X on the target" case.
+    """
+    zh = _who_for(r.get("_note1"), zh_name)
+    en = _who_for(r.get("_note1_en"), status_name)
+    if zh and en and zh != en:
+        _WHO_DISAGREEMENTS.append((r.get("_id"), status_name, zh, en))
+    who = zh or en
+    # Enemy means "fall through to the skill's own targets": the ordinary case is an
+    # attack that inflicts something on what it hit, and naming the enemy explicitly
+    # does not change that.
+    return {"self": "caster", "ally": "allies"}.get(who)
 
 
 def condition_requires(r, status_name):
@@ -1040,7 +1238,19 @@ def passive_trigger(clause):
 # caster CC Immunity for two turns AND inflict Headwind on all enemies" is two effects
 # with two different recipients in one sentence, and reading the recipient off the whole
 # sentence gives both of them the first one's answer.
-_FRAGMENT_SPLIT = re.compile(r",\s*|\s+and\s+|;\s*|、|，|並|且", re.I)
+# Fragment boundaries, in both languages. The Chinese SENTENCE terminators belong here
+# and were missing: `_clause_for` splits sentences on `[.!?]`, which a Chinese line does
+# not contain, so without 。 here a "fragment" ran straight through a full stop into the
+# next sentence. Unity Candle Ceremony V is the case that shows it -- the fragment for
+# 捧花 began in the previous sentence and picked up its 敵人:
+#
+#   ...對擁有「精英」狀態的敵人不會發動)。行動結束後對我方全體附加捧花
+#                        ^^^^ a different sentence      ^^^^ the real recipient
+#
+# giving "enemy" for a status the prose grants to 我方全體. A full stop is a strictly
+# stronger boundary than the 、／，this list already had, so adding it cannot widen a
+# fragment -- only narrow one.
+_FRAGMENT_SPLIT = re.compile(r",\s*|\s+and\s+|;\s*|、|，|並|且|。|；|！|？", re.I)
 
 
 def _fragment_for(clause, name):
@@ -1434,6 +1644,14 @@ def main():
     total = sum(len(v) for v in buckets.values())
     print(f"wrote {out}/: {len(buckets)} files, {len(index)} skills "
           f"({total} rows incl. shared duplicates)")
+
+    # Section 3: the English is a translation and it has real errors. Printed rather
+    # than accumulated quietly, so a growing count is something somebody notices.
+    if _WHO_DISAGREEMENTS:
+        print(f"  recipient prose disagreements: {len(_WHO_DISAGREEMENTS)} "
+              f"(Chinese used; sample below)")
+        for sid, name, zh, en in _WHO_DISAGREEMENTS[:5]:
+            print(f"    skill {sid} / {name}: zh={zh} en={en}")
 
     if args.stats:
         import collections
