@@ -288,17 +288,37 @@ def _holds_status(unit, name, snapshot=None):
     return False
 
 
+def _condition_met(requires, caster, target, snapshot=None):
+    """Evaluate a compiled `requires` gate. Two shapes:
+
+    {"status": X, "on": caster|target, "negate": bool} -- "if the caster is affected by
+    The Divine" (Eclipse Slash), or 若目標未擁有麻痺 with negate. Checked for real
+    against the pre-action snapshot rather than rolled.
+
+    {"hp": {"on": ..., "cmp": ">"/"<"/">="/"<=", "pct": N}} -- 若自身體力低於50%.
+    """
+    holder = caster if requires.get("on") == "caster" else target
+    hp = requires.get("hp")
+    if hp:
+        holder = caster if hp.get("on") == "caster" else target
+        if holder is None or not getattr(holder, "max_hp", 0):
+            return False
+        now = 100.0 * float(holder.hp) / float(holder.max_hp)
+        want = float(hp.get("pct") or 0)
+        cmp_ = hp.get("cmp")
+        return {">": now > want, ">=": now >= want, "<": now < want,
+                "<=": now <= want}.get(cmp_, False)
+    held = _holds_status(holder, requires.get("status"), snapshot)
+    return (not held) if requires.get("negate") else held
+
+
 def _status_event(caster, target, eff, rng, snapshot=None):
     """-> a StatusEvent, or None when the application does not land."""
     st = eff.get("status") or {}
     numbers = eff.get("numbers") or {}
     requires = eff.get("requires")
     if requires:
-        # An evaluatable condition: "if the caster is affected by The Divine". Checked
-        # for real rather than rolled -- this is the shape behind Eclipse Slash gating
-        # its Freeze on The Divine and its Stun on The Fallen.
-        holder = caster if requires.get("on") == "caster" else target
-        if not _holds_status(holder, requires.get("status"), snapshot):
+        if not _condition_met(requires, caster, target, snapshot):
             return None
     elif eff.get("conditional") and not eff.get("chance"):
         if CONDITIONAL_POLICY == "skip":
@@ -525,7 +545,10 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
             _rider(caster, e, targets, out, r, apply_damage, skill_id, units)
         elif op == "follow_up":
             child = specs.skill(e["skill"])
-            if child is None:
+            if e.get("requires") and not _condition_met(
+                    e["requires"], caster, targets[0] if targets else None, held):
+                out.skipped.append({"op": op, "why": "condition not met", "skill": e["skill"]})
+            elif child is None:
                 out.skipped.append({"op": op, "why": "unknown skill", "skill": e["skill"]})
             elif depth >= MAX_FOLLOW_DEPTH:
                 out.skipped.append({"op": op, "why": "follow-up depth limit",

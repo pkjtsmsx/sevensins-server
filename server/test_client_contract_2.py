@@ -219,12 +219,60 @@ def check_shields_actually_have_hp():
         check(f"parse_zh sizes {line[:14]}…", all(got.get(k) == v for k, v in want.items()), str({k: got.get(k) for k in want}))
 
 
+def check_zh_conditions_gate_effects():
+    """若/當 conditions read from the Chinese now GATE effects instead of flattening.
+
+    740 status applications and 399 follow-ups fired unconditionally because the
+    compiler could not read 若. The engine's `requires` now takes three shapes --
+    holds-status (with a negated form), and an HP threshold -- and follow-ups are
+    gated too. Pinned end-to-end on a real skill: Broken Watermelon's Freeze reads
+    "若攻擊時自身擁有5層Reload，對目標附加凍結".
+    """
+    import design_data as dd
+    from engine import specs as SP
+    b = a_battle()
+    units = list(b.units.values())
+    cs_ = [u for u in units if u.team != bt.TEAM_ENEMY][0]
+    en_ = [u for u in units if u.team == bt.TEAM_ENEMY][0]
+    sid = next(s for s, r in dd.rows("skill").items()
+               if r.get("_name_en") == "Broken Watermelon")
+    sp = SP.skill(sid)
+    gate = next(e.get("requires") for e in sp["effects"]
+                if (e.get("status") or {}).get("name") == "Freeze")
+    check("the compiled gate is caster-holds-Reload",
+          gate and gate.get("status") == "Reload" and gate.get("on") == "caster", str(gate))
+    out = C.execute(cs_, sp, units, random.Random(1), chosen=en_.order, apply_damage=False)
+    check("without Reload the Freeze does NOT fire",
+          not any(e.name == "Freeze" for e in out.statuses))
+    rid = _BY_NAME["Reload"]
+    cs_.statuses.append(S.Active(status_id=rid, name="Reload", kind="other",
+                                 category="misc", remaining=9, stacks=5))
+    out = C.execute(cs_, sp, units, random.Random(1), chosen=en_.order, apply_damage=False)
+    check("with Reload the Freeze fires", any(e.name == "Freeze" for e in out.statuses))
+    # The three shapes, directly.
+    check("negate: 若目標未擁有X blocks when X is held",
+          not C._condition_met({"status": "Reload", "on": "caster", "negate": True}, cs_, en_))
+    cs_.hp = int(cs_.max_hp * 0.4)
+    check("HP gate: 若自身體力低於50% is true at 40%",
+          C._condition_met({"hp": {"on": "caster", "cmp": "<", "pct": 50}}, cs_, en_))
+    check("...and false above it",
+          not C._condition_met({"hp": {"on": "caster", "cmp": ">", "pct": 50}}, cs_, en_))
+    # A gated follow-up: compiled with requires, skipped when unmet.
+    fsid = next(s for s, r in dd.rows("skill").items()
+                if r.get("_name_en") == "Star Muzzle Flash VI")
+    fsp = SP.skill(fsid)
+    freq = next((e.get("requires") for e in fsp["effects"] if e.get("op") == "follow_up"), None)
+    check("Star Muzzle Flash VI's pursuit is gated on Special Move Seal",
+          freq and freq.get("status") == "Special Move Seal", str(freq))
+
+
 def main():
     for fn in (check_spd_statuses_move_the_queue,
                check_status_rows_carry_stacks_and_shield,
                check_immunity_makes_a_row,
                check_engine_reports_the_immune_target,
-               check_shields_actually_have_hp):
+               check_shields_actually_have_hp,
+               check_zh_conditions_gate_effects):
         print(f"\n{fn.__name__}:")
         fn()
     print(f"\n{_fail} failure(s)")

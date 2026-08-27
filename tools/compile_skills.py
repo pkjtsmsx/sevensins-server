@@ -854,7 +854,8 @@ def effects(rows, r):
             out.append({"op": "apply_status", "slot": i,
                         "chance": op == OP_APPLY_CHANCE,
                         "conditional": is_conditional(r, meta.get("name")),
-                        "requires": condition_requires(r, meta.get("name")),
+                        "requires": (condition_requires(r, meta.get("name"))
+                                     or zh_condition_for(rows, r, (rows.get(aid) or {}).get("_name"))),
                         # The status row's `_name` is the ORIGINAL-language name, which
                         # status_target needs to find the clause in `_note1`.
                         "recipient": status_target(r, meta.get("name"),
@@ -875,7 +876,9 @@ def effects(rows, r):
         elif op == OP_FOLLOW_UP and aid:
             out.append({"op": "follow_up", "slot": i, "skill": aid,
                         "name": (rows.get(aid) or {}).get("_name_en")
-                                or (rows.get(aid) or {}).get("_name")})
+                                or (rows.get(aid) or {}).get("_name"),
+                        # "若目標擁有出血…進行追擊": the 若 fragment before the 追擊 gates it.
+                        "requires": zh_condition_for(rows, r, None, follow_up=True)})
         elif op == OP_MODIFY_CD:
             entry = {"op": "modify_cd", "slot": i}
             entry.update(cd_effect(r))
@@ -1254,6 +1257,103 @@ def _who_for(note, name):
     if not any(w and w.lower() in clause_l for w in (name, bare)):
         return _who_in(_fragment_for(clause, bare or name))
     return None
+
+
+
+# ---- Chinese conditions ------------------------------------------------------------
+#
+# 740 status applications and 399 follow-ups on cast skills carried a 若/當 condition
+# the compiler could not read, so they fired UNCONDITIONALLY -- the "too strong" failure.
+# The engine already evaluates one shape, `requires` = "holds status X"; that is 362 of
+# them. HP thresholds are 134 more and a small engine addition. Both are read here from
+# the condition fragment that precedes the grant in the same sentence.
+_ZH_COND_START = re.compile(r"^(?:若|當|如果|在)")
+_ZH_COND_HOLDS = re.compile(
+    r"(?P<who>目標|自身|自己|敵方|我方|對方)?[^，。]*?"
+    r"(?P<neg>未|沒有|不)?(?:擁有|持有|附有|處於|帶有)"
+    r"(?:\d+層)?(?:任[一何])?「?(?P<name>[^」，。的時之狀]{1,14}?)」?(?:狀態|效果)?(?:時|的|，|$)")
+_ZH_COND_HP = re.compile(
+    r"(?P<who>目標|自身|自己|敵方|我方)?(?:的)?(?:體力|血量|HP)\s*"
+    r"(?P<cmp>高於|低於|不高於|不低於|大於|小於|[<>＜＞≥≤]|為滿值|全滿|滿值|未滿)?\s*"
+    r"(?P<pct>\d+(?:\.\d+)?)?\s*[%％]?\s*(?P<tail>以上|以下)?")
+_ZH_NAME_TO_EN = None
+
+
+def _zh_status_en(rows, zh):
+    """-> the English registry name for a Chinese status name (qualifiers off)."""
+    global _ZH_NAME_TO_EN
+    if _ZH_NAME_TO_EN is None:
+        _ZH_NAME_TO_EN = {}
+        for row in rows.values():
+            z, e = row.get("_name"), row.get("_name_en")
+            if z and e and row.get("_type") == 6:          # 6 = a status row
+                _ZH_NAME_TO_EN.setdefault(sp.norm_name_zh(z), re.sub(r"\s*\([^)]*\)\s*$", "", e))
+    return _ZH_NAME_TO_EN.get(sp.norm_name_zh(zh))
+
+
+def _zh_parse_condition(rows, frag):
+    """-> a `requires` dict for one condition fragment, or None."""
+    m = _ZH_COND_HOLDS.search(frag)
+    if m:
+        # The holder is whichever side word precedes 擁有 in the fragment -- "若攻擊時
+        # 自身擁有5層Reload" names 自身 mid-fragment, not at its start.
+        before = frag[:m.end("name")]
+        who = "caster" if re.search(r"自身|自己|我方", before) and not re.search(
+            r"目標|敵方|對方|敵人", before) else "target"
+        en = _zh_status_en(rows, m.group("name"))
+        return {"status": en or m.group("name"), "on": who,
+                "negate": bool(m.group("neg")), "resolved": bool(en)}
+    m = _ZH_COND_HP.search(frag)
+    if m and (m.group("cmp") or m.group("tail")):
+        who = m.group("who") or ""
+        cmp_, pct, tail = m.group("cmp") or "", m.group("pct"), m.group("tail") or ""
+        if cmp_ in ("為滿值", "全滿", "滿值"):
+            op, val = ">=", 100.0
+        elif cmp_ == "未滿":
+            op, val = "<", float(pct) if pct else 100.0
+        elif pct is None:
+            return None
+        elif cmp_ in ("高於", "大於", ">", "＞") or tail == "以上":
+            op, val = (">=" if tail == "以上" else ">"), float(pct)
+        elif cmp_ in ("低於", "小於", "<", "＜") or tail == "以下":
+            op, val = ("<=" if tail == "以下" else "<"), float(pct)
+        elif cmp_ == "不高於" or cmp_ == "≤":
+            op, val = "<=", float(pct)
+        elif cmp_ == "不低於" or cmp_ == "≥":
+            op, val = ">=", float(pct)
+        else:
+            return None
+        return {"hp": {"on": "caster" if who in ("自身", "自己", "我方") else "target",
+                       "cmp": op, "pct": val}}
+    return None
+
+
+def zh_condition_for(rows, r, zh_name, follow_up=False):
+    """-> the condition gating the grant of `zh_name` in this skill's Chinese, or None.
+
+    The condition is the 若/當 fragment that precedes the granting fragment within the
+    same sentence (a full stop ends a condition's reach). For a follow-up the "grant" is
+    the 追擊 fragment instead.
+    """
+    note = r.get("_note1") or ""
+    if follow_up:
+        want = re.compile(r"追擊|追加攻擊|再次使用|進行追加")
+    for sentence in re.split(r"[。\n]", note):
+        parts = _split_fragments(sentence)
+        for i, frag in enumerate(parts):
+            hit = want.search(frag) if follow_up else (
+                zh_name and sp.norm_name_zh(zh_name) in sp.norm_name_zh(frag)
+                and _GRANT_VERB.search(frag))
+            if not hit:
+                continue
+            for j in range(i, max(-1, i - 3), -1):
+                if _ZH_COND_START.search(parts[j].strip()) or (j == i and "若" in parts[j]):
+                    got = _zh_parse_condition(rows, parts[j])
+                    if got:
+                        return got
+            break
+    return None
+
 
 
 def status_target(r, status_name, zh_name=None):
