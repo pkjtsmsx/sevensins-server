@@ -1812,12 +1812,30 @@ class Unit(_engine_core.Unit):
         """
         if _engine_status.blocks_gauge_gain(self):
             return float("inf")
-        return max(0.0, SCV_FULL - self.scv) / max(1, self.spd)
+        return max(0.0, SCV_FULL - self.scv) / self.effective_spd()
+
+    def effective_spd(self):
+        """SPD as the move gauge sees it: base SPD through the unit's active SPD statuses.
+
+        THIS USED TO BE `self.spd` EVERYWHERE THE GAUGE IS COMPUTED, so every speed
+        status in the game -- SPD UP, Slow, Admonition (Reduce SPD), Linear Speedup,
+        Power Fist -- was cosmetic: it changed the number on the stat popup and nothing
+        about who acted when. Found 2026-08-26 reading the client: its own action-line
+        prediction (BattleUnitManager.GetNextAction) runs (100 - scv) / SPD off the
+        SPD in `sync`, so the server has to both USE the modified speed and SEND it, or
+        the "next" badge on the phone points at a different unit than acts.
+
+        Every SPD status in the registry is a percentage (34 of 34 with a stated
+        magnitude), so the multiplier is the whole story here. Floored at 1 so a
+        stack of Slows cannot stop the gauge -- that is Headwind's job, and it has
+        its own path (blocks_gauge_gain).
+        """
+        return max(1.0, float(self.spd) * _engine_status.stat_multiplier(self, "SPD"))
 
     def fill_gauge(self, seconds):
         if _engine_status.blocks_gauge_gain(self):
             return
-        self.scv = min(float(SCV_FULL), self.scv + seconds * max(1, self.spd))
+        self.scv = min(float(SCV_FULL), self.scv + seconds * self.effective_spd())
 
     def passives(self):
         """The unit's PASSIVE skill ids that the effect engine fully understands.
@@ -1937,8 +1955,13 @@ class Unit(_engine_core.Unit):
         }
 
     def sync(self):
-        """BattleUnitManager.SyncData reads exactly [MaxHP, HP, Scv, SPD]."""
-        return [self.max_hp, self.hp, int(self.scv), self.spd]
+        """BattleUnitManager.SyncData reads exactly [MaxHP, HP, Scv, SPD].
+
+        SPD is the EFFECTIVE speed, not the base: the client feeds this value straight
+        into its own action-line prediction (GetNextAction: (100 - scv) / SPD), so a
+        Slowed unit reported at base SPD gets its "next" badge one place too early.
+        """
+        return [self.max_hp, self.hp, int(self.scv), int(round(self.effective_spd()))]
 
     def to_state(self):
         """Only the fields that ever change after __init__ (see Battle.to_state's
@@ -2322,7 +2345,7 @@ class Battle:
         # Ties (everyone opens at 0, so the whole field ties on the first roll) break
         # the way they always did: faster first, then the player team, then slot.
         def rank_key(u):
-            return (-u.spd, u.team, u.index)
+            return (-u.effective_spd(), u.team, u.index)
         # A Headwinded unit reports an infinite fill time, so the step is taken over
         # whoever can actually fill. If NOBODY can, the gauges simply do not advance --
         # better a stalled queue than inf arithmetic on every bar.
@@ -2351,16 +2374,16 @@ class Battle:
                           if not _engine_status.blocks_gauge_gain(u)]
                 if not movers:
                     break
-                gap = min((SCV_FULL - sim[u.order]) / max(1, u.spd) for u in movers)
+                gap = min((SCV_FULL - sim[u.order]) / u.effective_spd() for u in movers)
                 for u in movers:
                     sim[u.order] = min(float(SCV_FULL),
-                                       sim[u.order] + gap * max(1, u.spd))
+                                       sim[u.order] + gap * u.effective_spd())
                 # Whoever needed the least time IS full now; float rounding must not
                 # be allowed to leave the step with nobody ready and the loop stuck.
                 ready = [u for u in alive if sim[u.order] >= FULL_EPS]
                 if not ready:
                     ready = [min(movers, key=lambda u: (SCV_FULL - sim[u.order])
-                                 / max(1, u.spd))]
+                                 / u.effective_spd())]
             nxt = min(ready, key=lambda u: rank[u.order])
             sim[nxt.order] = 0.0
             if nxt.order not in queue:

@@ -180,12 +180,15 @@ def check_wave_resets_the_move_gauge():
           all(u.scv < bt.SCV_FULL for u in battle.units.values()
               if u.order != battle.acting_unit().order),
           str({o: round(u.scv, 1) for o, u in battle.units.items()}))
-    fastest = max(battle.units.values(), key=lambda u: u.spd)
+    # EFFECTIVE speed, not base: the queue runs on SPD through the unit's statuses
+    # (a battle-start passive can hand a unit a speed buff before the first roll).
+    fastest = max(battle.units.values(), key=lambda u: u.effective_spd())
     check("  ...so the new wave opens on SPD, not on a banked bar",
-          battle.acting_unit().spd == fastest.spd,
+          battle.acting_unit().effective_spd() == fastest.effective_spd(),
           f"{battle.acting_unit().order} acts, fastest is {fastest.order}")
     check("  ...and the head start specifically is gone",
-          battle.acting_unit().order != survivor.order or survivor.spd == fastest.spd)
+          battle.acting_unit().order != survivor.order
+          or survivor.effective_spd() == fastest.effective_spd())
     check("cooldowns survive the wave", survivor.cooldowns[1] == 3,
           str(survivor.cooldowns))
     check("  ...and so does ultimate charge", survivor.charge == 2, str(survivor.charge))
