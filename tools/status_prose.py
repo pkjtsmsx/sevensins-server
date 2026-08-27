@@ -112,3 +112,116 @@ def norm_name(s):
     """
     s = re.sub(r"\s*\([^)]*\)\s*$", "", s or "")
     return " ".join(re.sub(r"[^a-z0-9]+", " ", s.lower()).split())
+
+
+# ---- the ORIGINAL language ---------------------------------------------------------
+#
+# `_note1` is Chinese and `_note1_en` a translation, and the translation renames things
+# mid-sentence: Scorpion Kiss's status row is `SPD UP(5)` in English while its own
+# glossary line reads `*Boost Up:` -- so the English-only join above found nothing and
+# the effect shipped with no magnitude, no stacks, no duration. The Chinese row is
+# `加速(5)` and the line is `※ 加速：速度+5%，可疊加5次，持續3回合`. That shape -- a `※`
+# marker, the status name, a full-width colon, and a fixed vocabulary for magnitude,
+# stacking and duration -- is consistent enough across the pack to parse directly, and
+# it is the text the game was written in (CLAUDE.md section 3). These are tried FIRST.
+
+# 持續3回合 / 持續整場戰鬥 / 持續整個戰鬥 / 直到戰鬥結束 / 常駐
+DURATION_ZH_RE = re.compile(r"持續\s*(\d+)\s*回合")
+PERMANENT_ZH_RE = re.compile(r"持續整[場個]|整場戰鬥|直到戰鬥結束|常駐|持續到戰鬥結束")
+# 攻擊力+18% / 速度-25% / 受到的傷害降低30% / 回復自身體力最大值25%
+SIGNED_PCT_ZH_RE = re.compile(r"([+\-－])\s*(\d+(?:\.\d+)?)\s*[%％]")
+DOWN_WORD_ZH = re.compile(r"降低|減少|下降")
+UP_WORD_ZH = re.compile(r"提升|增加|提高|上升|回復|恢復")
+# 可疊加5次 / 最多可堆疊3層 / 疊加至5層
+STACKS_ZH_RE = re.compile(r"(?:疊加|堆疊)(?:至|到)?\s*(\d+)\s*[次層]|最多\s*(\d+)\s*[次層]")
+STAT_ZH = (("攻擊力", "ATK"), ("防禦力", "DEF"), ("速度", "SPD"), ("體力", "HP"),
+           ("爆擊率", "CRI"), ("暴擊率", "CRI"), ("會心率", "CRI"),
+           ("爆擊傷害", "CDI"), ("暴擊傷害", "CDI"))
+UNREMOVABLE_ZH_RE = re.compile(r"不可解除|不可清除|解除不可|無法解除|無法清除|不可移除")
+# A percentage inside a CONDITION is a threshold, not a magnitude: "當前血量<90%時則立即
+# 死亡" read as a 90% heal-over-tick is the worst case, and it happened. Anything from a
+# 若/當 up to the next clause break, and any "<N%" / "低於N%" comparison, is blanked
+# before the magnitude is looked for.
+THRESHOLD_ZH_RE = re.compile(
+    r"(?:若|當|如果)[^，。；]*?[%％][^，。；]*|[<>＜＞≤≥]\s*\d+(?:\.\d+)?\s*[%％]"
+    r"|(?:低於|高於|不高於|不低於|超過|未滿)\s*\d+(?:\.\d+)?\s*[%％](?:以上|以下)?")
+
+
+def parse_zh(body):
+    """-> the same dict as parse(), read from a Chinese glossary body.
+
+    Same contract: anything the line does not state is None. Sign comes from an explicit
+    +/- first, then from the verb (降低/減少 -> -1, 提升/增加 -> +1) when the line has
+    exactly one percentage -- a line like 造成攻擊力50%傷害 (a DoT sized in ATK) has no
+    direction word and no sign, and stays sign-None for the engine's category rule.
+    """
+    out = {"duration": None, "permanent": False, "magnitude": None,
+           "magnitude_sign": None, "stat": None, "stacks": None,
+           "raw": (body or "").strip() or None}
+    if not body:
+        return out
+    if PERMANENT_ZH_RE.search(body):
+        out["permanent"] = True
+    m = DURATION_ZH_RE.search(body)
+    if m:
+        out["duration"] = int(m.group(1))
+    # Magnitude is read from the line with its conditions blanked -- see THRESHOLD_ZH_RE.
+    body = THRESHOLD_ZH_RE.sub(" ", body)
+    m = SIGNED_PCT_ZH_RE.search(body)
+    if m:
+        out["magnitude_sign"] = -1 if m.group(1) in "-－" else 1
+        out["magnitude"] = float(m.group(2))
+    else:
+        pcts = re.findall(r"(\d+(?:\.\d+)?)\s*[%％]", body)
+        if len(pcts) == 1:
+            out["magnitude"] = float(pcts[0])
+            if DOWN_WORD_ZH.search(body) and not UP_WORD_ZH.search(body):
+                out["magnitude_sign"] = -1
+            elif UP_WORD_ZH.search(body) and not DOWN_WORD_ZH.search(body):
+                out["magnitude_sign"] = 1
+    m = STACKS_ZH_RE.search(body)
+    if m:
+        out["stacks"] = int(next(g for g in m.groups() if g))
+    for word, stat in STAT_ZH:
+        if word in body:
+            out["stat"] = stat
+            break
+    if UNREMOVABLE_ZH_RE.search(body):
+        out["unremovable"] = True
+    return out
+
+
+def glossary_lines_zh(note):
+    """-> {name: body} for the `※ 名稱：body` lines of one _note1 -- and, for a note with
+    no ※ at all, its `名稱：body` LINES, which is how a passive writes its clauses
+    ("會心高揚I：常時暴擊率+4%"). A passive's statuses are named by those labels, so the
+    clause IS the status's glossary entry; without this, every passive-granted stat mod
+    had "no line at all" and no magnitude.
+    """
+    out = {}
+    if not note:
+        return out
+    if "※" in note:
+        for part in re.split(r"※\s*", note)[1:]:
+            flat = " ".join(part.split())
+            m = re.match(r"^(.{1,40}?)\s*[：:]\s*(.+)$", flat)
+            if m:
+                out[m.group(1).strip()] = m.group(2).strip()
+        return out
+    for line in note.split("\n"):
+        flat = " ".join(line.split())
+        m = re.match(r"^(.{1,20}?)\s*[：:]\s*(.+)$", flat)
+        if m and not re.search(r"\d+\s*[%％]", m.group(1)):
+            out[m.group(1).strip()] = m.group(2).strip()
+    return out
+
+
+def norm_name_zh(s):
+    """Join key for a Chinese status name: qualifiers off, spacing and dots off.
+
+    Rows are `加速(5)`, `穩固(SP)`, `超 •鐵腕`; the glossary writes `加速`, `穩固`,
+    `超•鐵腕`. norm_name() cannot be reused -- it strips everything but [a-z0-9] and
+    turns every Chinese name into the empty string.
+    """
+    s = re.sub(r"\s*[(（][^)）]*[)）]\s*$", "", s or "")
+    return re.sub(r"[\s•·・]+", "", s)

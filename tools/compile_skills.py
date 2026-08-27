@@ -518,6 +518,33 @@ def cast_glossary(rows):
     return out
 
 
+_CAST_GLOSSARY_ZH = None
+
+
+def cast_glossary_zh(rows):
+    """cast_glossary, read from `_note1`: {skill id: {zh status key: body}}."""
+    global _CAST_GLOSSARY_ZH
+    if _CAST_GLOSSARY_ZH is not None:
+        return _CAST_GLOSSARY_ZH
+    out = {}
+    for char in (dd.rows("char") or {}).values():
+        skills = [s for s in (char.get("_skills") or []) if s]
+        if not skills:
+            continue
+        merged = {}
+        for sid in skills:
+            row = rows.get(sid) or {}
+            for name, body in sp.glossary_lines_zh(row.get("_note1")).items():
+                merged.setdefault(sp.norm_name_zh(name), body)
+        for sid in skills:
+            base = (rows.get(sid) or {}).get("_group") or sid
+            for other, orow in rows.items():
+                if (orow.get("_group") or other) == base:
+                    out.setdefault(other, {}).update(merged)
+    _CAST_GLOSSARY_ZH = out
+    return out
+
+
 def corpus_defaults(rows):
     """-> {status name key: {duration, magnitude, agreement, samples}}.
 
@@ -572,6 +599,28 @@ def status_numbers(rows, skill_row, status_id):
       "corpus_default" -- the modal value across the pack, agreement >= threshold
       None             -- nothing stated; the engine must apply a policy, knowingly
     """
+    # THE ORIGINAL LANGUAGE FIRST. The English glossary renames statuses mid-sentence
+    # (Scorpion Kiss: row `SPD UP(5)`, line `*Boost Up:`), so the English join missed
+    # 3,749 of 6,205 cast applications and every one of those shipped with no
+    # magnitude, stacks or duration -- a status that lands, draws an icon and does
+    # nothing. The Chinese line is keyed by the row's own `_name` and parses with a
+    # fixed vocabulary; see status_prose.parse_zh. English remains the fallback, and
+    # the corpus default the last resort, and `source` says which one answered.
+    zh_name = (rows.get(status_id) or {}).get("_name")
+    zh_key = sp.norm_name_zh(zh_name) if zh_name else None
+    if zh_key:
+        zh_lines = {sp.norm_name_zh(k): v for k, v in
+                    sp.glossary_lines_zh(skill_row.get("_note1")).items()}
+        if zh_key in zh_lines:
+            got = sp.parse_zh(zh_lines[zh_key])
+            got["source"] = "skill_zh"
+            return got
+        own_zh = cast_glossary_zh(rows).get(skill_row.get("_id") or 0, {})
+        if zh_key in own_zh:
+            got = sp.parse_zh(own_zh[zh_key])
+            got["source"] = "cast_zh"
+            return got
+
     name = (rows.get(status_id) or {}).get("_name_en") \
         or (rows.get(status_id) or {}).get("_name")
     key = sp.norm_name(name)

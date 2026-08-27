@@ -240,12 +240,17 @@ def main():
     known_dur = sum(1 for e in numbered
                     if (e.get("numbers") or {}).get("duration") is not None
                     or (e.get("numbers") or {}).get("permanent"))
+    # "skill" is the English glossary line, "skill_zh" the Chinese one -- the same
+    # provenance (the applying skill's own text), and since 2026-08-26 the Chinese is
+    # tried first, so the two are counted together.
+    from_skill = src["skill"] + src["skill_zh"]
     check("durations read from the applying skill have not regressed",
-          src["skill"] >= BASELINE_SRC_SKILL, f"{src['skill']} < {BASELINE_SRC_SKILL}")
+          from_skill >= BASELINE_SRC_SKILL, f"{from_skill} < {BASELINE_SRC_SKILL}")
     check("total known durations have not regressed",
           known_dur >= BASELINE_KNOWN_DURATION,
           f"{known_dur} < {BASELINE_KNOWN_DURATION}")
-    print(f"        (skill {src['skill']}, corpus_default {src['corpus_default']}, "
+    print(f"        (skill {src['skill']} + zh {src['skill_zh']}, cast {src['cast'] + src['cast_zh']}, "
+          f"corpus_default {src['corpus_default']}, "
           f"unknown {src[None]}; duration known {known_dur}/{len(numbered)})")
 
     # An unknown duration must be VISIBLY unknown. A zero here would be indistinguishable

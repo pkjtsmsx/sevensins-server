@@ -155,6 +155,37 @@ def check_unnamed_traits_survive_a_by_stat_clause():
           (w.get("numbers") or {}).get("duration") == 2, str(w.get("numbers")))
 
 
+def check_numbers_come_from_the_original_language():
+    """Magnitude, stacks and duration are read from the Chinese glossary line FIRST.
+
+    The English glossary renames statuses mid-sentence -- Scorpion Kiss's row is
+    `SPD UP(5)` while its line says `*Boost Up:` -- so the English join missed 3,749
+    of 6,205 cast applications and each shipped as an icon that did nothing. And where
+    both languages state a number they disagree 54 times; Belphegor's Sunscreen is
+    +25% DEF in English at every rank and 50/65/80% in Chinese. The Chinese wins.
+    """
+    rows = dd.rows("skill") or {}
+    r = rows.get(1056101)                                  # Scorpion Kiss
+    sid = next(a for a in r["_actID"] if (rows.get(a) or {}).get("_name") == "加速(5)")
+    n = cs.status_numbers(rows, r, sid)
+    check("Scorpion Kiss / 加速: +5% SPD, 5 stacks, 3 turns, from the Chinese line",
+          n.get("magnitude") == 5.0 and n.get("magnitude_sign") == 1 and n.get("stacks") == 5
+          and n.get("duration") == 3 and n.get("source") == "skill_zh", str(n))
+    r = rows.get(2023115)                                  # Shark Shark Attack V
+    sid = next(a for a in r["_actID"] if (rows.get(a) or {}).get("_name") == "超級防曬乳")
+    n = cs.status_numbers(rows, r, sid)
+    check("Shark Shark Attack V / Sunscreen: DEF +65% for 4 turns (English says 25%/3)",
+          n.get("magnitude") == 65.0 and n.get("duration") == 4, str(n))
+    # A percentage inside a condition is a THRESHOLD, never a magnitude.
+    got = cs.sp.parse_zh("非精英怪受到3次直接傷害並且當前血量<90%時則立即死亡，持續1回合，不可移除。")
+    check("'<90%' in a condition is not read as a magnitude", got.get("magnitude") is None, str(got))
+    got = cs.sp.parse_zh("行動前若HP>90%，攻擊+25%")
+    check("...but the real magnitude beside a condition survives", got.get("magnitude") == 25.0, str(got))
+    # A passive's clause label IS its status's glossary entry.
+    lines = cs.sp.glossary_lines_zh("會心高揚I：常時暴擊率+4%\n攻擊吸收I：擊傷時最多1次，以25%機率恢復6%體力")
+    check("passive clauses parse as glossary lines", lines.get("會心高揚I") == "常時暴擊率+4%", str(lines))
+
+
 def check_a_condition_never_supplies_the_recipient():
     """The single highest-value invariant here, stated as a rule rather than a case.
 
@@ -218,6 +249,7 @@ def main():
     for fn in (check_hand_read_cases,
                check_passives_read_the_granting_fragment,
                check_unnamed_traits_survive_a_by_stat_clause,
+               check_numbers_come_from_the_original_language,
                check_a_condition_never_supplies_the_recipient,
                check_side_vocabulary_is_complete_for_this_pack,
                check_a_list_separator_does_not_split_a_shared_grant,
