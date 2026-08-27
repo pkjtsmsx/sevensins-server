@@ -476,6 +476,11 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
             if pct is None:
                 out.skipped.append({"op": op, "why": "magnitude unknown",
                                     "skill": skill_id})
+            elif e.get("chance_pct") is not None and not formula.effect_lands(
+                    caster, caster, float(e["chance_pct"]) / 100.0, r):
+                # "10%的機率使自己可以再度行動": the extra turn is a ROLL, and the
+                # compiler put the stated odds here rather than in the magnitude.
+                out.skipped.append({"op": op, "why": "chance failed", "skill": skill_id})
             else:
                 # The RECIPIENT is not the skill's target. The prose says whose gauge
                 # moves, and it is usually the caster or an ally: "the caster's Move
@@ -513,7 +518,7 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
                     tgt.hp = hp
                 out.revives.append({"target": tgt.order, "hp": hp})
         elif op == "attack_rider":
-            _rider(caster, e, targets, out, r, apply_damage, skill_id)
+            _rider(caster, e, targets, out, r, apply_damage, skill_id, units)
         elif op == "follow_up":
             child = specs.skill(e["skill"])
             if child is None:
@@ -664,12 +669,23 @@ def _flag_deaths(out, targets):
                 return
 
 
-def _rider(caster, eff, targets, out, rng, apply_damage, skill_id):
+def _rider(caster, eff, targets, out, rng, apply_damage, skill_id, units=()):
     """op 1 -- the attack rider. Kind comes from prose; see contract doc 6.3.3."""
     kind, pct = eff.get("kind"), eff.get("percent")
     if pct is None:
         out.skipped.append({"op": "attack_rider", "why": "magnitude unknown",
                             "skill": skill_id})
+        return
+    if kind == "heal" and eff.get("target") == "allies_lowest":
+        # "以200%的攻擊力回復我方體力最低的2人": ATK-sized, onto the N lowest-HP living
+        # allies (the caster included), not the caster alone.
+        mates = sorted((u for u in units if u.team == caster.team and u.alive),
+                       key=lambda u: u.hp)
+        amount = int(formula.effective_atk(caster) * pct / 100.0)
+        for who in mates[:max(1, int(eff.get("count") or 1))]:
+            if apply_damage:
+                who.hp = min(who.max_hp, who.hp + amount)
+            out.heals.append({"target": who.order, "amount": amount, "from": "rider"})
         return
     if kind == "heal":
         # Always ATK-based -- the rider's prose is "deals N% ATK as damage and recovers

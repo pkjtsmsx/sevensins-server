@@ -241,6 +241,154 @@ def heal_basis(r):
     return hp_kind()
 
 
+# ---- the Chinese clause readers -----------------------------------------------------
+#
+# Fallbacks for the four operandless effects whose numbers the English parsers above
+# could not find. Each reads the ORIGINAL note (`_note1`), split into clauses on the
+# Chinese separators, and looks only inside the clause that names the effect -- the
+# same discipline as the English readers, in the language the game was written in.
+# Where the English answered, these are never consulted.
+_ZH_SPLIT = re.compile(r"[，。；、\n]")
+_ZH_PCT = re.compile(r"(\d+(?:\.\d+)?)\s*[%％]")
+# "以25%機率", "30%的固定機率", "有40%固定機率" -- a chance, never a magnitude.
+_ZH_CHANCE = re.compile(r"(\d+(?:\.\d+)?)\s*[%％]\s*的?(?:固定)?機率")
+_ZH_EXTRA_TURN = re.compile(r"再度行動|再次行動|額外回合|額外行動|可以再行動")
+
+
+def _zh_clauses_with(note, word_re):
+    """-> [(own, prev)] for the clauses of `note` that contain `word_re`.
+
+    Numbers are read from `own` ONLY. The first cut prepended `prev` and read from
+    the join, and Poison Injection's gauge came out as 180 -- the damage coefficient
+    of the clause before. `prev` exists so a subject stated one clause earlier
+    ("行動後", "對我方全體") can name the side when `own` names none.
+    """
+    parts = [c for c in _ZH_SPLIT.split(note or "") if c.strip()]
+    out = []
+    for i, c in enumerate(parts):
+        if word_re.search(c):
+            out.append((c, parts[i - 1] if i else ""))
+    return out
+
+
+def _zh_side_of(own, prev, default=None):
+    side = _zh_side(own)
+    if side is None and prev:
+        side = _zh_side(prev)
+    return side if side is not None else default
+
+
+def _zh_magnitude(clause):
+    """-> the first percentage in the clause that is NOT a chance, or None."""
+    blanked = _ZH_CHANCE.sub(" ", clause)
+    m = _ZH_PCT.search(blanked)
+    return float(m.group(1)) if m else None
+
+
+def _zh_side(clause, default=None):
+    """-> caster / allies / targets from the clause's own side words."""
+    if re.search(r"目標|敵方|敵人|敵全體|對方", clause):
+        return "targets"
+    if re.search(r"我方|該\d*名|成員|全員", clause):
+        return "allies"
+    if re.search(r"自身|自己", clause):
+        return "caster"
+    return default
+
+
+def zh_heal(r):
+    """-> {percent, target, basis} from "回復自身20%最大體力" / "回復10%體力"."""
+    for c, prev in _zh_clauses_with(r.get("_note1"), re.compile(r"回復|恢復|補血")):
+        if "行動值" in c:                        # a GAUGE recovery, not HP
+            continue
+        pct = _zh_magnitude(c)
+        if pct is None or _is_damage_coefficient(r, pct):
+            continue
+        basis = "atk" if "攻擊力" in c else (
+            "caster_max_hp" if re.search(r"自身|自己", c) and "最大" in c else "max_hp")
+        # A heal with no stated side heals the caster: an unstated "回復N%體力" on an
+        # attack is the actor recovering, not the target.
+        return {"percent": pct, "target": _zh_side_of(c, prev, "caster"), "basis": basis}
+    return None
+
+
+def zh_gauge(r):
+    """-> {percent, target, chance_pct?} from the 行動值 clause, or an extra-turn clause.
+
+    "使自己可以再度行動" is a full refill of the caster's gauge -- percent 100 -- and the
+    number beside it ("10%的機率") is the CHANCE it happens, which the engine rolls.
+    """
+    note = r.get("_note1") or ""
+    for c, _prev in _zh_clauses_with(note, _ZH_EXTRA_TURN):
+        cm = _ZH_CHANCE.search(c)
+        out = {"percent": 100.0, "target": "caster", "source": "prose_zh"}
+        if cm:
+            out["chance_pct"] = float(cm.group(1))
+        return out
+    for c, prev in _zh_clauses_with(note, re.compile(r"行動值")):
+        m = re.search(r"行動值\s*([+\-－])\s*(\d+(?:\.\d+)?)\s*[%％]", c)
+        if m:
+            pct = float(m.group(2)) * (-1 if m.group(1) in "-－" else 1)
+        else:
+            pct = _zh_magnitude(c)
+            if pct is None or _is_damage_coefficient(r, pct):
+                continue
+            if re.search(r"減少|降低|下降|扣除", c) and not re.search(r"增加|提升|提高|回復", c):
+                pct = -pct
+        out = {"percent": pct, "target": _zh_side_of(c, prev, "caster"), "source": "prose_zh"}
+        cm = _ZH_CHANCE.search(c)
+        if cm:
+            out["chance_pct"] = float(cm.group(1))
+        return out
+    return None
+
+
+def zh_cd(r):
+    """-> {turns, target} from "技能冷卻-1" / "技能加速1回合" / "冷卻減少1"."""
+    for c, prev in _zh_clauses_with(r.get("_note1"), re.compile(r"冷卻|技能加速")):
+        turns = None
+        m = re.search(r"冷卻\s*([+\-－])\s*(\d+)", c)
+        if m:
+            turns = int(m.group(2)) * (-1 if m.group(1) in "-－" else 1)
+        else:
+            m = re.search(r"技能加速\s*(\d+)", c)
+            if m:
+                turns = -int(m.group(1))
+            else:
+                m = re.search(r"冷卻(減少|增加|延長|縮短)\s*(\d+)", c)
+                if m:
+                    turns = int(m.group(2)) * (-1 if m.group(1) in ("減少", "縮短") else 1)
+        if turns is None:
+            continue
+        return {"turns": turns, "target": _zh_side_of(c, prev, "caster")}
+    return None
+
+
+def zh_rider(r):
+    """-> the rider's percent from "額外造成125%攻擊力傷害" / "恢復6%體力"."""
+    note = r.get("_note1") or ""
+    # "額外造成125%攻擊力傷害" and the shorter "額外造成200%傷害" (ATK is the default basis).
+    m = re.search(r"額外(?:造成|再造成)\s*(\d+(?:\.\d+)?)\s*[%％]\s*(?:攻擊力)?(?:的)?傷害", note)
+    if m:
+        return {"kind": "bonus_damage", "percent": float(m.group(1)), "source": "prose_zh"}
+    # "以200%的攻擊力回復我方體力最低的2人" -- a heal sized in the CASTER's ATK, landing
+    # on the N lowest-HP allies (1 when unstated). The engine's rider heal used to reach
+    # only the caster; `target`/`count` carry the real recipients.
+    m = re.search(r"以\s*(\d+(?:\.\d+)?)\s*[%％]\s*的?攻擊力\s*(?:回復|恢復)([^，。]*)", note)
+    if m:
+        tail = m.group(2)
+        cnt = re.search(r"最低的?\s*(\d+)\s*人", tail)
+        out = {"kind": "heal", "percent": float(m.group(1)), "source": "prose_zh"}
+        if "我方" in tail or "最低" in tail:
+            out["target"] = "allies_lowest"
+            out["count"] = int(cnt.group(1)) if cnt else 1
+        return out
+    m = re.search(r"(?:回復|恢復)\s*(\d+(?:\.\d+)?)\s*[%％]\s*(?:的)?體力", note)
+    if m:
+        return {"kind": "heal", "percent": float(m.group(1)), "source": "prose_zh"}
+    return None
+
+
 def clause_percent(r, op):
     """-> the percentage stated next to THIS effect's own phrase, or None.
 
@@ -411,11 +559,14 @@ def gauge_effect(r):
 # "recovers the caster's Max HP by 15%", "recovers their HP by 35%".
 _PCT_ANY = re.compile(r"(\d+(?:\.\d+)?)\s*%")
 
-_COEF = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*(ATK|DEF|Max HP|HP)", re.I)
+_COEF = re.compile(r"(\d+(?:\.\d+)?)\s*[%％]\s*(?:of\s+)?(ATK|DEF|Max HP|HP)", re.I)
 # Chinese writes it either way round: `攻擊力95%` or `95%攻擊力`.
+# `％` (full-width) as well as `%`: "360％防禦力的傷害" is how every rank of Sweets
+# Sweet Heart is written, and with `%` alone the whole family compiled to a damage
+# effect with no coefficient -- a skill that animates and deals nothing.
 _COEF_ZH = re.compile(
-    r"(攻擊力|最大體力|防禦力)\s*(\d+(?:\.\d+)?)\s*%"
-    r"|(\d+(?:\.\d+)?)\s*%\s*(?:的)?\s*(攻擊力|最大體力|防禦力)")
+    r"(攻擊力|最大體力|防禦力)\s*(\d+(?:\.\d+)?)\s*[%％]"
+    r"|(\d+(?:\.\d+)?)\s*[%％]\s*(?:的)?\s*(攻擊力|最大體力|防禦力)")
 _ZH_BASIS = {"攻擊力": "ATK", "防禦力": "DEF", "最大體力": "MAX_HP"}
 
 
@@ -697,9 +848,16 @@ def effects(rows, r):
         elif op == OP_MODIFY_CD:
             entry = {"op": "modify_cd", "slot": i}
             entry.update(cd_effect(r))
+            zh = zh_cd(r)
+            if zh:                                   # the original language wins
+                entry.update(zh)
             out.append(entry)
-        elif op == OP_ATTACK_RIDER and attack_rider(r):
-            out.append({"op": "attack_rider", "slot": i, **attack_rider(r)})
+        elif op == OP_ATTACK_RIDER and (attack_rider(r) or zh_rider(r)):
+            rider = attack_rider(r) or {}
+            zh = zh_rider(r)
+            if zh:                                   # the original language wins
+                rider = {**rider, **zh}
+            out.append({"op": "attack_rider", "slot": i, **rider})
         elif op in OP_EFFECT_NO_OPERAND:
             # The opcode says WHAT; only prose says how much. A skill with an unstated
             # magnitude still executes the right kind of effect, which is strictly better
@@ -722,12 +880,28 @@ def effects(rows, r):
                      "source": ("prose" if pct is not None else None)}
             if op == 116:
                 entry.update(gauge_effect(r))
+                # THE ORIGINAL LANGUAGE WINS where it states a value; English fills the
+                # rest. "以25%機率恢復12%體力" read in English gave the CHANCE as the
+                # magnitude; the Chinese reader blanks chances before it looks.
+                zh = zh_gauge(r)
+                if zh:
+                    if zh.get("percent") is not None:
+                        entry.update(zh)
+                    elif entry.get("target") is None:
+                        entry["target"] = zh.get("target")
             elif name in ("heal", "revive"):
                 # Same recipient problem as the gauge: a heal on an attack skill goes to
                 # allies, not to the enemy being hit.
                 entry["target"] = clause_target(r, name)
                 if name == "heal":
                     entry["basis"] = heal_basis(r)
+                    zh = zh_heal(r)
+                    if zh:
+                        if zh.get("percent") is not None:
+                            entry["percent"], entry["source"] = zh["percent"], "prose_zh"
+                            entry["basis"] = zh["basis"]
+                        if entry.get("target") is None or zh.get("target"):
+                            entry["target"] = zh["target"] or entry.get("target")
             out.append(entry)
         else:
             # Not decoded. Kept OUT of `effects` on purpose: the engine executes

@@ -186,6 +186,36 @@ def check_numbers_come_from_the_original_language():
     check("passive clauses parse as glossary lines", lines.get("會心高揚I") == "常時暴擊率+4%", str(lines))
 
 
+def check_clause_numbers_come_from_the_original_language():
+    """Heal, gauge, cooldown and rider numbers are read from the Chinese clause first.
+
+    The English parsers took the first percentage near the keyword, which on "以25%機率
+    恢復14%體力" is the CHANCE; and they read "技能冷卻-1" -- a refresh -- as +1, a delay,
+    on 50 skills. Each case below is the Chinese clause, quoted.
+    """
+    rows = dd.rows("skill") or {}
+    r = rows.get(next(s for s, rr in rows.items() if (rr.get("_name_en") or "") == "Dream Script II"))
+    got = cs.zh_heal(r)
+    check("Dream Script II: 以25%機率恢復...14%體力 -> heal 14, not the 25% chance",
+          got and got["percent"] == 14.0, str(got))
+    r = rows.get(next(s for s, rr in rows.items() if (rr.get("_name_en") or "") == "Dancing Slash IV"))
+    got = cs.zh_cd(r)
+    check("Dancing Slash IV: 使自身技能冷卻-1 -> turns -1 on the caster",
+          got and got["turns"] == -1 and got["target"] == "caster", str(got))
+    r = rows.get(next(s for s, rr in rows.items() if (rr.get("_name_en") or "") == "Seductive Night VI"))
+    got = cs.zh_gauge(r)
+    check("Seductive Night VI: 使攻擊目標行動值-100% -> gauge -100 on the targets",
+          got and got["percent"] == -100.0 and got["target"] == "targets", str(got))
+    probe = {"_note1": "160%攻擊力的傷害，30%的機率暈眩，10%的機率使自己可以再度行動。", "_note1_en": ""}
+    got = cs.zh_gauge(probe)
+    check("再度行動 is a full gauge refill on the caster at the stated chance",
+          got and got["percent"] == 100.0 and got["target"] == "caster" and got.get("chance_pct") == 10.0, str(got))
+    probe = {"_note1": "180%攻擊力的傷害。使我方攻擊力最高者行動值增加40%。", "_note1_en": "", "_action": [], "_actID": []}
+    got = cs.zh_gauge(probe)
+    check("the damage coefficient in the previous clause is never the gauge percent",
+          got and got["percent"] == 40.0 and got["target"] == "allies", str(got))
+
+
 def check_a_condition_never_supplies_the_recipient():
     """The single highest-value invariant here, stated as a rule rather than a case.
 
@@ -250,6 +280,7 @@ def main():
                check_passives_read_the_granting_fragment,
                check_unnamed_traits_survive_a_by_stat_clause,
                check_numbers_come_from_the_original_language,
+               check_clause_numbers_come_from_the_original_language,
                check_a_condition_never_supplies_the_recipient,
                check_side_vocabulary_is_complete_for_this_pack,
                check_a_list_separator_does_not_split_a_shared_grant,

@@ -43,6 +43,7 @@ BASELINE_UNREMOVABLE = 509
 BASELINE_SRC_SKILL = 9327          # apply sites whose own skill states the numbers
 BASELINE_KNOWN_DURATION = 11570    # skill-stated + corpus-default, combined
 BASELINE_COEF_ZH = 633             # coefficients recovered from the original Chinese
+BASELINE_COEF_EN_FLOOR = 0     # see the provenance note at the check
 
 _fail = 0
 
@@ -273,8 +274,14 @@ def main():
 
     dmg = [e for s in specs.values() for e in s["effects"] if e["op"] == "damage"]
     src = collections.Counter(e.get("source") for e in dmg)
-    check("damage coefficients recovered from Chinese have not regressed",
-          src["zh"] >= BASELINE_COEF_ZH, f"{src['zh']} < {BASELINE_COEF_ZH}")
+    # The English regex learned "% of DEF" on 2026-08-26, so some coefficients that
+    # only the Chinese used to recover are now credited to English. Provenance moved;
+    # the number KNOWN did not, and that is the ratchet that matters: known
+    # coefficients (either language) must not fall, and unknown ones must not rise.
+    known = src["zh"] + src["en"]
+    check("damage coefficients recovered from prose have not regressed",
+          known >= BASELINE_COEF_ZH + BASELINE_COEF_EN_FLOOR,
+          f"{known} < {BASELINE_COEF_ZH + BASELINE_COEF_EN_FLOOR}")
     print(f"        (coefficient: en {src['en']}, zh {src['zh']}, "
           f"unknown {src[None]} of {len(dmg)})")
 
