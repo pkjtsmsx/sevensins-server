@@ -142,8 +142,10 @@ UNREMOVABLE_ZH_RE = re.compile(r"不可解除|不可清除|解除不可|無法�
 # 死亡" read as a 90% heal-over-tick is the worst case, and it happened. Anything from a
 # 若/當 up to the next clause break, and any "<N%" / "低於N%" comparison, is blanked
 # before the magnitude is looked for.
+# 當 must not match inside 相當於 ("equivalent to"): "吸收相當於75%攻擊力" is a shield
+# SIZE, and blanking it left every percent-sized shield with no number.
 THRESHOLD_ZH_RE = re.compile(
-    r"(?:若|當|如果)[^，。；]*?[%％][^，。；]*|[<>＜＞≤≥]\s*\d+(?:\.\d+)?\s*[%％]"
+    r"(?:若|(?<!相)當|如果)[^，。；]*?[%％][^，。；]*|[<>＜＞≤≥]\s*\d+(?:\.\d+)?\s*[%％]"
     r"|(?:低於|高於|不高於|不低於|超過|未滿)\s*\d+(?:\.\d+)?\s*[%％](?:以上|以下)?")
 
 
@@ -188,6 +190,20 @@ def parse_zh(body):
             break
     if UNREMOVABLE_ZH_RE.search(body):
         out["unremovable"] = True
+    # SHIELDS come in three sizes and the percent model holds one of them. "吸收相當於
+    # 7500點體力的傷害" is a FLAT amount (95 of 244 shield lines); "75%攻擊力" is sized
+    # in the CASTER's ATK; "施術者最大體力30%" in the caster's max HP; "自身最大體力70%"
+    # in the HOLDER's. Carried as `flat` and `basis` for the engine to size the shield
+    # with -- which it never did before: shield_hp was never set on apply at all.
+    m = re.search(r"(\d{2,6})\s*點", body)
+    if m:
+        out["flat"] = int(m.group(1))
+    if "攻擊力" in body:
+        out["basis"] = "atk"
+    elif re.search(r"施術者|施放者", body) and "體力" in body:
+        out["basis"] = "caster_max_hp"
+    elif "體力" in body:
+        out["basis"] = "max_hp"
     return out
 
 

@@ -104,6 +104,10 @@ class StatusEvent:
     stacks_now: int = 0
     shield_hp: int = 0
     kind: Optional[str] = None
+    # Shield sizing, from the prose: a flat point amount, or what the percentage is a
+    # percentage OF ("atk" / "caster_max_hp" / "max_hp"). See status.apply_event.
+    flat: Optional[float] = None
+    basis: Optional[str] = None
 
 
 @dataclasses.dataclass
@@ -312,7 +316,7 @@ def _status_event(caster, target, eff, rng, snapshot=None):
     return StatusEvent(
         target=target.order, status_id=st.get("id"), name=st.get("name"),
         applied=True, duration=dur, magnitude=numbers.get("magnitude"),
-        stacks=numbers.get("stacks"),
+        stacks=numbers.get("stacks"), flat=numbers.get("flat"), basis=numbers.get("basis"),
         unknown_duration=dur is None and not numbers.get("permanent"),
         permanent=bool(numbers.get("permanent")))
 

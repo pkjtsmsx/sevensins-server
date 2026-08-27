@@ -188,8 +188,40 @@ def apply_event(unit, event, caster=None):
         source_atk=int(getattr(caster, "atk", 0) or 0) if caster is not None else None,
         source_order=getattr(caster, "order", None) if caster is not None else None,
     )
+    if active.kind == "shield":
+        active.shield_hp = shield_size(unit, event, caster)
     unit.statuses.append(active)
     return active
+
+
+def shield_size(unit, event, caster=None):
+    """-> the HP a freshly applied shield absorbs before it breaks.
+
+    NEVER COMPUTED BEFORE 2026-08-26. `absorb` was in place and `shield_hp` was a field
+    on Active, but nothing set it on apply, so all 525 shield applications in the
+    compiled cast skills started at 0 and absorbed nothing -- Life Shield, Field
+    Shield, every 金剛 and 護盾 in the game were icons.
+
+    Three sizes, all from the status's own Chinese line (status_prose.parse_zh):
+    a flat amount ("7500點"), a percentage of the CASTER's ATK ("75%攻擊力"), or a
+    percentage of a max HP -- the caster's ("施術者最大體力30%") or the holder's
+    ("自身最大體力70%"). A shield whose line states none of these stays 0, visibly,
+    rather than being given a made-up size.
+    """
+    flat = getattr(event, "flat", None)
+    if flat:
+        return int(flat)
+    mag = getattr(event, "magnitude", None)
+    if mag is None:
+        return 0
+    basis = getattr(event, "basis", None) or "max_hp"
+    if basis == "atk":
+        base = float(getattr(caster, "atk", 0) or 0) if caster is not None else 0.0
+    elif basis == "caster_max_hp":
+        base = float(getattr(caster, "max_hp", 0) or 0) if caster is not None else 0.0
+    else:
+        base = float(getattr(unit, "max_hp", 0) or 0)
+    return int(base * float(mag) / 100.0)
 
 
 # What each immunity status blocks, derived once from its registry row.

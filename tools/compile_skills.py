@@ -741,6 +741,28 @@ def corpus_defaults(rows):
 DEFAULT_MIN_AGREEMENT = 0.8
 
 
+def zh_inline_shield(r):
+    """-> numbers for a shield the note sizes INLINE, or None.
+
+    The clause that names the shield carries its size and, in parentheses, its turns:
+    "並對擁有侍奉的目標附加15000點護盾(3回合)", "張開防禦護盾7000點(2回合)", or a
+    percentage form "施放相當於攻擊力60%的護盾". The glossary readers never see these
+    because there is no `※ 護盾：` line -- the whole definition is the clause.
+    """
+    note = r.get("_note1") or ""
+    for c in _ZH_SPLIT.split(note):
+        if "盾" not in c:
+            continue
+        out = sp.parse_zh(c)                    # duration/percent/flat/basis, same rules
+        m = re.search(r"\((\d+)\s*回合\)", c)
+        if m and out.get("duration") is None:
+            out["duration"] = int(m.group(1))
+        if out.get("flat") or out.get("magnitude") is not None:
+            out["source"] = "inline_zh"
+            return out
+    return None
+
+
 def status_numbers(rows, skill_row, status_id):
     """-> the duration/magnitude for THIS skill applying THIS status, with provenance.
 
@@ -770,6 +792,15 @@ def status_numbers(rows, skill_row, status_id):
         if zh_key in own_zh:
             got = sp.parse_zh(own_zh[zh_key])
             got["source"] = "cast_zh"
+            return got
+
+    # A SHIELD stated inline rather than on a glossary line: "附加15000點護盾(3回合)",
+    # "張開防禦護盾7000點(2回合)". 105 of the 151 shield applications on cast skills
+    # had no line of their own and were unsized -- and an unsized shield absorbs nothing.
+    if zh_name and re.search(r"盾", zh_name) or re.search(
+            r"shield", (rows.get(status_id) or {}).get("_name_en") or "", re.I):
+        got = zh_inline_shield(skill_row)
+        if got:
             return got
 
     name = (rows.get(status_id) or {}).get("_name_en") \

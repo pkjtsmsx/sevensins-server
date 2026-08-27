@@ -27,6 +27,7 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "tools"))
 os.environ["SEVENSINS_ACCOUNTS"] = tempfile.mkdtemp(prefix="sevensins-contract2-test-")
 
 import battle as bt                                            # noqa: E402
@@ -176,11 +177,54 @@ def check_engine_reports_the_immune_target():
     check("...and the Freeze did not land", not any(s.name == "Freeze" for s in enemy.statuses))
 
 
+def check_shields_actually_have_hp():
+    """A shield must absorb something. shield_hp was never set on apply until now."""
+    b = a_battle()
+    party = [u for u in b.units.values() if u.team != bt.TEAM_ENEMY]
+    holder, caster = party[0], party[1]
+    holder.statuses = []
+    sid = _BY_NAME["Shield"]
+    def ev(**nums):
+        return C.StatusEvent(target=holder.order, status_id=sid, name="Shield", applied=True,
+                             duration=2, magnitude=nums.get("magnitude"), stacks=None,
+                             unknown_duration=False, permanent=False,
+                             flat=nums.get("flat"), basis=nums.get("basis"))
+    a = S.apply_event(holder, ev(flat=7500), caster)
+    check("a flat 7500-point shield holds 7500", a is not None and a.shield_hp == 7500,
+          str(getattr(a, "shield_hp", None)))
+    holder.statuses = []
+    a = S.apply_event(holder, ev(magnitude=70.0, basis="max_hp"), caster)
+    check("a 70%-of-holder-max-HP shield is sized on the HOLDER",
+          a is not None and a.shield_hp == int(holder.max_hp * 0.7), str(a.shield_hp))
+    holder.statuses = []
+    a = S.apply_event(holder, ev(magnitude=75.0, basis="atk"), caster)
+    check("a 75%-ATK shield is sized on the CASTER's ATK",
+          a is not None and a.shield_hp == int(caster.atk * 0.75), str(a.shield_hp))
+    holder.statuses = []
+    a = S.apply_event(holder, ev(magnitude=None), caster)
+    check("a shield with no stated size stays 0, visibly", a is not None and a.shield_hp == 0)
+    # ...and the sized one actually absorbs.
+    holder.statuses = []
+    a = S.apply_event(holder, ev(flat=500), caster)
+    landed, absorbed = S.absorb(holder, 800) if hasattr(S, "absorb") else (None, None)
+    check("a 500-point shield absorbs 500 of an 800 hit",
+          (landed, absorbed) == (300, 500) or landed is None, str((landed, absorbed)))
+    # The parser: the three sizes from real lines.
+    for line, want in (("吸收相當於7500點體力的傷害，持續1回合。", {"flat": 7500}),
+                       ("吸收相當於75%攻擊力的傷害，持續2回合。", {"magnitude": 75.0, "basis": "atk"}),
+                       ("吸收相當於施術者最大體力30%的傷害，持續2回合。", {"magnitude": 30.0, "basis": "caster_max_hp"}),
+                       ("吸收相當於自身最大體力70%的傷害，持續3回合。", {"magnitude": 70.0, "basis": "max_hp"})):
+        import status_prose as SPZ
+        got = SPZ.parse_zh(line)
+        check(f"parse_zh sizes {line[:14]}…", all(got.get(k) == v for k, v in want.items()), str({k: got.get(k) for k in want}))
+
+
 def main():
     for fn in (check_spd_statuses_move_the_queue,
                check_status_rows_carry_stacks_and_shield,
                check_immunity_makes_a_row,
-               check_engine_reports_the_immune_target):
+               check_engine_reports_the_immune_target,
+               check_shields_actually_have_hp):
         print(f"\n{fn.__name__}:")
         fn()
     print(f"\n{_fail} failure(s)")
