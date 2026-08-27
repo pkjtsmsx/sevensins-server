@@ -43,8 +43,8 @@ From `AttackBehavior.OnDamage` (0x1BE2A18):
 `Mode == 5` is special-cased one level up in `OnDamageAndNumber`: the unit lookup is
 skipped entirely, so such a row names no unit.
 
-`status` entries are `[order, skill_id, rounds]` -- each names its own unit, so they can
-all hang off the lead row.
+`status` entries are `[order, skill_id, rounds, lv, value, actOn]` -- each names its own
+unit, so they can all hang off the lead row. See _status_row for what the last three do.
 """
 
 from . import status as _status    # safe: status does not import wire
@@ -54,6 +54,40 @@ ROUND_PERMANENT = -1          # see battle.ROUND_PERMANENT
 MODE_HP = 1
 MODE_REVIVE = 2
 MODE_GAUGE = 4
+# DamageMode.Immunity: a floating "IMMUNE" text and nothing else -- HasHP is false for
+# it, so the row moves no HP. Miss (10098) and Forbid (10099) sit beside it in the
+# client's enum; ImmunityFTHandler.OnCondition accepts all three.
+MODE_IMMUNE = 10097
+
+# StatusST.actOn values the client's shield bar sums `value` over
+# (UICharStatus.SyncShield: 61 <= actOn <= 63). Any one of the three will do; the
+# client never distinguishes them anywhere else we could find.
+ACT_ON_SHIELD = 61
+
+
+def _status_row(order, sid, rounds, ev=None):
+    """-> one `status` entry: [order, skill_id, rounds, lv, value, actOn].
+
+    Six elements, not three. StatusST's per-action constructor reads [3]=lv, [4]=value
+    and [5]=actOn once the row has more than three entries, and the client DRAWS them:
+    UICharStatus.RefreshStatuIcons puts `lv` on the icon as a second label (the stack
+    count -- "Spirit x5"), and SyncShield sums `value` over rows whose actOn is a
+    shield type to fill the shield bar. Three-element rows are legal and were what we
+    sent, which is why no stack count and no shield ever appeared on a phone.
+
+    `lv` = stack count is a reading of the client, not a fact from the pack: the
+    label is drawn only when > 0 and stackable statuses are the ones whose names
+    carry "(N)". It is the only sensible occupant of that slot.
+    """
+    lv = value = act_on = 0
+    if ev is not None and rounds != 0:
+        lv = int(getattr(ev, "stacks_now", 0) or 0)
+        if lv <= 1:
+            lv = 0                      # a single stack draws no count
+        if getattr(ev, "kind", None) == "shield":
+            value = int(getattr(ev, "shield_hp", 0) or 0)
+            act_on = ACT_ON_SHIELD
+    return [order, sid, rounds, lv, value, act_on]
 
 # `Extra` is List<List<DamageInfo>> and `OnDamage` recurses through it, so follow-up
 # outcomes could nest there. We flatten into the parent's groups instead: nesting makes
@@ -100,20 +134,20 @@ def _status_rows(outcome):
             # rows left the client drawing statuses the server had already stripped:
             # Lucifer's stance swap looked like it granted The Fallen and kept The
             # Divine, because the strip was never sent.
-            rows.append([ev.target, sid, 0])
+            rows.append(_status_row(ev.target, sid, 0))
             continue
         if ev.permanent:
             # -1, not a big number: UpdateStatusRound decrements only when round >= 1
             # and deletes at exactly 0, so a negative round is never counted down.
             # Sending 1 here made "lasts the entire battle" statuses vanish at the end
             # of the turn that applied them.
-            rows.append([ev.target, sid, ROUND_PERMANENT])
+            rows.append(_status_row(ev.target, sid, ROUND_PERMANENT, ev))
             continue
         # An unknown duration must not silently become 0 -- the client counts `rounds`
         # down itself, and 0 now means REMOVE. 1 is the minimum that still shows the
         # icon; the uncertainty is recorded in the spec, not here.
         rounds = ev.duration if ev.duration is not None else 1
-        rows.append([ev.target, sid, max(1, int(rounds))])
+        rows.append(_status_row(ev.target, sid, max(1, int(rounds)), ev))
     for child in outcome.children:
         rows.extend(_status_rows(child))
     return rows
@@ -188,6 +222,14 @@ def attack_json(outcome, *, caster_order=None, skill_id=None):
     # The caster is the fallback when the skill resolved no targets at all -- a
     # caster-only gauge effect is the case that reaches here, and a combo entry still
     # has to name somebody.
+    # "IMMUNE" for every target an immunity turned a status away from. Group 0 is
+    # keyed on the UNIT alone (see _assert_invariants), so a target that already has
+    # a row there -- it was also hit -- cannot take a second one; the damage number
+    # is what it gets, and only an untouched target shows the text. The client's
+    # HasHP is false for this mode, so the row moves no HP.
+    for who in outcome.immune:
+        if who and not any(r["c"] == who for r in lead):
+            lead.append(_row(who, MODE_IMMUNE, 0))
     if not any(groups):
         who = outcome.targets[0] if outcome.targets else outcome.caster
         if who:

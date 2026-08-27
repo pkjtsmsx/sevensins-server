@@ -5,12 +5,16 @@
 
 Seen on a phone 2026-08-26: the Guild Weekly boss stood "frozen, 1 turn remaining" for
 five turns while the server's saved battle showed she had no Freeze at all. The client
-does not count a server-round status down by itself; it keeps the icon until a row
-with rounds=0 removes it (docs: status wire, 0 = remove, -1 = permanent). All three
-expiry paths -- the actor's own tick in end_turn, the skipped-turn tick in
-_start_of_turn, and _age_gauge_blocks -- were discarding tick_duration's result, so no
-expiry ever produced a row. A control status can ONLY expire on the skipped-turn path
-(its holder never acts), which is why this showed up as a permanently frozen boss.
+counts a status's rounds down ONLY for the unit that just acted (TurnEndState.OnEnter
+-> BattleUnit.UpdateStatusRound on ActionOrderList[0], read out of the binary
+2026-08-26); for everyone else it keeps the icon until a row with rounds=0 removes it
+(status wire: 0 = remove, -1 = permanent). The skipped-turn tick in _start_of_turn and
+_age_gauge_blocks were discarding tick_duration's result, so those expiries never
+produced a row -- and a control status can ONLY expire on the skipped-turn path (its
+holder never acts), which is why this showed up as a permanently frozen boss.
+
+The actor's own expiries must NOT send a row: the client removes those itself, and
+removeStatusDataByID on an id it no longer holds replies with ServerRPCReportError.
 
 The assertions are on the queued rows and on what _drain_pending_status attaches to
 an outgoing attack, because that attachment is the whole of what the phone sees.
@@ -86,7 +90,7 @@ def check_skipped_turn_expiry_is_sent():
           str(rows))
     wire = _drained(b)
     sid = S.wire_status_id(FREEZE)
-    check("the next attack carries [enemy, Freeze, 0]", [enemy.order, sid, 0] in wire,
+    check("the next attack carries [enemy, Freeze, 0, ...]", any(r[:3] == [enemy.order, sid, 0] for r in wire),
           str(wire))
 
 
@@ -103,6 +107,19 @@ def check_gauge_block_expiry_is_sent():
     rows = _rows_for(b, unit, HEADWIND)
     check("a removal row was queued for it", len(rows) == 1 and rows[0]["applied"] is False,
           str(rows))
+
+
+def check_actor_expiry_sends_nothing():
+    """The ACTOR's own expiry is the client's to handle -- no row, or it reports an error."""
+    b = a_battle()
+    actor = b.acting_unit()
+    S.apply_event(actor, _ev(actor, 6002, "Fracture", 1))       # a 1-turn debuff on the actor
+    b._pending_status_rows = []
+    b.end_turn()
+    check("the actor's 1-turn status expired on its own end_turn",
+          not any(s.status_id == 6002 for s in actor.statuses))
+    check("...and NO removal row was queued for it (the client removes it at TurnEnd)",
+          not _rows_for(b, actor, 6002), str(_rows_for(b, actor, 6002)))
 
 
 def check_a_surviving_status_sends_nothing():
@@ -125,6 +142,7 @@ def check_a_surviving_status_sends_nothing():
 def main():
     for fn in (check_skipped_turn_expiry_is_sent,
                check_gauge_block_expiry_is_sent,
+               check_actor_expiry_sends_nothing,
                check_a_surviving_status_sends_nothing):
         print(f"\n{fn.__name__}:")
         fn()

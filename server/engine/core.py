@@ -98,6 +98,12 @@ class StatusEvent:
     stacks: Optional[int] = None
     unknown_duration: bool = False
     permanent: bool = False
+    # Filled in once the event has LANDED, from the resulting Active: the client's
+    # status row has slots for these (StatusST.lv / .value / .actOn) and draws the stack
+    # count on the icon and the shield amount on the shield bar from them.
+    stacks_now: int = 0
+    shield_hp: int = 0
+    kind: Optional[str] = None
 
 
 @dataclasses.dataclass
@@ -111,6 +117,10 @@ class Outcome:
     heals: List[dict] = dataclasses.field(default_factory=list)
     gauge: List[dict] = dataclasses.field(default_factory=list)
     revives: List[dict] = dataclasses.field(default_factory=list)
+    # Targets an immunity refused a status on. The client has a floating text for it
+    # (DamageMode.Immunity = 10097 -> "IMMUNE"); silently dropping the application
+    # left the player with no idea why a debuff did nothing.
+    immune: List[str] = dataclasses.field(default_factory=list)
     # Signed cooldown changes: negative refreshes, positive delays. The gauge and the
     # cooldown are both server-authoritative and travel in `sync`/`skill_list`, not as
     # DamageInfo rows -- see wire.py on why mode 4 is never emitted.
@@ -389,8 +399,20 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
                 # Land it on the unit as STATE, not just on the wire. The unit is shared
                 # with the old engine (battle.Unit subclasses Unit), so this is the same
                 # list everything else reads.
-                if apply_damage and _status.apply_event(tgt, ev, caster) is None:
-                    continue          # blocked by an immunity -- do not report it either
+                if apply_damage:
+                    active = _status.apply_event(tgt, ev, caster)
+                    if active is None:
+                        # Blocked by an immunity. Not a status row -- but the client
+                        # can SAY so: an "IMMUNE" floating text (DamageMode 10097).
+                        if tgt.order not in out.immune:
+                            out.immune.append(tgt.order)
+                        continue
+                    # What the client draws for this status comes from the landed
+                    # Active, not the event: the stack count after this application
+                    # and the shield amount (only a shield has one).
+                    ev.stacks_now = int(getattr(active, "stacks", 1) or 1)
+                    ev.shield_hp = int(getattr(active, "shield_hp", 0) or 0)
+                    ev.kind = getattr(active, "kind", None)
                 # A clause may name the status this one REPLACES ("grants the caster The
                 # Fallen and removes its the Divine effect"). Only once it landed --
                 # an application an immunity blocked must not strip anything.

@@ -497,7 +497,7 @@ def main():
           js["caster"] == "101" and js["skill"] == 2087111)
     check("statuses hang off the lead row",
           bool(js["data"][0][0]["status"])
-          and all(len(e) == 3 for e in js["data"][0][0]["status"]))
+          and all(len(e) == 6 for e in js["data"][0][0]["status"]))
 
     # Found on device: a mode-4 (move gauge) DamageInfo row hangs the fight outright.
     # Every skill carrying `modify_gauge` stalled -- Lucifer's Eclipse Slash, Metatron's

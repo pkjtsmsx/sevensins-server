@@ -31,6 +31,7 @@ from engine import core as _engine_core
 from engine import status as _engine_status
 from engine import passives as _engine_passives
 from engine import specs as _engine_specs
+from engine import wire as _engine_wire
 
 # The move CHOOSER, same shape of escape hatch as the engine switch above and for the
 # same reason: a bad weight table should be one environment variable away from the old
@@ -2170,6 +2171,20 @@ def _status_wire_id(st):
     return _engine_status.wire_status_id(sid)
 
 
+def _status_extras(st):
+    """-> (lv, value, actOn) the client draws for one live Active.
+
+    lv is the stack count (drawn on the icon when > 1), value the shield amount and
+    actOn the shield marker the shield bar sums over -- see engine.wire._status_row
+    for where each of those was read out of the client.
+    """
+    stacks = int(getattr(st, "stacks", 1) or 1)
+    lv = stacks if stacks > 1 else 0
+    if getattr(st, "kind", None) == "shield":
+        return (lv, int(getattr(st, "shield_hp", 0) or 0), _engine_wire.ACT_ON_SHIELD)
+    return (lv, 0, 0)
+
+
 def _status_round(st):
     rem = getattr(st, "remaining", None)
     if rem is None:
@@ -2489,10 +2504,13 @@ class Battle:
     def _queue_expired(self, unit, expired):
         """Queue a round-0 removal row for every status that just fell off `unit`.
 
-        The client keeps a status drawn until a row says otherwise -- it does not
-        count server rounds down on its own (docs: status wire, 0 = remove). Every
-        expiry path must therefore come through here; a removal that stays
-        server-side is an icon that stays on the phone.
+        For the expiries the client CANNOT see. It counts rounds down only for the unit
+        that just acted (TurnEndState -> UpdateStatusRound on ActionOrderList[0]); a
+        unit whose turn was SKIPPED, or whose gauge block aged on the battle's clock,
+        never has a TurnEnd on the client, so its expired statuses stay drawn until a
+        row says otherwise (status wire: 0 = remove). That is the frozen-boss icon from
+        a real phone, 2026-08-26. The actor's own expiries deliberately do NOT come
+        through here -- see end_turn.
         """
         self._queue_status_rows([
             {"target": unit.order, "status_id": st.status_id, "applied": False}
@@ -2530,8 +2548,22 @@ class Battle:
             rounds = 0 if not ch.get("applied") else (
                 ROUND_PERMANENT if ch.get("duration") is None
                 else max(1, int(ch["duration"])))
-            lead.setdefault("status", []).append([ch["target"], sid, rounds])
+            # Six elements, same layout as the engine's rows -- see wire._status_row.
+            # Out-of-band changes come from marker scripts and expiries; the stack
+            # count and shield amount are read off the unit's live Active, if any.
+            lead.setdefault("status", []).append(
+                [ch["target"], sid, rounds, *self._status_row_extras(ch, rounds)])
         self._pending_status_rows = []
+
+    def _status_row_extras(self, ch, rounds):
+        """-> (lv, value, actOn) for an out-of-band status row. Zeros on removal."""
+        if rounds == 0:
+            return (0, 0, 0)
+        unit = self.units.get(ch.get("target"))
+        for st in getattr(unit, "statuses", []) if unit else []:
+            if getattr(st, "status_id", None) == ch.get("status_id"):
+                return _status_extras(st)
+        return (0, 0, 0)
 
     def status_datas(self):
         """BattleDatas.status -- every unit's CURRENT statuses, so the client can draw
@@ -2546,7 +2578,13 @@ class Battle:
                 if sid is None:
                     continue
                 # [round, value, actOn, _, _, lv] -- index 5 is read unconditionally.
-                rows[str(sid)] = [_status_round(st), 0, 0, 0, 0, 0]
+                # The battle-open layout is [round, value, actOn, ?, ?, lv] -- NOT the
+                # per-action order. StatusST's second constructor reads [0], [1], [2]
+                # and [5]; six entries is the floor or it throws inside battle load.
+                # value/actOn carry the shield amount so a resumed fight draws the
+                # shield bar; lv the stack count so "x5" survives a reconnect.
+                lv, value, act_on = _status_extras(st)
+                rows[str(sid)] = [_status_round(st), value, act_on, 0, 0, lv]
             if rows:
                 out[order] = rows
         return out
@@ -2770,12 +2808,14 @@ class Battle:
             _engine_passives.fire_all(
                 _engine_passives.AFTER_ACTION, [acted], list(self.units.values()),
                 fired=getattr(self, "_passives_fired", None))
-            # A resolved turn spends a turn of the actor's own statuses -- and the
-            # client is TOLD what fell off. It never counts a server-round status down
-            # itself: it waits for the round-0 removal row, and discarding this return
-            # left a boss wearing an expired Freeze icon "1 turn" forever on a real
-            # phone (2026-08-26). Same on the two other expiry paths below.
-            self._queue_expired(acted, _engine_status.tick_duration(acted))
+            # A resolved turn spends a turn of the actor's own statuses. NO removal
+            # row for these, on purpose: the client decrements the ACTOR's statuses
+            # itself in TurnEndState.OnEnter (BattleUnit.UpdateStatusRound on
+            # PlayerBattle.GetFirst(), i.e. ActionOrderList[0]) and removes what
+            # reaches 0 -- and removeStatusDataByID on an id it no longer holds
+            # answers with ServerRPCReportError. The two paths below are the ones the
+            # client cannot see, because their holder never has a TurnEnd.
+            _engine_status.tick_duration(acted)
         self._age_gauge_blocks()
         self._roll_turn_order()
         self.round += 1

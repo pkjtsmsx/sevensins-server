@@ -55,7 +55,8 @@ import design_data as dd                                       # noqa: E402
 from engine import specs as _specs                             # noqa: E402
 from engine import status as _status                           # noqa: E402
 
-VALID_MD = {1, 2, 3, 4, 5}
+VALID_MD = {1, 2, 3, 4, 5}  # noqa: E501
+VALID_MD = VALID_MD | {10097}   # DamageMode.Immunity -- an "IMMUNE" floating text, moves no HP
 
 
 def check_wire(combo, battle):
@@ -99,7 +100,7 @@ def check_wire(combo, battle):
                 # [0], [1] and [2] behind `size <= 1` / `size <= 2` guards that throw
                 # ArgumentOutOfRange, and skips a 1-element row outright -- so a short
                 # row either kills the turn or silently drops the status.
-                if not (isinstance(st, list) and len(st) == 3):
+                if not (isinstance(st, list) and len(st) in (3, 6)):
                     bad.append(f"group {gi} status row malformed: {st!r}")
                     continue
                 if st[0] not in battle.units:

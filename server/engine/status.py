@@ -333,8 +333,10 @@ def tick_duration(unit):
     Returns the expired Active objects, not names: the caller must be able to tell the
     CLIENT, and the wire row needs the status id. Discarding this return is how a
     Freeze that had expired server-side stayed drawn on the boss with "1 turn left" on
-    a real phone (2026-08-26) -- the client never counts a server-round status down
-    itself, it waits for the round-0 removal row, and nothing ever sent one.
+    a real phone (2026-08-26). The client counts rounds down ONLY for the unit that
+    just acted (TurnEndState.OnEnter -> UpdateStatusRound on ActionOrderList[0]); a
+    unit whose turn is skipped never gets a TurnEnd there, so its expiries need a
+    round-0 row from us. See battle.Battle._queue_expired for which paths send one.
     """
     expired = []
     for st in list(unit.statuses):

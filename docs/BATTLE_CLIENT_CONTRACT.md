@@ -895,3 +895,70 @@ Must be invented by us:
 
 Related memory: [[sevensins-battle]], [[sevensins-move-gauge-and-swings]],
 [[decompile-dont-guess]].
+
+## Addendum, 2026-08-26 -- read from the binary in IDA, and what each fact cost us
+
+Every item below is a decompiled client function; addresses are from the EN 2.2.7
+`libil2cpp.so`. Each one changed server behaviour the same day.
+
+### The client counts status rounds down for ONE unit: the actor
+
+`TurnEndState.OnEnter` (0x196E268) calls `BattleUnit.UpdateStatusRound` (0x196E4A8) on
+`PlayerBattle.GetFirst()` (0x168B270), which is `BattleDatas.ActionOrderList[0]` -- the
+unit that just acted. `HandleAttack` does NOT call `UpdateTimeLine`, so at TurnEnd the
+head of the list is still the actor. Nothing else on the client ever decrements a
+round. Two consequences the server must honour:
+
+- A unit whose turn the SERVER skips (immobilised, or gauge-blocked and aged on the
+  battle's clock) never has a TurnEnd on the client, so its expired statuses stay drawn
+  until a round-0 row removes them. That was the "boss frozen for five turns" icon.
+- The actor's own expiries must NOT get a removal row: the client already removed
+  them, and `removeStatusDataByID` (0x197C3D0) on an id it no longer holds calls
+  `ServerRPCReportError`. `battle.Battle._queue_expired` is wired to exactly this split.
+
+### `sync` SPD feeds the client's own action-line prediction
+
+`BattleUnitManager.GetNextAction` (0x197E100) predicts the "next" badge by running
+`(100 - scv) / SPD` over `LightBattleChar.SPD`, which `SyncData` (0x197D2BC) sets from
+`sync[3]` every turn. So the server must send the EFFECTIVE speed, and -- the engine bug
+this surfaced -- must use it too: `fill_time`, `fill_gauge` and `_roll_turn_order` had
+been reading raw `spd`, so every SPD status in the game was cosmetic.
+
+`SyncData` sets exactly MaxHP / HP / Scv / SPD and marks a unit dead when HP was >= 1
+and is now 0. It carries NO statuses; those arrive only via attack rows (per action) and
+`BattleDatas.status` (battle open / reconnect).
+
+### `StatusST` is six wide, and the client draws the last three
+
+```
+per-action  .ctor(List<int>)           [0]=target [1]=skillID [2]=round [3]=lv [4]=value [5]=actOn
+battle-open .ctor(int skillID, List)   [0]=round  [1]=value   [2]=actOn                 [5]=lv
+```
+
+- `UICharStatus.RefreshStatuIcons` (0x2000E00) draws TWO labels per icon: `round` and
+  `lv`, each only when > 0. `lv` is the stack count (an inference from the client -- it
+  is the only sensible occupant, and stackable rows are the ones named "(N)").
+- `UICharStatus.SyncShield` (0x2000B2C) fills the shield bar by summing `value` over the
+  unit's statuses whose `actOn` is in `StatusActOn.ShielStart..ShieldEnd` = 61..63,
+  divided by MaxHP. No other reader of `value`/`actOn` was found. We had sent
+  `[target, id, round]` and `[round, 0, 0, 0, 0, 0]`, so no stack count and no shield
+  ever rendered. `engine.wire._status_row` and `battle._status_extras` now fill them.
+
+### `DamageMode` has floating-text-only modes
+
+`DamageMode` (TypeDefIndex 9110): HP=1 Reborn=2 CD=3 SCV=4 Status=5 BuffText=6
+DebuffText=7 **Immunity=10097 Miss=10098 Forbid=10099**. `ImmunityFTHandler.OnCondition`
+(0x1970EC8) accepts the last three; `DamageInfo.HasHP` (0x168708C) is false for them, so
+such a row moves no HP. The server now sends a 10097 row for a target an immunity turned
+a status away from -- but only when that target has no other row in group 0, which the
+client keys on the unit alone.
+
+### Confirmed, no change needed
+
+- `onAddStatus` (0x197B058) is pure FX/animator bookkeeping: the client applies no
+  immunity, skip or stacking logic of its own. Battle is server-authoritative.
+- `UpdateStatus` (0x197C680): `args[2] == 0` -> remove by id, else insert (replacing a
+  same-id entry -- a re-application refreshes rather than stacks on the client).
+- `DamageInfo.IsDamage` (0x16870B4): Mode 1 with `Damage < 0`. Damage rides negative.
+- `HandleJudge` (0x1689260): `intargs[1..2]` gate skill slots 1..2 (`== 0` means
+  enabled); `intargs[3..5]` land in the actor's CharData lists index 1.
