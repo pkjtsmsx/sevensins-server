@@ -8,6 +8,10 @@ the game already ships.
 `docs/` holds the subsystem knowledge — read the relevant one before touching a subsystem,
 they are written to be read. This file is about *how to operate*, not what exists.
 
+**Setting up first?** `README.md` is the overview and `docs/BRINGUP.md` is the walkthrough:
+a fresh clone passes lint and fails every other suite until you supply the game data, which
+is not and cannot be in this repo. `python3 tools/check_setup.py` says what is missing.
+
 ---
 
 ## 1. The evidence hierarchy
@@ -172,17 +176,26 @@ who has not been told will eventually try it.
   redistribute.
 - **`dist/`** — built release payloads (APKs plus the asset tar).
 
-**Generated, ignored, but still SHIPPED.** `server/battle_data/skills/`, `statuses.json`
-and `cinematic_swings.json` are build artifacts of `tools/compile_skills.py` /
-`compile_statuses.py`, deliberately untracked so nobody diffs 12 MB of generated JSON — but
-`build_hostapp_update.py` reads the working tree, not git, so they *do* go to the phone. A
-fresh clone must run both compilers before anything battle-related works, and before
-building an update.
+**Generated, ignored, but still SHIPPED.** `server/battle_data/skills/` and `statuses.json`
+are build artifacts of `tools/compile_skills.py` / `compile_statuses.py`, deliberately
+untracked so nobody diffs 12 MB of generated JSON — but `build_hostapp_update.py` reads the
+working tree, not git, so they *do* go to the phone. A fresh clone must run both compilers
+before anything battle-related works, and before building an update. (`cinematic_swings.json`
+is also compile_skills output and is listed in `.gitignore`, but it was tracked before that
+rule existed, so the rule is a no-op for it and a clone still gets a copy.)
+
+Three more generated files are untracked because they quote the game's own text verbatim:
+`skill_effects.json` (unmatched clauses), `status_catalog.json` (status descriptions) and
+`docs/avg_decisions.json` (scene dialogue). Nothing in `server/` reads any of them at
+runtime — they are analysis output — and `tools/parse_skills.py`,
+`tools/extract_status_catalog.py` and `tools/avg_decisions.py --json` rebuild them.
 
 One more thing a contributor should know rather than discover: **commits carry the git
-identity configured on the machine**, and this repo's history is public to anyone it is
-handed to. Set `user.name` / `user.email` to whatever you are willing to have in it before
-your first commit.
+identity configured on the machine**, and this repository is public — every commit's author
+and email are visible to anyone, permanently, and rewriting that after the fact means
+rewriting history. Set `user.name` / `user.email` to whatever you are willing to publish
+*before* your first commit. GitHub's `<id>+<user>@users.noreply.github.com` form works if
+you would rather not publish a real address.
 
 ## 11. Where the trust boundary actually sits
 
@@ -195,30 +208,17 @@ repo authenticates. The only other delivery path is pushing a snapshot over adb,
 needs physical access to a device. So a contributor can build an update and cannot deliver
 one, which is the intended shape.
 
-**What holds the line is that GitHub account, and nothing else.** `UpdateManager` fetches
-`update.json` and `server_update.zip` from the same hardcoded URL and checks the zip's
-sha256 against that manifest:
-
-```java
-String actualSha = sha256Hex(zipFile);
-if (!actualSha.equalsIgnoreCase(sha256))     // ...from the manifest at the same URL
-```
-
-That is an **integrity** check — it catches a corrupted download. It is **not** an
-authenticity check, because both halves come from the same place, and nothing is signed.
-Whoever can write to that release repo can push arbitrary Python to every device that taps
-Check for updates, running in the app sandbox with access to `accounts/`. In practice: 2FA
-on that account, and no long-lived `repo`-scoped token lying about, IS the security of
-every device on the channel.
+`UpdateManager` checks the downloaded zip's sha256 against the manifest it fetched
+alongside it. Both come from the same place, so that is an **integrity** check — it catches
+a corrupted download — and not a signature. Keep that distinction in mind below; it is the
+reason the keystore and the zip-signing questions are ordered the way they are.
 
 Two consequences that follow, and one that does not:
 
-- **The game socket authenticates nothing.** The login "password" is never read, and
-  `titan_token_<pid>` selects which account to load, so anything that can reach port
-  22110 can load and rewrite any account by number. On the phone all three servers
-  therefore bind **127.0.0.1** (the game is on the same device and its pack points at
-  loopback); the desktop default stays `0.0.0.0` because the AVD reaches the host as
-  10.0.2.2. `SEVENSINS_BIND` overrides either. Do not make the phone default wider to
+- **The game socket is not an authentication boundary.** Treat it as local-only. On the
+  phone all three servers bind **127.0.0.1** (the game is on the same device and its pack
+  points at loopback); the desktop default stays `0.0.0.0` because the AVD reaches the host
+  as 10.0.2.2. `SEVENSINS_BIND` overrides either. Do not make the phone default wider to
   "fix" a connection problem -- that problem is the pack's `_address`, not the bind.
 - `UPDATE_URL` is **baked into the APK at build time**, so pointing an installed device at
   a different update host needs a rebuild and reinstall — device access, not repo access.
@@ -229,11 +229,9 @@ Two consequences that follow, and one that does not:
   simply has no update button that does anything. Do not add a default — publishing is the
   one command that reaches every device, and it must never guess a destination.
 - The host APK is **debug-signed** — there is no `signingConfig` in
-  `hostapp/app/build.gradle`, so it uses Android's default debug keystore, which is a
-  well-known reproducible key. Anyone can therefore build an APK that installs over the
-  host app and keeps its data. That still needs device access, so it is not a repo hole,
-  but "it installed over the existing app" proves nothing about where it came from. A
-  pinned release keystore is the fix and is a standing to-do.
+  `hostapp/app/build.gradle`, so it uses Android's default debug keystore. That key is not
+  an identity, so "it installed over the existing app" says nothing about where a build came
+  from. A pinned release keystore is the fix and is a standing to-do.
 - It is NOT a reason to add a signing step to the update zip on a whim. If you do, the
   verifying key ships in the APK and the whole scheme is only as good as the release
   keystore above — do that one first, in the same piece of work.
