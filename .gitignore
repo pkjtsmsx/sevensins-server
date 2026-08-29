@@ -78,3 +78,7 @@ server/battle_data/cinematic_swings.json
 # status_catalog.json / skill_effects.json, which belong to the OLD engine and are
 # retired at the phase-5 cutover, not by this file.
 server/battle_data/statuses.json
+
+# The legacy proxy leaf cert is a symlink into the ignored certs/ dir and its target
+# carries a PRIVATE KEY (load_cert_chain needs one). Generate it locally; never commit it.
+tools/legacy_proxy/uj_leaf.pem

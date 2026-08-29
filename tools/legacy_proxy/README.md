@@ -29,7 +29,7 @@ Full write-up: memory `sevensins-apk-patch` and `sevensins-onphone-server`.
 | `marscrypto.py` | Mars packet crypto | the "FULLY REVERSED" Mars wire format cited in `docs/PROTOCOL.md` |
 | `patch_server.py` | HTTPS patch/CDN server on :8443 | superseded by `bundle_server.py`; the HEAD-only rule was carried across |
 | `titan_capture.py` | wire-capture helper used while reversing the titan protocol | historical |
-| `uj_leaf.pem` | symlink to the mitmproxy-signed leaf cert `patch_server.py` served | — |
+| `uj_leaf.pem` | not in the repo — generate the mitmproxy-signed leaf locally if you run `patch_server.py` | — |
 
 ## Running it again (only if reversing more web/Mars traffic)
 

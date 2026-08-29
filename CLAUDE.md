@@ -165,8 +165,9 @@ who has not been told will eventually try it.
   update can never overwrite somebody's save.
 - **`server/patch_root/`** — ~2.5 GB of extracted game assets. Distributed out of band as a
   tar; a repo is the wrong place for it.
-- **`certs/`** — local mitmproxy CA material, including private keys. (The one tracked
-  `.pem`, `tools/legacy_proxy/uj_leaf.pem`, is a certificate with no key and is fine.)
+- **`certs/`** — local mitmproxy CA material, including private keys. Nothing under it is
+  tracked, and `tools/legacy_proxy/uj_leaf.pem` (a symlink into it) is ignored as well —
+  generate the leaf locally.
 - **IDA databases, extracted APKs, il2cpp dumps** — large, rebuildable, and not ours to
   redistribute.
 - **`dist/`** — built release payloads (APKs plus the asset tar).
