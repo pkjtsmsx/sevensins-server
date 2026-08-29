@@ -141,5 +141,13 @@ emulated, web-API version/maintenance gate, asset manifest via the LoadAsset(nul
 loads all local PAD art/audio, and stops only at the missing server-side design tables.
 
 ## il2cpp dump location
-`/tmp/opencode/userjoy-il2cpp/dump/` (dump.cs, script.json, il2cpp.h). IDA DB has
-symbols applied (via ida_py3.py + script.json). MCP: ida-pro-mcp.
+
+`re/il2cpp227/` for the 2.2.7 client, `re/il2cpp/` for 2.2.4 — each an Il2CppDumper run
+holding `dump.cs`, `script.json`, `il2cpp.h`, `stringliteral.json` and `DummyDll/`.
+
+**Neither is in the repo.** They are ~130 MB apiece, rebuildable from the client, and not
+ours to redistribute, so `.gitignore` excludes them; `docs/BRINGUP.md` covers producing
+your own. `design_data.py` needs only the `DummyDll/` half, and prefers `il2cpp227` —
+2.2.4 type trees applied to a 2.2.7 pack parse to garbage without erroring.
+
+The IDA database has symbols applied from `script.json`. MCP: ida-pro-mcp.
