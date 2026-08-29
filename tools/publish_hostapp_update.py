@@ -16,7 +16,9 @@ URLs, which GitHub keeps pointed at whichever release was published most recentl
     https://github.com/<repo>/releases/latest/download/update.json
     https://github.com/<repo>/releases/latest/download/server_update.zip
 
-Requires the `gh` CLI, authenticated as an account with push access to REPO below.
+Requires the `gh` CLI, authenticated as an account with push access to the channel repo.
+Check `gh auth status` first: on a machine with several accounts the ACTIVE one is used,
+and it is not necessarily the one that owns the channel.
 
 Usage:  tools/publish_hostapp_update.py [--repo owner/name] [--notes "..."]
 """
@@ -30,16 +32,43 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 import build_hostapp_update as builder                               # noqa: E402
 
-DEFAULT_REPO = "SEVENSINS_UPDATE_REPO"
 OUT_DIR = builder.DEFAULT_OUT
+
+# The release repo is configured per-machine rather than committed -- the same value as
+# local.properties' sevensins.updateRepo, which the APK is built against:
+#
+#     tools/update_channel.txt   (gitignored, one line: owner/name)
+#   or  SEVENSINS_UPDATE_REPO=owner/name  in the environment
+#   or  --repo owner/name
+#
+# There is deliberately NO default. Publishing is the one operation that reaches every
+# device on the channel, so an unset channel must stop the run, never guess a destination.
+CHANNEL_FILE = os.path.join(ROOT, "tools", "update_channel.txt")
+
+
+def default_repo():
+    env = os.environ.get("SEVENSINS_UPDATE_REPO", "").strip()
+    if env:
+        return env
+    try:
+        with open(CHANNEL_FILE, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--repo", default=DEFAULT_REPO,
-                    help="owner/name of the dedicated release repo")
+    ap.add_argument("--repo", default=default_repo(),
+                    help="owner/name of the dedicated release repo (default: "
+                         "SEVENSINS_UPDATE_REPO, or tools/update_channel.txt)")
     ap.add_argument("--notes", default="", help="release notes (optional)")
     args = ap.parse_args()
+
+    if not args.repo:
+        sys.exit("no update channel configured -- write 'owner/name' into "
+                 f"{CHANNEL_FILE}, set SEVENSINS_UPDATE_REPO, or pass --repo. "
+                 "Refusing to guess: this is the one command that reaches every device.")
 
     builder.build(OUT_DIR)
     with open(os.path.join(OUT_DIR, "update.json"), encoding="utf-8") as f:

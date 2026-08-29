@@ -219,9 +219,14 @@ Two consequences that follow, and one that does not:
   loopback); the desktop default stays `0.0.0.0` because the AVD reaches the host as
   10.0.2.2. `SEVENSINS_BIND` overrides either. Do not make the phone default wider to
   "fix" a connection problem -- that problem is the pack's `_address`, not the bind.
-- `UPDATE_URL` is **hardcoded in the APK**, so pointing an installed device at a different
-  update host needs a rebuild and reinstall — device access, not repo access. That is a
-  real protection and worth preserving; resist making it a runtime setting.
+- `UPDATE_URL` is **baked into the APK at build time**, so pointing an installed device at
+  a different update host needs a rebuild and reinstall — device access, not repo access.
+  That is a real protection and worth preserving; resist making it a runtime setting. The
+  owner/name is configured per-machine rather than committed: `sevensins.updateRepo` in the
+  gitignored `hostapp/local.properties`, and `tools/update_channel.txt` for the publisher.
+  Still build-time, so the protection is unchanged, and a clone with no channel configured
+  simply has no update button that does anything. Do not add a default — publishing is the
+  one command that reaches every device, and it must never guess a destination.
 - The host APK is **debug-signed** — there is no `signingConfig` in
   `hostapp/app/build.gradle`, so it uses Android's default debug keystore, which is a
   well-known reproducible key. Anyone can therefore build an APK that installs over the

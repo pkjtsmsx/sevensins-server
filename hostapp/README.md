@@ -101,13 +101,28 @@ cd ..
 python3 tools/publish_hostapp_update.py         # builds + publishes a GitHub Release
 ```
 
-That's it — no dev machine needs to stay online or reachable afterwards. It publishes to
-a small, DEDICATED public repo
-([SEVENSINS_UPDATE_REPO](https://github.com/SEVENSINS_UPDATE_REPO)),
-never this project's own repo, because the update zip (code + battle_data only, per
-`server_files.json`) is the only thing meant to be public — the reverse-engineering side
-stays wherever it already is. `UpdateManager.UPDATE_URL` is hardcoded to that repo's
-`releases/latest/download/` path, which GitHub always keeps pointed at whichever release
+That's it — no dev machine needs to stay online or reachable afterwards. It publishes to a
+small, DEDICATED **public** repo, never this project's own repo, because the update zip
+(code + battle_data only, per `server_files.json`) is the only thing meant to be published
+— the reverse-engineering side stays wherever it already is. Public is not optional there:
+the app downloads both assets anonymously, with no token.
+
+**The channel is configured per-machine, not committed**, so a clone can point at its own.
+Set it in two places that must agree:
+
+```sh
+# hostapp/local.properties   (gitignored) -- baked into the APK at BUILD time
+sevensins.updateRepo=owner/name
+
+# tools/update_channel.txt   (gitignored) -- used by publish_hostapp_update.py
+owner/name
+```
+
+`UpdateManager.UPDATE_URL` is still a build-time constant, exactly as when it was
+hardcoded: pointing an installed device somewhere else needs a rebuild and reinstall, not
+a setting. Keep it that way. A build with no channel configured is fine — *Check for
+updates* just says so — which is what a fresh clone of the public repo gets. The URL
+resolves to `releases/latest/download/`, which GitHub keeps pointed at whichever release
 was published most recently, so there's nothing to type on the phone.
 
 On the phone: tap **Check for updates**. On success it downloads, sha256-verifies, and

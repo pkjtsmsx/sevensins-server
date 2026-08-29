@@ -53,6 +53,9 @@ hostapp/app/src/main/python/sevensins/
 
 # ---- hostapp in-app updater: build_hostapp_update.py's output, served for the app to pull
 hostapp_update/
+# The update channel (owner/name of the release repo) is deliberately never committed --
+# see hostapp/README.md. hostapp/local.properties is already ignored above.
+tools/update_channel.txt
 
 # ---- IDA MCP scratch ----
 .ida-mcp/

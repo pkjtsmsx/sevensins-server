@@ -450,6 +450,18 @@ public class MainActivity extends android.app.Activity {
     }
 
     private void runUpdateCheck() {
+        // A build with no sevensins.updateRepo (a fresh clone of the public source repo)
+        // has nowhere to check. Say so plainly instead of failing against an empty URL.
+        if (!UpdateManager.channelConfigured()) {
+            new AlertDialog.Builder(this)
+                    .setTitle("No update channel")
+                    .setMessage("This build was made without an update channel. Set "
+                              + "sevensins.updateRepo in hostapp/local.properties and "
+                              + "rebuild to enable hot updates.")
+                    .setPositiveButton("OK", null)
+                    .show();
+            return;
+        }
         Toast.makeText(this, "Checking for updates…", Toast.LENGTH_SHORT).show();
         new Thread(() -> {
             UpdateManager.Result r = UpdateManager.checkAndApply(this, UpdateManager.UPDATE_URL);

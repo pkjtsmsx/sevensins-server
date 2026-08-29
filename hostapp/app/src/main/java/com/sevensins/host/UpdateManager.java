@@ -38,10 +38,23 @@ class UpdateManager {
     /** Release-asset host for update.json + server_update.zip -- a small, DEDICATED
      * public repo (never the main project repo: this one carries only the compiled
      * server code the update zip contains, nothing from the reverse-engineering side).
+     * It has to be PUBLIC: the app downloads both assets anonymously, with no token.
      * "latest" always resolves to whatever tools/publish_hostapp_update.py published
-     * most recently, regardless of tag. */
-    static final String UPDATE_URL =
-            "https://github.com/SEVENSINS_UPDATE_REPO/releases/latest/download/";
+     * most recently, regardless of tag.
+     *
+     * The owner/name is configured per-machine and baked in at build time from
+     * hostapp/local.properties (see app/build.gradle). Empty means "no channel
+     * configured", which is a clean no-op, not a crash. */
+    static final String UPDATE_REPO = BuildConfig.UPDATE_REPO;
+
+    static final String UPDATE_URL = UPDATE_REPO.isEmpty() ? ""
+            : "https://github.com/" + UPDATE_REPO + "/releases/latest/download/";
+
+    /** False for a build made without sevensins.updateRepo -- e.g. from a fresh clone of
+     * the public source repo, which deliberately does not name the update channel. */
+    static boolean channelConfigured() {
+        return !UPDATE_URL.isEmpty();
+    }
 
     enum Outcome { UP_TO_DATE, APPLIED, FAILED }
 

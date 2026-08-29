@@ -16,6 +16,31 @@ plugins {
 def serverDir = file("${rootDir}/../server")
 def stage = file("${projectDir}/src/main/python/sevensins")
 
+// ---- Hot-update channel -------------------------------------------------------------
+// The release repo serving update.json + server_update.zip is configured per-machine
+// rather than committed, so a clone can be built and pointed at its own channel:
+//
+//     hostapp/local.properties   (gitignored)
+//     sevensins.updateRepo=owner/name
+//
+// BUILD-time, not runtime, and it must stay that way: the value is baked into the APK
+// exactly as a literal constant would be, so pointing an installed device at a different
+// update host takes a rebuild and reinstall rather than a setting.
+//
+// Left unset the app builds and runs fine; "Check for updates" reports that no channel is
+// configured rather than reaching somewhere wrong.
+def updateRepo = ''
+def localProps = file("${rootDir}/local.properties")
+if (localProps.exists()) {
+    def props = new Properties()
+    localProps.withInputStream { props.load(it) }
+    updateRepo = props.getProperty('sevensins.updateRepo', '')
+}
+if (!updateRepo) {
+    logger.lifecycle('hostapp: no sevensins.updateRepo in local.properties -- ' +
+                     'building without a hot-update channel')
+}
+
 // The file LIST lives in ../server_files.json, shared with tools/build_hostapp_update.py
 // (the hot-updater's build tool) so there is exactly one place that says what "the
 // server code" means. Before this split, `battle_effects` (added when the engine became
@@ -165,6 +190,8 @@ android {
         targetSdk 35
         versionCode 1
         versionName '0.1'
+        // Empty when unconfigured -- UpdateManager treats that as "no channel".
+        buildConfigField 'String', 'UPDATE_REPO', "\"${updateRepo}\""
         // arm64 for real devices, x86_64 so it also runs on the development AVD.
         ndk { abiFilters 'arm64-v8a', 'x86_64' }
         python {
