@@ -352,13 +352,20 @@ def _removable(status_row, category):
     return category in (None, "any") or (status_row or {}).get("category") == category
 
 
-def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=True):
+def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=True,
+            coefficient_override=None):
     """Run one skill. -> Outcome.
 
     `apply_damage` mutates target HP as it goes, because later swings of a multi-hit
     skill must see the damage the earlier ones did -- a target that died on swing 2 is
     not struck again on swing 3, and the client's `die` flag depends on that ordering.
     Callers wanting a dry run pass False.
+
+    `coefficient_override` supplies the damage coefficient for a spec that has none of
+    its own. Pursuit sub-skills need it: their design row carries no numbers at all
+    (100000341 is `_note1_jp` "脊砕き 追加技能" and nothing else), and the figure lives in
+    the PARENT's prose -- 追擊(造成120%攻擊力傷害). Only fills a gap; a child that states
+    its own coefficient keeps it.
     """
     r = rng or random.Random()
     skill_id = spec.get("id")
@@ -388,8 +395,11 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
                 # with no number. Found on device: Frozen Inferno Thorn III shipped ONE
                 # group instead of four. Overkill is simply wasted; death resolves at the
                 # end of the skill, which is also where the `die` flag belongs.
+                coef = e.get("coefficient")
+                if coef is None:
+                    coef = coefficient_override
                 amount, detail = formula.strike(
-                    caster, tgt, e.get("coefficient"), e.get("basis") or "ATK", r)
+                    caster, tgt, coef, e.get("basis") or "ATK", r)
                 if amount is None:
                     out.skipped.append({"op": "damage", "why": "coefficient unknown",
                                         "skill": skill_id})
@@ -548,6 +558,12 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
             if e.get("requires") and not _condition_met(
                     e["requires"], caster, targets[0] if targets else None, held):
                 out.skipped.append({"op": op, "why": "condition not met", "skill": e["skill"]})
+            elif e.get("chance_pct") is not None and not formula.effect_lands(
+                    caster, caster, float(e["chance_pct"]) / 100.0, r):
+                # 以50%機率追擊 -- the pursuit is a ROLL. Every follow_up used to fire
+                # unconditionally because the compiler dropped the stated odds and this
+                # branch never looked for them, so 240 casts pursued on every cast.
+                out.skipped.append({"op": op, "why": "chance failed", "skill": e["skill"]})
             elif child is None:
                 out.skipped.append({"op": op, "why": "unknown skill", "skill": e["skill"]})
             elif depth >= MAX_FOLLOW_DEPTH:
@@ -560,7 +576,10 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
                 out.children.append(execute(
                     caster, child, units, r,
                     chosen=(targets[0].order if targets else None),
-                    depth=depth + 1, apply_damage=apply_damage))
+                    depth=depth + 1, apply_damage=apply_damage,
+                    # The pursuit's damage figure is stated by the PARENT, not by the
+                    # sub-skill's own row -- see execute's docstring.
+                    coefficient_override=e.get("coefficient")))
         elif op == "modify_cd":
             turns = e.get("turns")
             if turns is None:

@@ -2229,6 +2229,10 @@ class Battle:
         # with the battle: on reconnect the client rebuilds every unit's statuses from
         # BattleDatas.status, so a dropped queue costs nothing.
         self._pending_status_rows = []
+        # Units killed by their OWN start-of-turn DoT, queued for the wire. Same
+        # not-saved reasoning as the status rows above: a reconnect rebuilds the field
+        # from BattleDatas, where the unit is already dead.
+        self._pending_dot_deaths = []
         self.units = {}
         # status name -> times it landed on a PLAYER unit this run (rating kind 20)
         self.status_taken = {}
@@ -2604,6 +2608,37 @@ class Battle:
             "tskill": [],
         }, separators=(",", ":"))
 
+    def dot_death_cmds_json(self):
+        """-> a BattleCmd per unit killed by its own start-of-turn DoT, and drains.
+
+        Shaped exactly like an attack (cmd 1201) because that is the only message the
+        client renders damage and death from: `die` is set nowhere else on the wire.
+        The dying unit is its own caster and its own target, with skill 0 -- the same
+        shape attack_cmd_json already falls back to when a skill has no runnable spec,
+        so it is a form the client is known to accept.
+
+        DEATHS ONLY, deliberately. A non-lethal tick still moves HP silently through
+        `sync`; sending a 1201 for it would put an extra Perform in front of a unit that
+        has not acted yet, and whether the client's turn machine tolerates that has not
+        been tested on a device. The lock is the death case, so that is what this fixes.
+        """
+        deaths, self._pending_dot_deaths = self._pending_dot_deaths, []
+        out = []
+        for d in deaths:
+            unit = self.units.get(d["order"])
+            if unit is None:
+                continue
+            cmd = json.loads(self.battle_cmd_json(
+                cur_team=unit.team if unit else TEAM_PLAYER))
+            cmd["combo"] = [{
+                "caster": d["order"], "skill": 0,
+                "data": [[{"c": d["order"], "md": 1, "cg": 0, "dmg": int(d["dmg"]),
+                           "cri": 0, "die": 1, "status": [], "extra": [],
+                           "picons": [], "pskill_id": 0}]],
+            }]
+            out.append(json.dumps(cmd, separators=(",", ":")))
+        return out
+
     def spend_skill(self, attacker_order, slot):
         """Put the used skill on cooldown. Nothing else is spent -- the special move's
         `_charge` is an opening delay, not a per-use cost (see Unit.ultimate_charge)."""
@@ -2866,11 +2901,25 @@ class Battle:
         # the note in engine/status.py: ticking both here made a 1-turn stun expire on
         # the very tick that should have skipped the turn.
         dot, hot = _engine_status.tick_damage(unit)
+        # What the client is told below is the HP actually removed, not the raw tick:
+        # a DoT far bigger than the remaining pool would otherwise render as a damage
+        # number several times the unit's max HP.
+        dealt = min(int(dot), int(unit.hp)) if dot else 0
         if dot:
             unit.hp = max(0, unit.hp - dot)
         if hot:
             unit.hp = min(unit.max_hp, unit.hp + hot)
         if not unit.alive:
+            # A DoT that KILLS has to reach the client as an event, not just as a
+            # smaller number in the next `sync`. The client runs its own action order
+            # (BattleUnitManager.GetNextAction re-derives it from sync Scv/SPD), so a
+            # unit that dies here is still sitting in its ActionOrderList waiting for a
+            # turn the server will never hand out -- reported from a phone as a hard
+            # soft-lock when a low-HP unit came up with lethal poison on it. Retail
+            # played the tick on the dying unit's own turn: damage number, pain sound,
+            # death, and only then the next character. Queue it so the reply that
+            # follows this turn carries that beat; see dot_death_cmds_json.
+            self._pending_dot_deaths.append({"order": unit.order, "dmg": dealt})
             self._roll_turn_order()
             self._start_of_turn(_depth + 1)
             return

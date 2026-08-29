@@ -247,6 +247,13 @@ def attack_json(outcome, *, caster_order=None, skill_id=None):
                 f"group {i} of {len(groups)} is empty but a later group is not; "
                 f"the cinematic would pair damage with the wrong swing")
 
+    # Rows are built from FINAL state, so a unit killed early reads as dead on every
+    # later row naming it -- and the client would replay its death animation once per
+    # row. Harmless while a follow-up dealt no damage (it produced no rows at all);
+    # the moment pursuits started landing real strikes, a parent kill plus a pursuit
+    # strike on the same unit put `die` on two rows and the fuzzer caught it as a
+    # WireError. Fold before asserting, which is what this helper was written for.
+    clear_die_except_last(groups)
     _assert_invariants(groups, swings)
 
     if groups and groups[0]:

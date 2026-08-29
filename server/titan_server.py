@@ -1300,7 +1300,10 @@ def play_turn_msgs(battle, target_team):
                       [battle.attack_cmd_json(attacker, defender, skill)])
     battle.spend_skill(attacker, slot)
     battle.end_turn()
-    return [body]
+    # end_turn runs the NEXT unit's start-of-turn, so a lethal DoT lands after `body`
+    # was built. Those deaths ride out in the same reply, right behind this move.
+    return [body] + [battle_msg(bt.CMD_ATTACK, [], [j])
+                     for j in battle.dot_death_cmds_json()]
 
 
 def battle_replies(battle, cmd, intargs, strargs, state=None, uid=""):
@@ -1419,7 +1422,11 @@ def battle_replies(battle, cmd, intargs, strargs, state=None, uid=""):
         body = battle_msg(bt.CMD_ATTACK, [],
                           [battle.attack_cmd_json(attacker, defender, skill)])
         battle.end_turn()
-        return [body]
+        # See play_turn_msgs: a start-of-turn DoT kill happens inside end_turn, after
+        # the attack payload is built, and has to be told to the client in this reply
+        # or it sits waiting for the dead unit's turn.
+        return [body] + [battle_msg(bt.CMD_ATTACK, [], [j])
+                         for j in battle.dot_death_cmds_json()]
     if cmd == bt.REQ_RETREAT:
         # Menu -> Retreat. `HandleRetreat` deserialises strargs[0] into a BtCollector,
         # sets BattleResultType = 2 (the loss/abandon value) and dispatches BattleEvent 4,

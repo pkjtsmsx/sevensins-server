@@ -874,11 +874,15 @@ def effects(rows, r):
                 out.append({"op": "remove_status", "slot": i,
                             "category": cat, "stackable": stackable, "raw": aid})
         elif op == OP_FOLLOW_UP and aid:
-            out.append({"op": "follow_up", "slot": i, "skill": aid,
-                        "name": (rows.get(aid) or {}).get("_name_en")
-                                or (rows.get(aid) or {}).get("_name"),
-                        # "若目標擁有出血…進行追擊": the 若 fragment before the 追擊 gates it.
-                        "requires": zh_condition_for(rows, r, None, follow_up=True)})
+            entry = {"op": "follow_up", "slot": i, "skill": aid,
+                     "name": (rows.get(aid) or {}).get("_name_en")
+                             or (rows.get(aid) or {}).get("_name"),
+                     # "若目標擁有出血…進行追擊": the 若 fragment before the 追擊 gates it.
+                     "requires": zh_condition_for(rows, r, None, follow_up=True)}
+            # The pursuit's own damage and odds, which live in the PARENT's prose
+            # because the sub-skill's row has no numbers at all. See zh_pursuit_numbers.
+            entry.update(zh_pursuit_numbers(r))
+            out.append(entry)
         elif op == OP_MODIFY_CD:
             entry = {"op": "modify_cd", "slot": i}
             entry.update(cd_effect(r))
@@ -1326,6 +1330,68 @@ def _zh_parse_condition(rows, frag):
         return {"hp": {"on": "caster" if who in ("自身", "自己", "我方") else "target",
                        "cmp": op, "pct": val}}
     return None
+
+
+_PURSUIT_WORD = re.compile(r"追擊|追加攻擊")
+# The figure in the parenthetical that follows 追擊 -- 追擊(造成120%攻擊力傷害). This is
+# the unambiguous form, and it is checked first because the sentence often ALSO carries
+# the parent skill's own coefficient (200%攻擊力的傷害，並…追擊(造成120%攻擊力傷害)).
+_PURSUIT_COEF_PAREN = re.compile(
+    r"(?:追擊|追加攻擊)[^。]{0,24}?[（(][^）)]*?(\d+)\s*%\s*攻擊力")
+_ATK_PCT = re.compile(r"(\d+)\s*%\s*攻擊力")
+_CHANCE_PCT = re.compile(r"(\d+)\s*%\s*(?:固定)?機率")
+
+
+def zh_pursuit_numbers(r):
+    """-> {"coefficient": x, "chance_pct": y} for a 追擊, from the Chinese. Either may
+    be absent.
+
+    A pursuit sub-skill's own design row carries NO numbers -- 100000341 is `_note1_jp`
+    "脊砕き 追加技能" and five zeroed columns -- so the engine had no coefficient and
+    `formula.strike` returned None, i.e. every pursuit fired and dealt nothing (1,190 of
+    1,282 corpus-wide). The figures are stated by the PARENT instead, which is what this
+    reads.
+
+    Deliberately conservative: an AMBIGUOUS fragment yields nothing rather than a guess.
+    Several casts pursue twice with different odds ("分別以60%、30%機率…最多兩次追擊"),
+    and picking one of two numbers for both would be worse than leaving the odds alone.
+    """
+    note = r.get("_note1") or ""
+    if not note:
+        return {}
+    got = {}
+    m = _PURSUIT_COEF_PAREN.search(note)
+    if m:
+        got["coefficient"] = int(m.group(1)) / 100.0
+    for sentence in re.split(r"[。\n]", note):
+        if not _PURSUIT_WORD.search(sentence):
+            continue
+        for frag in _split_fragments(sentence):
+            if not _PURSUIT_WORD.search(frag):
+                continue
+            if "coefficient" not in got:
+                hits = _ATK_PCT.findall(frag)
+                if len(hits) == 1:
+                    got["coefficient"] = int(hits[0]) / 100.0
+            # 必然追擊 -- "certainly pursues". An explicit 100%, and it must not be
+            # confused with a missing number, which also fires every time but for the
+            # wrong reason.
+            if "必然" in frag:
+                got.pop("chance_pct", None)
+                return got
+            # 分別 ("respectively") distributes several odds across several pursuits:
+            # "分別以60%、30%機率…最多兩次追擊". The fragment splitter breaks that list
+            # apart, so the 追擊 fragment is left holding ONE of the numbers and looks
+            # unambiguous when it is not -- it gave both pursuits 30%. Refuse the whole
+            # sentence instead; a pursuit that fires too often is a smaller error than
+            # one whose odds are confidently wrong.
+            if "分別" in sentence:
+                return got
+            odds = _CHANCE_PCT.findall(frag)
+            if len(odds) == 1:
+                got["chance_pct"] = float(odds[0])
+            return got
+    return got
 
 
 def zh_condition_for(rows, r, zh_name, follow_up=False):
