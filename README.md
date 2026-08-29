@@ -19,10 +19,9 @@ with no network in between.
   playing on, interfering with, or connecting to anyone's official servers.
 
 The code in this repository is MIT-licensed (see `LICENSE`). That covers this project's own
-source only — it says nothing about the game's data, which stays the property of its
-owners. A handful of tracked files (`server/battle_data/skill_effects.json`,
-`server/battle_data/status_catalog.json`, `docs/avg_decisions.json`) are *derived from* the
-game's own tables and are here as working notes rather than redistributable content.
+source only — it says nothing about the game's data, which stays the property of its owners.
+Files derived from the game's tables are generated locally from your own copy and are not
+committed here; the tools that build them live in `tools/`.
 
 ## Requirements
 
@@ -48,6 +47,12 @@ python3 tools/compile_statuses.py    # status catalogue
 python3 tools/run_tests.py           # pyflakes over server/, then every server/test_*.py
 python3 server/titan_server.py       # listens on 22110
 ```
+
+Other derived artifacts — `skill_effects.json`, `status_catalog.json`,
+`docs/avg_decisions.json` — are also generated rather than committed, by
+`tools/parse_skills.py`, `tools/extract_status_catalog.py` and `tools/avg_decisions.py`.
+Nothing in `server/` reads them at runtime; they are analysis output, so build them only if
+you want them.
 
 `tools/run_tests.py` is the gate rather than a shell loop over the suites: most of them
 print nothing on success, so only its exit code tells you anything. For anything touching
