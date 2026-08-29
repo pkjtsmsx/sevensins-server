@@ -2,6 +2,10 @@
 
 Things that are NOT in the repo and must be installed on a fresh machine.
 
+This page covers the **Python packages** only. The game data a fresh clone also needs --
+the design pack and the il2cpp DummyDlls -- is in `docs/BRINGUP.md`. Run
+`python3 tools/check_setup.py` to see which of either is still missing.
+
 ## TypeTreeGeneratorAPI (required for anything that reads Unity assets)
 
 ```

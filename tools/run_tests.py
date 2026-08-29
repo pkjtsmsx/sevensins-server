@@ -113,6 +113,13 @@ def main(argv):
           f"in {time.time() - t_all:.0f}s")
     if failed:
         print("failed: " + ", ".join(failed))
+        # A fresh clone fails EVERY table-driven suite for one reason -- no design pack
+        # and no DummyDll (docs/BRINGUP.md) -- and the cause is buried in 31 identical
+        # tracebacks. Point at the preflight rather than making someone read them.
+        if len(failed) > len(suites) // 2:
+            print("\nMost suites failed. If this is a fresh clone, run "
+                  "`python3 tools/check_setup.py` first -- the game data it needs "
+                  "is not in the repo (docs/BRINGUP.md).")
         return 1
     return 0
 

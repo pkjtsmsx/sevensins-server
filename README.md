@@ -37,16 +37,21 @@ committed here; the tools that build them live in `tools/`.
 
 ## Quickstart
 
-A fresh clone will not run a battle until the two compilers have been run. Their output
-(`server/battle_data/skills/`, `statuses.json`, `cinematic_swings.json`) is generated from
-the game's own tables and is deliberately untracked, so it does not exist yet:
+**A fresh clone cannot run the tests yet** — it passes lint and fails all 31 suites,
+because the game's design tables are not in this repo and cannot be. `docs/BRINGUP.md` is
+the full walkthrough; `tools/check_setup.py` tells you at any point which inputs are still
+missing.
 
 ```sh
+python3 tools/check_setup.py         # what's missing, and how to fix each
 python3 tools/compile_skills.py      # per-cast battle specs
 python3 tools/compile_statuses.py    # status catalogue
 python3 tools/run_tests.py           # pyflakes over server/, then every server/test_*.py
 python3 server/titan_server.py       # listens on 22110
 ```
+
+The two compilers' output (`server/battle_data/skills/`, `statuses.json`) is generated from
+the game's own tables and deliberately untracked, so it does not exist in a fresh clone.
 
 Other derived artifacts — `skill_effects.json`, `status_catalog.json`,
 `docs/avg_decisions.json` — are also generated rather than committed, by
