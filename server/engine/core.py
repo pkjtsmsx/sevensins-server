@@ -658,7 +658,7 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
                     tgt.hp = hp
                 out.revives.append({"target": tgt.order, "hp": hp})
         elif op == "attack_rider":
-            _rider(caster, e, targets, out, r, apply_damage, skill_id, units)
+            _rider(caster, e, targets, out, r, apply_damage, skill_id, units, held, ctx)
         elif op == "follow_up":
             child = specs.skill(e["skill"])
             # Tri-state, like _status_event: False skips, None means the gate could not
@@ -836,32 +836,72 @@ def _flag_deaths(out, targets):
                 return
 
 
-def _rider(caster, eff, targets, out, rng, apply_damage, skill_id, units=()):
-    """op 1 -- the attack rider. Kind comes from prose; see contract doc 6.3.3."""
+def _rider(caster, eff, targets, out, rng, apply_damage, skill_id, units=(),
+           held=None, ctx=None):
+    """op 1 -- the attack rider, and op 6 -- the same shape sized off the caster's HP.
+
+    Kind comes from prose; see contract doc 6.3.3. `basis` is ATK unless the compiler
+    says otherwise: op 6 sets `caster_current_hp` / `caster_max_hp` (zh_hp_rider), and
+    those are read off the caster at the moment the rider fires -- AFTER this skill's
+    own swings, so a self-damaging cast sizes its rider off what it has left.
+    """
     kind, pct = eff.get("kind"), eff.get("percent")
     if pct is None:
         out.skipped.append({"op": "attack_rider", "why": "magnitude unknown",
                             "skill": skill_id})
         return
+    if eff.get("requires"):
+        # 攻擊時若自身擁有共享盛宴，額外對目標造成… -- most op-6 riders are gated. Tri-state
+        # like everything else; an unanswerable gate takes the conditional policy.
+        gate = _condition_met(eff["requires"], caster, targets[0] if targets else None,
+                              held, ctx)
+        if gate is False or (gate is None and CONDITIONAL_POLICY == "skip") or (
+                gate is None and CONDITIONAL_POLICY == "roll"
+                and not formula.effect_lands(caster, caster, CONDITIONAL_CHANCE, rng)):
+            out.skipped.append({"op": "attack_rider", "why": "condition not met",
+                                "skill": skill_id})
+            return
+    basis = eff.get("basis") or "atk"
+    if basis == "caster_current_hp":
+        base = float(caster.hp)
+    elif basis == "caster_max_hp":
+        base = float(caster.max_hp)
+    else:
+        base = float(formula.effective_atk(caster))
     if kind == "heal" and eff.get("target") == "allies_lowest":
         # "以200%的攻擊力回復我方體力最低的2人": ATK-sized, onto the N lowest-HP living
         # allies (the caster included), not the caster alone.
         mates = sorted((u for u in units if u.team == caster.team and u.alive),
                        key=lambda u: u.hp)
-        amount = int(formula.effective_atk(caster) * pct / 100.0)
+        amount = int(base * pct / 100.0)
         for who in mates[:max(1, int(eff.get("count") or 1))]:
             if apply_damage:
                 who.hp = min(who.max_hp, who.hp + amount)
             out.heals.append({"target": who.order, "amount": amount, "from": "rider"})
         return
     if kind == "heal":
-        # Always ATK-based -- the rider's prose is "deals N% ATK as damage and recovers
-        # the caster's HP" -- but read through the same effective_atk as the main heal
-        # path, so a buffed caster heals for more in both.
-        amount = int(formula.effective_atk(caster) * pct / 100.0)
+        # ATK-based unless op 6 said otherwise -- the op-1 prose is "deals N% ATK as
+        # damage and recovers the caster's HP" -- read through the same effective_atk as
+        # the main heal path, so a buffed caster heals for more in both.
+        amount = int(base * pct / 100.0)
         if apply_damage:
             caster.hp = min(caster.max_hp, caster.hp + amount)
         out.heals.append({"target": caster.order, "amount": amount, "from": "rider"})
+    elif kind == "bonus_damage" and basis != "atk":
+        # 額外對目標造成自身8%當前體力的傷害. Not a coefficient on a stat the strike formula
+        # knows, so it is dealt as a FLAT amount: no crit, no advantage roll, but it does
+        # pass through the target's shield like any other hit. Whether retail mitigated
+        # this by DEF is something only footage can settle -- flat is the reading of the
+        # words, and it is named here so it can be revisited.
+        amount = int(base * pct / 100.0)
+        for tgt in targets:
+            dealt = amount
+            if apply_damage:
+                dealt, absorbed = _status.absorb(tgt, dealt)
+                tgt.hp = max(0, tgt.hp - dealt)
+            out.strikes.append(Strike(swing=0, target=tgt.order, amount=dealt,
+                                      detail={"rider": True, "basis": basis,
+                                              "crit": False}, died=False))
     elif kind == "bonus_damage":
         for tgt in targets:
             # Same rule as the main damage loop: the rider belongs to this attack, so a

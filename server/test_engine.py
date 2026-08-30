@@ -378,6 +378,71 @@ def check_condition_shapes():
                               c, u[1], None) is None)
 
 
+def check_prose_stack_caps():
+    """A status whose cap the pack states only in prose really stacks, to that cap.
+
+    Wrath (3015) has no `(N)` suffix; every glossary line describing it says 可堆疊5次.
+    Until the registry read that, its `stack_cap` was None, apply_event pinned `stacks`
+    at 1, and 若自身「盛怒」達到5層 could never be true. Anchored to behaviour: five
+    applications reach the gate, a sixth does not overshoot, and the stat delta scales.
+    """
+    from engine import status as _st
+    row = specs.status(3015) or {}
+    check("Wrath carries a prose-stated cap of 5", row.get("stack_cap") == 5,
+          f"{row.get('stack_cap')!r} from {row.get('stack_cap_source')!r}")
+    c, u = field(n_enemy=1)
+    for i in range(1, 7):
+        _st.apply_event(c, core.StatusEvent(target=c.order, status_id=3015, name="Wrath",
+                                            applied=True, duration=3, magnitude=4.0), c)
+        held = next(x for x in c.statuses if x.status_id == 3015)
+        if i in (4, 5, 6):
+            check(f"after {i} applications Wrath holds {min(i, 5)} stacks",
+                  held.stacks == min(i, 5), str(held.stacks))
+    check("...and a 5-stack gate on it now opens",
+          core._holds_status(c, "Wrath", None, 5) is True)
+    check("...and a 6-stack gate stays shut at the cap",
+          core._holds_status(c, "Wrath", None, 6) is False)
+
+
+def check_hp_riders():
+    """op 6: an amount sized off the CASTER's own HP pool, decoded 2026-08-29.
+
+    Anchored to the pool it reads. A caster at 10,000 of 50,000 HP whose rider is 20% of
+    CURRENT HP deals 2,000 -- not 10,000 (max) and not 600 (20% of ATK, which is what
+    the op-1 rider path would have produced had the basis been ignored).
+    """
+    from engine import status as _st
+    base = {"id": 0, "swings": 1,
+            "target": {"group": "enemy", "select": "count", "count": 1}}
+    c, u = field(n_enemy=1)
+    c.hp = 10000
+    spec = dict(base, effects=[{"op": "attack_rider", "opcode": 6, "kind": "bonus_damage",
+                                "percent": 20.0, "basis": "caster_current_hp"}])
+    out = core.execute(c, spec, u, random.Random(1))
+    dealt = [st.amount for st in out.strikes if (st.detail or {}).get("rider")]
+    check("a current-HP rider deals 20% of the caster's CURRENT HP", dealt == [2000], str(dealt))
+    c, u = field(n_enemy=1)
+    c.hp = 10000
+    spec = dict(base, effects=[{"op": "attack_rider", "opcode": 6, "kind": "heal",
+                                "percent": 35.0, "basis": "caster_max_hp"}])
+    out = core.execute(c, spec, u, random.Random(1))
+    check("a max-HP rider heals 35% of MAX HP", c.hp == 10000 + 17500, str(c.hp))
+    # Gated: 攻擊時若自身擁有共享盛宴，額外… must not fire without the marker, and must with it.
+    spec = dict(base, effects=[{"op": "attack_rider", "opcode": 6, "kind": "bonus_damage",
+                                "percent": 20.0, "basis": "caster_current_hp",
+                                "requires": {"status": "Feast", "on": "caster",
+                                             "resolved": True}}])
+    c, u = field(n_enemy=1)
+    out = core.execute(c, spec, u, random.Random(1))
+    check("a gated rider stays silent without its status", not out.strikes,
+          str([(x["op"], x["why"]) for x in out.skipped]))
+    c, u = field(n_enemy=1)
+    c.statuses.append(_st.Active(status_id=9010, name="Shared Feast", kind=None,
+                                 category="buff", remaining=3))
+    out = core.execute(c, spec, u, random.Random(1))
+    check("  ...and fires with it", len(out.strikes) == 1)
+
+
 def main():
     print("\ntargeting:")
     caster, units = field()
@@ -486,6 +551,12 @@ def main():
 
     print("\ncondition shapes:")
     check_condition_shapes()
+
+    print("\nprose stack caps:")
+    check_prose_stack_caps()
+
+    print("\nop 6 -- HP-pool riders:")
+    check_hp_riders()
 
     print("\nconditional application:")
     # Eclipse Slash gates its Freeze on "the caster is affected by The Divine" and its

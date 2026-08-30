@@ -483,6 +483,64 @@ def status_chance(r, zh_name, en_name):
     return {}
 
 
+# --- op 6: an amount sized off the CASTER'S OWN HP POOL -----------------------------
+#
+# Decoded 2026-08-29 by prose clustering, the only tool there is (the client never reads
+# the opcode script -- contract doc 6.1.1). Of 125 rows carrying op 6, 95 say \u7576\u524d/\u7576\u4e0b/
+# \u76ee\u524d\u9ad4\u529b (current HP) -- a 74x lift over the 0.8% corpus baseline -- and 25 more, all one
+# cast's Matcha Sundae, say \u6700\u5927\u9ad4\u529b. The verb is prose, exactly as with op 1: bonus
+# damage (\u984d\u5916\u5c0d\u76ee\u6a19\u9020\u6210\u81ea\u8eab8%\u7576\u524d\u9ad4\u529b\u7684\u50b7\u5bb3) or a heal (\u4ee5\u746a\u9580\u7576\u524d\u9ad4\u529b\u768430%\u6062\u5fa9\u6211\u65b93\u540d\u9ad4\u529b\u6700\u4f4e\u7684\u8840\u91cf,
+# \u6062\u5fa9\u81ea\u5df1\u7684\u9ad4\u529b(\u76f8\u7576\u65bc8%\u7684\u7576\u524d\u9ad4\u529b)). The remaining 4 rows are a mob Slash with no
+# number at all and stay a reported skip. Emitted as an attack_rider with a `basis`,
+# because that is what it is: the op-1 shape with a different stat behind the percent.
+OP_HP_RIDER = 6
+_ZH_HP_POOL = re.compile(r"(\u7576\u524d|\u7576\u4e0b|\u76ee\u524d|\u6700\u5927)\u9ad4\u529b")
+
+
+def zh_hp_rider(r):
+    """-> {kind, percent, basis, target?, count?, requires?} for op 6, or None."""
+    note = (r.get("_note1") or "").split("\u203b")[0]
+    for sentence in re.split(r"[\u3002\n]", note):
+        parts = _split_fragments(sentence)
+        for i, frag in enumerate(parts):
+            pm = _ZH_HP_POOL.search(frag)
+            if not pm:
+                continue
+            basis = "caster_max_hp" if pm.group(1) == "\u6700\u5927" else "caster_current_hp"
+            pct = _zh_magnitude(frag)
+            if pct is None:
+                continue
+            if re.search(r"\u9020\u6210|\u50b7\u5bb3", frag) and not re.search(r"\u6062\u5fa9|\u56de\u5fa9", frag):
+                out = {"kind": "bonus_damage", "percent": pct, "basis": basis}
+            elif re.search(r"\u6062\u5fa9|\u56de\u5fa9", frag):
+                out = {"kind": "heal", "percent": pct, "basis": basis}
+                cnt = re.search(r"(?:\u6211\u65b9|\u6211\u65b9\u9ad4\u529b\u6700\u4f4e\u7684?)\s*(\d+)\s*[\u540d\u4eba]", frag)
+                if "\u6211\u65b9" in frag or "\u6700\u4f4e" in frag:
+                    out["target"] = "allies_lowest"
+                    out["count"] = int(cnt.group(1)) if cnt else 1
+            else:
+                continue
+            out["source"] = "prose_zh"
+            # \u82e5\u81ea\u8eab\u64c1\u6709\u5171\u4eab\u76db\u5bb4\uff0c\u984d\u5916\u2026 -- the \u82e5 fragment before it gates it, same walk-back
+            # as zh_condition_for.
+            # `\u82e5` anywhere in the fragment, not only at its start: the corpus writes
+            # \u653b\u64ca\u6642\u82e5\u76ee\u6a19\u64c1\u6709\u9006\u98a8 and \u884c\u52d5\u5f8c\u82e5\u76ee\u6a19\u64c1\u67094\u5c64\u9b54\u85e5\u4e4b\u543b with a timing word first. A
+            # governing \u82e5 the parser cannot read still becomes a gate -- an unreadable
+            # one, which `_condition_met` answers None and the policy rolls. \u82e5\u6575\u65b9\u5b58\u6d3b\u4eba\u6578
+            # \u5927\u65bc3\u4eba is that case; firing it every time is not "unknown", it is wrong.
+            for j in range(i, max(-1, i - 3), -1):
+                # \u7576 is also the first character of \u7576\u524d\u9ad4\u529b and the middle of \u76f8\u7576\u65bc --
+                # the roadmap's own listed trap -- so those are blanked before asking
+                # whether a \u7576 opens a condition here.
+                probe = re.sub(r"\u7576[\u524d\u4e0b]\u9ad4\u529b|\u76f8\u7576\u65bc", " ", parts[j])
+                if _ZH_COND_START.search(probe.strip()) or re.search(r"\u82e5|\u7576", probe):
+                    got = _zh_parse_condition(dd.rows("skill") or {}, parts[j])
+                    out["requires"] = got or {"unparsed": parts[j].strip()[:60]}
+                    break
+            return out
+    return None
+
+
 def clause_percent(r, op):
     """-> the percentage stated next to THIS effect's own phrase, or None.
 
@@ -989,6 +1047,9 @@ def effects(rows, r):
             if zh:                                   # the original language wins
                 entry.update(zh)
             out.append(entry)
+        elif op == OP_HP_RIDER and zh_hp_rider(r):
+            out.append({"op": "attack_rider", "slot": i, "opcode": OP_HP_RIDER,
+                        **zh_hp_rider(r)})
         elif op == OP_ATTACK_RIDER and (attack_rider(r) or zh_rider(r)):
             rider = attack_rider(r) or {}
             zh = zh_rider(r)

@@ -54,6 +54,13 @@ BASELINE_STATED_CHANCE = 1214
 # firing on every cast -- which is silent, because nothing crashes when a skill is
 # simply too strong.
 BASELINE_GATED = 1822
+# Statuses with a stack cap, measured 2026-08-29: 51 from the `(N)` name suffix plus 51
+# read from glossary prose (unanimous votes only). A fall means the prose reader broke
+# and those statuses silently stopped stacking -- which nothing crashes on.
+BASELINE_STACK_CAPS = 105
+# op 6 effects decoded (an amount sized off the caster's HP pool), measured 2026-08-29:
+# 114 of the 125 rows carrying the opcode. The other 11 state no number and stay skips.
+BASELINE_OP6_DECODED = 114
 
 _fail = 0
 
@@ -215,6 +222,13 @@ def main():
           f"{len(leaked)}, e.g. {leaked[:5]}")
 
     print("\nstatus registry (phase 2):")
+    op6 = [e for s_ in specs.values() for e in s_["effects"] if e.get("opcode") == 6]
+    check("op 6 decode coverage has not regressed", len(op6) >= BASELINE_OP6_DECODED,
+          f"{len(op6)} < {BASELINE_OP6_DECODED}")
+    check("every decoded op 6 names its HP basis and a percent",
+          all(e.get("basis") in ("caster_current_hp", "caster_max_hp")
+              and e.get("percent") for e in op6))
+
     reg_path = os.path.join(HERE, "battle_data/statuses.json")
     if not os.path.isfile(reg_path):
         check("statuses.json exists", False, "run tools/compile_statuses.py")
@@ -330,6 +344,16 @@ def main():
           all("status" in e["requires"] for e in unresolved), str(len(unresolved)))
     print(f"        (gates: {dict(shapes)}, "
           f"{len(unresolved)} naming a status we cannot resolve)")
+
+    reg_path = os.path.join(HERE, "battle_data/statuses.json")
+    if os.path.exists(reg_path):
+        with open(reg_path) as f:
+            reg = json.load(f)
+        capped = [v for v in reg.values() if v.get("stack_cap")]
+        src = collections.Counter(v.get("stack_cap_source") for v in capped)
+        check("statuses with a stack cap have not regressed",
+              len(capped) >= BASELINE_STACK_CAPS, f"{len(capped)} < {BASELINE_STACK_CAPS}")
+        print(f"        (stack caps: {dict(src)})")
 
     print(f"\n{_fail} failure(s)")
     return 1 if _fail else 0

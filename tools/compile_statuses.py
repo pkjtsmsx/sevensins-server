@@ -127,6 +127,67 @@ def stack_cap(s):
     return int(m.group(1)) if m else None
 
 
+# "\u6700\u591a\u53ef\u758a\u52a07\u6b21", "\u53ef\u5806\u758a5\u6b21", "\u4e0a\u96503\u5c64" -- the cap stated in a glossary line.
+#
+# NOT a threshold. \u8e0f\u8db3's line reads \u5c64\u6578\u9054\u52303\u5c64\uff0c\u6703\u89f8\u767c\u6b98\u5fc3 -- "at 3 stacks something
+# fires" -- which says what happens AT 3, not that 3 is the ceiling. Reading that as a cap
+# is the threshold-as-magnitude trap that has already cost this codebase twice, so the
+# pattern requires an explicit \u758a\u52a0/\u5806\u758a/\u7d2f\u7a4d or \u6700\u591a/\u4e0a\u9650.
+_ZH_CAP = re.compile(r"(?:\u6700\u591a)?\u53ef?(?:\u758a\u52a0|\u5806\u758a|\u7d2f\u7a4d)\s*(\d+)\s*[\u6b21\u5c64]"
+                     r"|(?:\u6700\u591a|\u4e0a\u9650)\s*(\d+)\s*[\u5c64\u6b21]")
+# "stacks up to 5 times", "up to 5 stacks", "can be stacked 5 times"
+_EN_CAP = re.compile(r"up\s+to\s+(\d+)\s+(?:stacks?|times)"
+                     r"|stack(?:s|ed|able)?\s+(?:up\s+to\s+)?(\d+)\s+times", re.I)
+
+
+def _bare(name):
+    """A glossary key: the name with its `(N)` suffix and quote marks off.
+
+    The suffix has to go on BOTH sides of the join. `\u843d\u7fbd(5)` is the status ROW's name
+    while every glossary line that describes it is headed `\u843d\u7fbd`, so keying on the raw
+    name silently lost the one status whose cap two independent sources agree on.
+    """
+    n = re.sub(r"\s*\((\d+)\)\s*$", "", (name or "").strip())
+    return re.sub(r"\s+", "", n).strip("\u300c\u300d\u300e\u300f\"' ")
+
+
+def zh_glossary_lines(note):
+    """-> {bare name: body} for the `\u203b \u540d\u7a31\uff1abody` lines of one `_note1`."""
+    out = {}
+    for part in re.split(r"[\u203b\uff0a*]", note or "")[1:]:
+        flat = " ".join(part.split())
+        m = re.match(r"^(.{1,40}?)\s*[:\uff1a]\s*(.+)$", flat)
+        if m:
+            out[_bare(m.group(1))] = m.group(2).strip()
+    return out
+
+
+def prose_caps(rows):
+    """-> {bare status name: (cap, agreement, samples)} read from glossary lines.
+
+    The Chinese first and the English only where it is silent, per CLAUDE.md \u00a73. The
+    corpus votes: 2,436 lines carry a cap and exactly one name disagrees with itself
+    (\u8c93\u54aa\u9234\u94c3, 12 lines saying 10 and 9 saying 20), so a majority is a safe rule and the
+    minority is reported rather than hidden.
+    """
+    votes = collections.defaultdict(collections.Counter)
+    for r in rows.values():
+        for name, body in zh_glossary_lines(r.get("_note1")).items():
+            m = _ZH_CAP.search(body)
+            if m:
+                votes[name][int(m.group(1) or m.group(2))] += 1
+    en_votes = collections.defaultdict(collections.Counter)
+    for r in rows.values():
+        for name, body in glossary_lines(r.get("_note1_en")).items():
+            m = _EN_CAP.search(body)
+            if m:
+                # `_bare`, NOT `norm_name`: norm_name strips the `(SP)` marker as well,
+                # and on this join that handed `Spirit(SP)` -- a distinct row -- the
+                # base Spirit's cap of 5 on no evidence of its own.
+                en_votes[_bare(name).lower()][int(m.group(1) or m.group(2))] += 1
+    return votes, en_votes
+
+
 def glossary_lines(note):
     """-> {name: body} for the `* Name: body` lines of one note1_en."""
     out = {}
@@ -232,6 +293,10 @@ def build():
                 if aid in rows:
                     applied_by[aid] += 1
 
+    zh_caps, en_caps = prose_caps(rows)
+    cap_report = {"from_prose": 0, "suffix_confirmed": 0, "suffix_disagrees": [],
+                  "split_votes": []}
+
     out = {}
     for sid, r in rows.items():
         if r.get("_type") != TYPE_STATUS and sid not in applied_by:
@@ -248,7 +313,36 @@ def build():
             cat, stackable = STATUS_BLOCK.get(block, ("other", False))
         else:
             block, (cat, stackable) = -1, ("content", False)
-        cap = stack_cap(raw_name)
+        # The cap: the `(N)` suffix on the name where there is one, else the glossary
+        # prose. The suffix is not the only place the pack states it -- 47 statuses
+        # (Wrath, Beer, Prime Glory, Overflowing Mana...) carry no suffix and say
+        # \u6700\u591a\u53ef\u758a\u52a05\u6b21 in every line that describes them. With no cap the engine
+        # pinned `stacks` at 1, so those never stacked at all and every "if you hold N
+        # stacks" gate on them was unreachable. The suffix is trusted over prose where
+        # both exist, and a disagreement is reported rather than resolved.
+        cap = stack_cap(raw_name) or stack_cap(r.get("_name") or "")
+        cap_source = "suffix" if cap else None
+        votes = zh_caps.get(_bare(r.get("_name"))) or en_caps.get(_bare(raw_name).lower())
+        if votes:
+            top, n = votes.most_common(1)[0]
+            if len(votes) > 1:
+                # A split vote is not noise to resolve by majority -- it is the pack
+                # saying the number belongs to the (skill, status) PAIR, which is this
+                # file's own opening rule. Prime Crown "accumulates up to 6 / 9 / 12
+                # times" by skill level; taking 12 for all of them would be wrong on
+                # most. Reported, and the status keeps no cap unless its name carries
+                # one.
+                cap_report["split_votes"].append((sid, raw_name, dict(votes)))
+                votes = None
+        if votes:
+            if cap is None:
+                cap, cap_source = top, ("prose_zh" if _bare(r.get("_name")) in zh_caps
+                                        else "prose")
+                cap_report["from_prose"] += 1
+            elif cap == top:
+                cap_report["suffix_confirmed"] += 1
+            else:
+                cap_report["suffix_disagrees"].append((sid, raw_name, cap, dict(votes)))
         seen = bodies.get(key, [])
         own = (r.get("_note1_en") or "").strip()
         kind, stat, conf, source = classify(own, seen)
@@ -260,6 +354,7 @@ def build():
             "category": cat,
             "stackable": bool(stackable or cap),
             "stack_cap": cap,
+            "stack_cap_source": cap_source,
             "hidden": bool(r.get("_hide")),
             "icon_status_id": r.get("_statusID") or None,
             "sprite_id": r.get("_spriteID") or None,
@@ -278,6 +373,16 @@ def build():
             "unremovable": bool(UNREMOVABLE_RE.search(own)),
             "prose_definitions": len(seen),
         }
+    # Always printed, not only under --report: a cap that changes silently changes how
+    # hard 47 statuses hit, and that deserves a line on every build.
+    print(f"  stack caps: {cap_report['from_prose']} from prose, "
+          f"{cap_report['suffix_confirmed']} suffix confirmed by prose, "
+          f"{len(cap_report['suffix_disagrees'])} suffix/prose disagreements, "
+          f"{len(cap_report['split_votes'])} split votes")
+    for row in cap_report["suffix_disagrees"]:
+        print(f"    DISAGREE {row}")
+    for row in cap_report["split_votes"]:
+        print(f"    split    {row}")
     return out, rows
 
 

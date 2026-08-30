@@ -26,7 +26,7 @@ flips cooldown signs.
 | conditions gating (holds / HP / round / crit / kill / stacks) | 1,844 effects |
 | status applications rolling their STATED odds | 1,214 (1,181 from the Chinese) |
 | still firing unconditionally | see item 2 — 545 fewer than at the last count |
-| specs with undecoded opcodes (1/3/6/7/118) | 338 (~290 runtime skips) |
+| specs with undecoded opcodes (1/3/7/118…) | 293 — op 6 decoded; 107 distinct mechanics behind the number |
 
 Every number above is recomputed by the census in `test_skill_specs.py` (ratchets) and
 the runtime audit (execute all 2,364 active cast skills, tally `out.skipped`). Run the
@@ -107,17 +107,22 @@ Still to do:
 | stat-down / category gates (能力下降, 可解除, 不可堆疊能力下降) | 83 | `requires_category` — 能力下降 is "a stat-down", a CATEGORY, not a status name |
 | leftover/compound (~350 fragments) | — | triage: some are two conditions ANDed, some are 次-counts, some are OR-of-two-statuses (金剛或超 •金剛) |
 
-**Blocking item, found while doing the above and sized but NOT shipped:** 162 of the
-193 stack-count gates name a status the registry gives **no `stack_cap`**, so its
-`stacks` is pinned at 1 and the gate is unreachable. `compile_statuses.stack_cap`
-reads only the `(N)` suffix of the English name — but the Chinese states the cap in
-prose for **86 statuses over 2,436 glossary lines** (最多可疊加7次, 可疊加5次), with
-exactly one name disagreeing with itself across the corpus. Reading it is a small
-parser change with a LARGE blast radius, which is why it is not in that commit:
-`Active.stat_delta` multiplies magnitude by `stacks` and DoT ticks scale by it too, so
-86 statuses would get up to N× stronger game-wide. Do it as its own piece of work, with
-its own device pass. Until then the engine reports those gates unevaluatable rather
-than shut.
+**Stack caps from prose — done 2026-08-29.** `compile_statuses.prose_caps` reads
+最多可疊加N次 / "stacks up to N times" off the glossary lines: 51 statuses gained a cap
+(46 from the Chinese, 5 from English where the Chinese is silent), 29 existing `(N)`
+suffixes were confirmed by prose, 0 disagreed. Count gates reachable: **31 → 120 of
+193**. Two rules that matter: a **split vote is not resolved by majority** — Prime Crown
+"accumulates up to 6 / 9 / 12 times" by skill level, so the number belongs to the
+(skill, status) pair and the status keeps no cap; and the English join uses the bare
+name, not `norm_name`, which strips `(SP)` and was handing `Spirit(SP)` the base
+Spirit's cap. `test_engine.check_prose_stack_caps` proves Wrath reaches 5 and stops.
+
+Still unreachable, and deliberately so: **Reload (50 gates), Charge, Footing, 疲勞**
+state no ceiling in either language — they are counters ("gain 1 per action, at N
+stacks X fires"). Their id block says *stackable* from a column, but so do 18 stat-mods
+with no stated cap (DEF UP(SP), Berserk), and letting "stackable" mean unbounded would
+buff those on no evidence. Those gates stay unevaluatable. If it ever matters, the fix
+is a per-status curated cap for the counters, not a rule.
 
 After each shape: the gated-effect count in `test_skill_specs.py` goes UP and gets
 pinned so it cannot silently fall back.
@@ -131,11 +136,24 @@ always in-kit), emit `{"op": "follow_up", "skill": id, "chance_pct": N, "require
 Converts 47 runtime skips (and gates some of the 320 ungated). The engine follow_up
 path needs a `chance_pct` roll — same three lines as modify_gauge got.
 
-### 4. Opcodes 3, 6, 7  *(research, then implement what falls out)*
+### 4. Opcodes 3, 7 (and 11 / 119 / 121)  *(research; op 6 is done)*
 
-Contract doc §opcodes: 3 (248 rows) is "will trigger «named» effect" — a cross-skill
-hook, probably the trigger half of what 118 fires; 7 (320) is mixed, several rows pair
-with Deathblow; 6 (46 on casts) unknown. Approach that worked before: dump every
+**Op 6 decoded 2026-08-29** — an amount sized off the caster's own HP pool (current HP
+in 95 rows, max HP in 25), dealt as bonus damage or a heal; contract doc §6.3.0. 114 of
+125 rows, 12 skill groups on 6 casts.
+
+Sized before deciding, by the lift test (how much more often an opcode's rows mention a
+concept than the corpus does): the 338 "undecoded" specs are **107 distinct mechanics**
+once level variants collapse, no cast skill is *entirely* undecoded, and two of the
+opcodes are not decode problems at all — op 1 (11 groups) has known semantics and no
+number in either language (item 5), op 118 (19 groups) is item 3. Of the rest:
+**op 3** (26 groups, 4 casts) does NOT show the "trigger named effect" concept the old
+reading claimed — its only signal is 護盾 at 4.4×, so that reading is unverified;
+**op 7** (30 groups, 7 casts) has *empty prose on every solo row* — nothing to cluster;
+**op 119** (6 groups, all passives) is 技能加速 at 3.8× and its one solo row reads
+戰鬥開始時，使技能加速2回合 — cheapest remaining. Contract doc §opcodes: 3 (248 rows) was
+read as "will trigger «named» effect" — a cross-skill hook, probably the trigger half of
+what 118 fires; 7 (320) is mixed, several rows pair with Deathblow. Approach that worked before: dump every
 (opcode, operand, ZH prose) triple, cluster by prose shape. **Do not go looking for a
 client handler** — item 1 established there is none for any opcode (contract §6.1.1),
 so prose clustering is the only tool here. Do NOT guess semantics into the engine — a

@@ -738,6 +738,24 @@ So the script reads as *trigger* + *(verb, operand)* effects, which is exactly t
 status/passive system needs — **but the no-operand set is a mix of triggers AND
 operandless effects**, as op 115 shows. Do not assume "no operand" means "condition".
 
+### 6.3.0 Op 6 -- an amount sized off the caster's own HP pool  *(decoded 2026-08-29)*
+
+By prose clustering, since there is no client handler to read (§6.1.1). Of 125 rows
+carrying op 6, **95 say 當前/當下/目前體力** -- "current HP", 56.5% of its rows against a
+0.8% corpus baseline, a 74× lift -- and 25 more (one cast's Matcha Sundae) say 最大體力.
+The verb is prose, exactly as with op 1: bonus damage (額外對目標造成自身8%當前體力的傷害)
+or a heal (恢復自己的體力(相當於8%的當前體力), 以瑪門當前體力的30%恢復我方3名體力最低的血量).
+The 4 mob `Slash` rows and one nameless row state no number and stay reported skips.
+
+Compiled as an `attack_rider` with `basis: caster_current_hp | caster_max_hp` and
+`opcode: 6` (`zh_hp_rider`), executed by the same `_rider` path with the basis read off
+the caster *after* the skill's own swings. 114 of 125 decoded, 87 of them gated by the
+若 fragment in front (敵方存活人數大於N is a shape the parser cannot yet read, and those
+25 carry `requires.unparsed` so the engine rolls the conditional policy instead of
+firing). One reading is a choice and is named as such in `_rider`: the bonus damage is
+dealt **flat** -- no crit, no advantage roll -- because it is not a coefficient on any
+stat the strike formula knows. Whether retail mitigated it by DEF is a footage question.
+
 ### 6.3.1 Joining opcodes to the prose glossary needs name normalisation
 
 Of 9,346 statuses named in attack-skill glossaries, 6,885 (73.7%) are also named by a
