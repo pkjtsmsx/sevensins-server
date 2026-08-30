@@ -604,6 +604,13 @@ def _compiled_rules(spec):
         nums = eff.get("numbers") or {}
         requires = eff.get("requires") or {}
         when = ALWAYS
+        # `holds` is the ONLY gate this path can express. Anything else -- an HP
+        # threshold, a round parity, "if this attack killed" -- has no Rule form, and
+        # the code used to fall through to ALWAYS for those: a rule the prose gates
+        # behind a condition fired on every trigger, unconditionally, which is the exact
+        # failure `requires` exists to prevent. Treated as unevaluatable instead, so it
+        # takes CONDITIONAL_POLICY below like any other condition we cannot answer.
+        unevaluatable = bool(requires) and not requires.get("status")
         if requires.get("status"):
             when = holds(requires["status"],
                          on="holder" if requires.get("on") == "caster" else "other")
@@ -620,7 +627,8 @@ def _compiled_rules(spec):
         chance = None if chance is None else float(chance) / 100.0
         if chance is None and eff.get("chance"):
             chance = _core.UNSTATED_CHANCE
-        if chance is None and eff.get("conditional") and not requires:
+        if chance is None and (unevaluatable
+                               or (eff.get("conditional") and not requires)):
             if _core.CONDITIONAL_POLICY == "skip":
                 continue
             if _core.CONDITIONAL_POLICY == "roll":

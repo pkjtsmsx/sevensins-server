@@ -153,14 +153,29 @@ def check_pursuit_rolls_its_chance():
     caster.atk = 1000
     spec = specs.skill(SPINE_BREAK)
     r = random.Random(5)
-    casts = 600
-    fired = sum(1 for _ in range(casts)
-                if C.execute(caster, spec, units, r, chosen="103",
-                             apply_damage=False).children)
-    rate = fired / casts
-    # Was 1.0 before the fix: nothing read the odds and the branch never rolled.
-    check("a 50% pursuit fires about half the time", 0.35 <= rate <= 0.65,
-          f"{fired}/{casts} = {rate:.0%}")
+    casts = 2000
+    crit_casts = fired = 0
+    for _ in range(casts):
+        out = C.execute(caster, spec, units, r, chosen="103", apply_damage=False)
+        crit = any((st.detail or {}).get("crit") for st in out.strikes)
+        crit_casts += crit
+        fired += bool(out.children)
+        if out.children and not crit:
+            check("a pursuit never fires without the crit its prose requires", False,
+                  "fired on a cast that did not crit")
+            return
+    # The full sentence is 若此攻擊暴擊時，以50%機率追擊: a crit AND a coin, and both
+    # halves are asserted because each one alone has been wrong here.
+    #
+    # The rate used to be checked against 50% of ALL casts, which was right only while
+    # the crit gate was being ignored -- the compiler dropped the 若…暴擊 fragment, so
+    # every cast was eligible. It now fires on about half the casts that CRIT, roughly
+    # 7% of all of them, and a test pinned to the old number would have called the fix
+    # a regression.
+    rate = fired / crit_casts if crit_casts else 0
+    check("a 50% pursuit fires about half the casts that crit",
+          crit_casts > 100 and 0.35 <= rate <= 0.65,
+          f"{fired}/{crit_casts} crits = {rate:.0%} ({casts} casts)")
 
 
 def main():

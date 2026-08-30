@@ -276,58 +276,140 @@ def _snapshot(units):
     return {id(u): _held_names(u) for u in units}
 
 
-def _holds_status(unit, name, snapshot=None):
-    """Does this unit hold a status by (loose) name?
+def _holds_status(unit, name, snapshot=None, count=None):
+    """Does this unit hold a status by (loose) name -- and, if asked, N stacks of it?
 
     Loose because the prose and the status row do not always spell it identically --
     "The Divine" in a clause is `Divine` once the article is stripped, and the row may
     carry a `(SP)` suffix. Substring either way, lowercased.
+
+    `count` is a MINIMUM, which is what every stack phrasing in the corpus means
+    (若自身「盛怒」達到5層, 至少有1層, 3層以上). It reads live `Active.stacks` rather than
+    the name snapshot, because the snapshot holds names only; the gate that motivated
+    it is about how much of a marker the caster has built up, not about a toggle two
+    clauses of one cast could flip.
+
+    -> True / False, or **None** when the status is held but cannot stack at all, so
+    the count is unreachable rather than merely unmet.
     """
     if not name:
         return False
     want = str(name).strip().lower()
-    names = (snapshot or {}).get(id(unit)) if snapshot is not None else None
-    if names is None:
-        names = _held_names(unit)
-    for got in names:
-        if got and (want in got or got in want):
+    if count is None:
+        names = (snapshot or {}).get(id(unit)) if snapshot is not None else None
+        if names is None:
+            names = _held_names(unit)
+        return any(got and (want in got or got in want) for got in names)
+    for st in getattr(unit, "statuses", []):
+        got = str(getattr(st, "name", "") or "").lower()
+        if not got or not (want in got or got in want):
+            continue
+        if int(getattr(st, "stacks", 1) or 1) >= int(count):
             return True
+        if int(count) > 1 and not getattr(st, "stack_cap", None):
+            # Held, but the registry gives this status no stack cap, so `stacks` is
+            # pinned at 1 and a "5 stacks of X" gate could never open no matter how the
+            # fight went. That is a shut gate, not a false one -- 162 of the 193 count
+            # gates name such a status, because `stack_cap` is read only off the `(N)`
+            # suffix in the English name while the CHINESE states it in prose
+            # (可疊加5次) for 86 statuses. Until the registry reads that, say so.
+            return None
     return False
 
 
-def _condition_met(requires, caster, target, snapshot=None):
-    """Evaluate a compiled `requires` gate. Two shapes:
+def _condition_met(requires, caster, target, snapshot=None, ctx=None):
+    """Evaluate a compiled `requires` gate. -> True, False, or **None**.
 
-    {"status": X, "on": caster|target, "negate": bool} -- "if the caster is affected by
-    The Divine" (Eclipse Slash), or 若目標未擁有麻痺 with negate. Checked for real
-    against the pre-action snapshot rather than rolled.
+    None means *this engine cannot answer the question here* -- not "false". The caller
+    falls back to CONDITIONAL_POLICY for it, which is the same treatment an unparsed
+    condition gets, because that is exactly what it is from the engine's side. Returning
+    False instead would silently delete the effect; returning True would be the
+    unconditional firing this whole mechanism exists to stop.
 
-    {"hp": {"on": ..., "cmp": ">"/"<"/">="/"<=", "pct": N}} -- 若自身體力低於50%.
+    The shapes, and where each one gets its answer:
+
+    {"status": X, "on": caster|target, "negate": bool, "count": N} -- "if the caster is
+      affected by The Divine" (Eclipse Slash), 若目標未擁有麻痺 with negate,
+      若自身擁有5層Reload with count. Against the pre-action snapshot, not the running
+      state: Lucifer's toggle otherwise satisfies its own second clause.
+    {"hp": {"on": ..., "cmp": ..., "pct": N}} -- 若自身體力低於50%. Live HP.
+    {"killed": bool} -- 若本次攻擊擊倒敵人. From `ctx["targets"]`: `execute` mutates HP
+      through the whole swing loop before any non-damage effect runs, so whether this
+      cast killed is already settled by the time a status asks.
+    {"crit": bool} -- 若本次攻擊暴擊. From `ctx["strikes"]`, same ordering guarantee.
+    {"round": {"parity": 0|1}} or {"round": {"cmp": ..., "n": N}} -- 奇數/偶數回合,
+      總回合數不高於3. Needs `ctx["round"]`, which only a caller that HAS a battle can
+      supply; without it the answer is None rather than a guess.
     """
-    holder = caster if requires.get("on") == "caster" else target
+    ctx = ctx or {}
+
+    killed = requires.get("killed")
+    if killed is not None:
+        struck = ctx.get("targets")
+        if struck is None:
+            return None
+        return bool(any(not u.alive for u in struck)) is bool(killed)
+
+    crit = requires.get("crit")
+    if crit is not None:
+        strikes = ctx.get("strikes")
+        if strikes is None:
+            return None
+        return bool(any((st.detail or {}).get("crit") for st in strikes)) is bool(crit)
+
+    rnd = requires.get("round")
+    if rnd:
+        now = ctx.get("round")
+        if now is None:
+            return None
+        now = int(now)
+        if rnd.get("parity") is not None:
+            return now % 2 == int(rnd["parity"])
+        n, cmp_ = int(rnd.get("n") or 0), rnd.get("cmp")
+        return {"==": now == n, "<=": now <= n, ">=": now >= n,
+                "<": now < n, ">": now > n}.get(cmp_, None)
+
     hp = requires.get("hp")
     if hp:
         holder = caster if hp.get("on") == "caster" else target
         if holder is None or not getattr(holder, "max_hp", 0):
-            return False
+            return None
         now = 100.0 * float(holder.hp) / float(holder.max_hp)
         want = float(hp.get("pct") or 0)
-        cmp_ = hp.get("cmp")
         return {">": now > want, ">=": now >= want, "<": now < want,
-                "<=": now <= want}.get(cmp_, False)
-    held = _holds_status(holder, requires.get("status"), snapshot)
+                "<=": now <= want}.get(hp.get("cmp"), None)
+
+    if not requires.get("status"):
+        return None
+    if requires.get("resolved") is False:
+        # The compiler read a gate out of the prose and could NOT map the name it found
+        # to a status row -- 若自身沒有疲勞, 若擁有5層時 with the marker elided, and the
+        # category conditions (能力下降 is "a stat-down", not a status). Matching that
+        # name against held statuses would fail every time, which is a gate that can
+        # never open: the effect would be deleted from the game rather than gated. So
+        # it is unevaluatable, and takes the same policy as an unparsed condition.
+        # `resolved` is set only by the Chinese reader; the English path omits it, and
+        # those names come from the registry already.
+        return None
+    holder = caster if requires.get("on") == "caster" else target
+    held = _holds_status(holder, requires["status"], snapshot, requires.get("count"))
+    if held is None:                     # a count we have no way to reach -- see above
+        return None
     return (not held) if requires.get("negate") else held
 
 
-def _status_event(caster, target, eff, rng, snapshot=None):
+def _status_event(caster, target, eff, rng, snapshot=None, ctx=None):
     """-> a StatusEvent, or None when the application does not land."""
     st = eff.get("status") or {}
     numbers = eff.get("numbers") or {}
     requires = eff.get("requires")
-    if requires:
-        if not _condition_met(requires, caster, target, snapshot):
-            return None
-    elif eff.get("conditional") and not eff.get("chance") \
+    met = _condition_met(requires, caster, target, snapshot, ctx) if requires else None
+    if met is False:
+        return None
+    # `met is None` -- either no condition was compiled, or one was and this engine
+    # cannot answer it here (a round gate with no battle behind the call). Both are
+    # "unevaluatable", and both take the policy below rather than firing.
+    if met is None and eff.get("conditional") and not eff.get("chance") \
             and eff.get("chance_pct") is None:
         if CONDITIONAL_POLICY == "skip":
             return None
@@ -368,13 +450,18 @@ def _removable(status_row, category):
 
 
 def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=True,
-            coefficient_override=None):
+            coefficient_override=None, round_no=None):
     """Run one skill. -> Outcome.
 
     `apply_damage` mutates target HP as it goes, because later swings of a multi-hit
     skill must see the damage the earlier ones did -- a target that died on swing 2 is
     not struck again on swing 3, and the client's `die` flag depends on that ordering.
     Callers wanting a dry run pass False.
+
+    `round_no` is the battle's round, needed by the 奇數/偶數回合 gates. It has no
+    sensible default -- a caller with no battle behind it (the AI's dry runs, the fuzzer)
+    passes nothing and those gates come back unevaluatable, which is honest. Guessing 1
+    would make every "odd round" clause fire on every cast in the game.
 
     `coefficient_override` supplies the damage coefficient for a spec that has none of
     its own. Pursuit sub-skills need it: their design row carries no numbers at all
@@ -431,6 +518,10 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
 
     # Frozen before the non-damage effects run; see _snapshot.
     held = _snapshot(list(units) + [caster])
+    # What this cast has already done, for the gates that ask about it: 若本次攻擊擊倒敵人
+    # reads `targets` (HP is final by now -- the swing loop above mutated it), and
+    # 若本次攻擊暴擊 reads `strikes`.
+    ctx = {"strikes": out.strikes, "targets": targets, "round": round_no}
 
     # --- everything else, once ------------------------------------------------------
     for e in effects:
@@ -442,7 +533,7 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
             # buffs its own side. `None` means the prose did not say, which is the
             # ordinary "inflicts X on the target" case.
             for tgt in _status_recipients(e.get("recipient"), caster, targets, units):
-                ev = _status_event(caster, tgt, e, r, held)
+                ev = _status_event(caster, tgt, e, r, held, ctx)
                 if ev is None:
                     continue
                 # Land it on the unit as STATE, not just on the wire. The unit is shared
@@ -570,9 +661,23 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
             _rider(caster, e, targets, out, r, apply_damage, skill_id, units)
         elif op == "follow_up":
             child = specs.skill(e["skill"])
-            if e.get("requires") and not _condition_met(
-                    e["requires"], caster, targets[0] if targets else None, held):
+            # Tri-state, like _status_event: False skips, None means the gate could not
+            # be answered here and takes the conditional policy. `not _condition_met(..)`
+            # was correct only while the function returned a plain bool -- once None
+            # became "unevaluatable", it would have skipped every round-gated pursuit
+            # outright instead of rolling for it.
+            gate = _condition_met(e["requires"], caster,
+                                  targets[0] if targets else None, held, ctx) \
+                if e.get("requires") else None
+            if gate is False:
                 out.skipped.append({"op": op, "why": "condition not met", "skill": e["skill"]})
+            elif gate is None and e.get("requires") and CONDITIONAL_POLICY == "skip":
+                out.skipped.append({"op": op, "why": "condition unevaluatable",
+                                    "skill": e["skill"]})
+            elif gate is None and e.get("requires") and CONDITIONAL_POLICY == "roll" \
+                    and not formula.effect_lands(caster, caster, CONDITIONAL_CHANCE, r):
+                out.skipped.append({"op": op, "why": "condition unevaluatable",
+                                    "skill": e["skill"]})
             elif e.get("chance_pct") is not None and not formula.effect_lands(
                     caster, caster, float(e["chance_pct"]) / 100.0, r):
                 # 以50%機率追擊 -- the pursuit is a ROLL. Every follow_up used to fire
@@ -594,7 +699,8 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
                     depth=depth + 1, apply_damage=apply_damage,
                     # The pursuit's damage figure is stated by the PARENT, not by the
                     # sub-skill's own row -- see execute's docstring.
-                    coefficient_override=e.get("coefficient")))
+                    coefficient_override=e.get("coefficient"),
+                    round_no=round_no))
         elif op == "modify_cd":
             turns = e.get("turns")
             if turns is None:

@@ -293,6 +293,91 @@ def check_stated_chance():
           not frac, f"{len(frac)}, e.g. {frac[:2]}")
 
 
+def _gated(requires, **extra):
+    """A one-status spec whose application is gated on `requires`."""
+    return {"id": 0, "swings": 1,
+            "target": {"group": "enemy", "select": "count", "count": 1},
+            "effects": [dict({"op": "apply_status", "requires": requires,
+                              "status": {"id": 3001, "name": "Daze"},
+                              "numbers": {"duration": 1}}, **extra)]}
+
+
+def check_condition_shapes():
+    """The gates compiled from 若/當 fragments, each proved to both open AND shut.
+
+    One-sided is not enough. A gate that always opens is the bug this mechanism exists
+    to stop (two conditional control effects landing on every cast permanently froze a
+    raid boss); a gate that never opens deletes the effect from the game, which is how
+    an unresolvable status NAME used to behave. Every check below is a pair.
+    """
+    # -- ROUND parity and comparison. Unevaluatable without a round, and that is the
+    # third state: not "false", or every 奇數回合 clause in the game would go silent on
+    # the AI's dry runs.
+    for parity, rounds in ((1, (1, 3, 7)), (0, (2, 4, 8))):
+        spec = _gated({"round": {"parity": parity}})
+        for rn in rounds:
+            c, u = field(n_enemy=1)
+            out = core.execute(c, spec, u, random.Random(1), round_no=rn)
+            check(f"parity {parity} fires on round {rn}",
+                  any(e.applied for e in out.statuses))
+            c, u = field(n_enemy=1)
+            out = core.execute(c, spec, u, random.Random(1), round_no=rn + 1)
+            check(f"  ...and not on round {rn + 1}",
+                  not any(e.applied for e in out.statuses))
+    spec = _gated({"round": {"cmp": "<=", "n": 3}})
+    for rn, want in ((1, True), (3, True), (4, False)):
+        c, u = field(n_enemy=1)
+        out = core.execute(c, spec, u, random.Random(1), round_no=rn)
+        check(f"round <= 3 on round {rn} -> {want}",
+              any(e.applied for e in out.statuses) == want)
+    check("a round gate with no round is unevaluatable, not false",
+          core._condition_met({"round": {"parity": 1}}, None, None, None, {}) is None)
+
+    # -- KILLED. `execute` mutates HP through the swing loop before the status loop, so
+    # the answer is already final when the gate asks.
+    for coef, alive_after, want in ((0.001, True, False), (500.0, False, True)):
+        spec = _gated({"killed": True})
+        spec["effects"].insert(0, {"op": "damage", "coefficient": coef, "basis": "ATK"})
+        c, u = field(n_enemy=1)
+        out = core.execute(c, spec, u, random.Random(2))
+        check(f"'if this attack killed' -> {want} when the target {'lives' if alive_after else 'dies'}",
+              any(e.applied for e in out.statuses) == want,
+              f"target hp {u[1].hp}")
+
+    # -- CRIT. Forced both ways through the caster's crit rate rather than by faking a
+    # Strike, so the wiring from formula.strike's detail flag is what is being tested.
+    for cri, want in ((0.0, False), (1.0, True)):
+        spec = _gated({"crit": True})
+        spec["effects"].insert(0, {"op": "damage", "coefficient": 1.0, "basis": "ATK"})
+        c, u = field(n_enemy=1, cri=cri)
+        out = core.execute(c, spec, u, random.Random(3))
+        check(f"'if this attack crit' -> {want} at a {cri:.0%} crit rate",
+              any(e.applied for e in out.statuses) == want)
+
+    # -- STACK COUNT. 若自身擁有5層Reload used to pass on the first stack (af911ee).
+    from engine.status import Active
+    for have, want in ((1, False), (4, False), (5, True), (7, True)):
+        c, u = field(n_enemy=1)
+        c.statuses.append(Active(status_id=9001, name="Reload", kind=None, category="buff", remaining=9,
+                                 stacks=have, stack_cap=7))
+        check(f"5 stacks required, {have} held -> {want}",
+              core._holds_status(c, "Reload", None, 5) is want)
+    # Held but uncappable: `stacks` can never leave 1, so the gate is UNREACHABLE, not
+    # unmet. Answering False would delete the effect from the game.
+    c, u = field(n_enemy=1)
+    c.statuses.append(Active(status_id=9002, name="Reload", kind=None, category="buff", remaining=9, stacks=1))
+    check("a count gate on a status that cannot stack is unevaluatable",
+          core._holds_status(c, "Reload", None, 5) is None)
+    check("  ...and 'at least 1' of it still reads True",
+          core._holds_status(c, "Reload", None, 1) is True)
+
+    # -- an unresolvable NAME is unevaluatable, never a permanently shut gate.
+    c, u = field(n_enemy=1)
+    check("an unresolved gate name is unevaluatable",
+          core._condition_met({"status": "能力下降", "on": "caster", "resolved": False},
+                              c, u[1], None) is None)
+
+
 def main():
     print("\ntargeting:")
     caster, units = field()
@@ -398,6 +483,9 @@ def main():
 
     print("\nstated chances:")
     check_stated_chance()
+
+    print("\ncondition shapes:")
+    check_condition_shapes()
 
     print("\nconditional application:")
     # Eclipse Slash gates its Freeze on "the caster is affected by The Divine" and its

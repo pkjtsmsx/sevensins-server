@@ -1374,7 +1374,7 @@ _ZH_COND_START = re.compile(r"^(?:若|當|如果|在)")
 _ZH_COND_HOLDS = re.compile(
     r"(?P<who>目標|自身|自己|敵方|我方|對方)?[^，。]*?"
     r"(?P<neg>未|沒有|不)?(?:擁有|持有|附有|處於|帶有)"
-    r"(?:\d+層)?(?:任[一何])?「?(?P<name>[^」，。的時之狀]{1,14}?)」?(?:狀態|效果)?(?:時|的|，|$)")
+    r"(?:\d+層)?(?:任[一何])?「?(?P<name>[^」，。的時之狀]{1,14}?)」?(?:狀態|效果)?(?:時|的|則|，|$)")
 _ZH_COND_HP = re.compile(
     r"(?P<who>目標|自身|自己|敵方|我方)?(?:的)?(?:體力|血量|HP)\s*"
     r"(?P<cmp>高於|低於|不高於|不低於|大於|小於|[<>＜＞≥≤]|為滿值|全滿|滿值|未滿)?\s*"
@@ -1394,8 +1394,86 @@ def _zh_status_en(rows, zh):
     return _ZH_NAME_TO_EN.get(sp.norm_name_zh(zh))
 
 
+# \u82e5\u672c\u6b21\u653b\u64ca\u64ca\u5012\u6575\u4eba / \u82e5\u672c\u6b21\u653b\u64ca\u672a\u64ca\u5012\u6575\u4eba -- did this cast kill what it hit. Answerable
+# at status-apply time: `core.execute` mutates HP through the whole swing loop before it
+# runs the non-damage effects, so `not target.alive` is already final there.
+_ZH_COND_KILL = re.compile(r"(?P<neg>\u672a|\u6c92\u6709|\u4e0d)?\u64ca(?:\u5012|\u6bba)")
+# \u82e5\u672c\u6b21\u653b\u64ca\u66b4\u64ca / \u82e5\u653b\u64ca\u6642\u767c\u751f\u66b4\u64ca -- did any strike of this cast crit. NOT "(\u53ef\u66b4\u64ca)",
+# which is a parenthetical saying a HEAL may crit, not a condition on anything.
+_ZH_COND_CRIT = re.compile(r"(?P<neg>\u672a|\u6c92\u6709|\u4e0d)?(?:\u767c\u751f)?\u66b4\u64ca")
+_ZH_CRIT_PAREN = re.compile(r"[(\uff08]\u53ef\u66b4\u64ca[)\uff09]")
+# \u82e5\u81ea\u8eab\u300c\u76db\u6012\u300d\u9054\u52305\u5c64 / \u82e5\u81ea\u8eab\u81f3\u5c11\u67091\u5c64\u81f3\u9ad8\u69ae\u5149 / \u82e5\u653b\u64ca\u6642\u81ea\u8eab\u64c1\u67095\u5c64Reload.
+# The stack COUNT, which `_ZH_COND_HOLDS` sees as `(?:\d+\u5c64)?` and throws away -- so
+# "if you hold 5 stacks of Reload" shipped as "if you hold any Reload" (af911ee).
+_ZH_COND_STACKS = re.compile(
+    r"(?:\u9054\u5230|\u81f3\u5c11|\u64c1\u6709|\u6301\u6709|\u6709)?\s*(?P<n>\d+)\s*\u5c64\s*(?:\u4ee5\u4e0a)?"
+    r"|\u300c?(?P<name>[^\u300d\uff0c\u3002]{1,14}?)\u300d?\s*\u9054\u5230\s*(?P<n2>\d+)\s*\u5c64")
+# \u82e5\u653b\u64ca\u6642\u70ba\u5947\u6578\u56de\u5408 / \u5076\u6578\u56de\u5408 / \u7b2c3\u56de\u5408 / \u7e3d\u56de\u5408\u6578\u4e0d\u9ad8\u65bcN.
+# \u82e5\u81ea\u8eab\u300c\u76db\u6012\u300d\u9054\u52305\u5c64 -- the status named first, the count after.
+_ZH_STACK_NAME_FIRST = re.compile(
+    r"\u300c?(?P<name>[^\u300d\uff0c\u3002\u82e5\u7576\u5247]{1,14}?)\u300d?\s*(?:\u9054\u5230|\u7d2f\u7a4d\u5230|\u5806\u758a\u5230|\u9054)\s*(?P<n>\d+)\s*\u5c64")
+# \u82e5\u81ea\u8eab\u81f3\u5c11\u67091\u5c64\u81f3\u9ad8\u69ae\u5149 / \u82e5\u653b\u64ca\u6642\u81ea\u8eab\u64c1\u67095\u5c64Reload -- the count first, the status after.
+_ZH_STACK_COUNT_FIRST = re.compile(
+    r"(?:\u81f3\u5c11\s*(?:\u64c1\u6709|\u6301\u6709|\u6709)?|\u64c1\u6709|\u6301\u6709|\u6709)\s*(?P<n>\d+)\s*\u5c64\s*(?:\u4ee5\u4e0a)?\s*"
+    r"\u300c?(?P<name>[^\u300d\uff0c\u3002\u5247\u6642]{1,14}?)\u300d?(?:\u72c0\u614b|\u6548\u679c)?(?:\u6642|\u7684|\u5247|\uff0c|$)")
+_ZH_COND_ODD = re.compile(r"\u5947\u6578\s*\u56de\u5408")
+_ZH_COND_EVEN = re.compile(r"\u5076\u6578\s*\u56de\u5408")
+_ZH_COND_ROUND_N = re.compile(
+    r"(?:\u7b2c|\u7e3d\u56de\u5408\u6578|\u56de\u5408\u6578)?\s*(?P<cmp>\u4e0d\u9ad8\u65bc|\u4e0d\u4f4e\u65bc|\u9ad8\u65bc|\u4f4e\u65bc)?\s*(?P<n>\d+)\s*\u56de\u5408"
+    r"(?P<tail>\u4ee5\u5167|\u4ee5\u4e0a|\u4ee5\u4e0b)?")
+
+
 def _zh_parse_condition(rows, frag):
-    """-> a `requires` dict for one condition fragment, or None."""
+    """-> a `requires` dict for one condition fragment, or None.
+
+    Ordered most-specific first. \u5c64 is tested before the bare hold because
+    \u82e5\u81ea\u8eab\u64c1\u67095\u5c64Reload satisfies both and the count is the whole point of it.
+    """
+    # -- this cast's own outcome: killed / crit. Both read `ctx` in the engine rather
+    # than unit state, so they are only evaluatable during the cast that raised them.
+    if _ZH_COND_KILL.search(frag):
+        m = _ZH_COND_KILL.search(frag)
+        return {"killed": not m.group("neg")}
+    if _ZH_COND_CRIT.search(frag) and not _ZH_CRIT_PAREN.search(frag):
+        m = _ZH_COND_CRIT.search(frag)
+        return {"crit": not m.group("neg")}
+
+    # -- the round number. \u5947\u6578/\u5076\u6578 first: "\u7b2c1\u56de\u5408" is a different shape from
+    # "\u5947\u6578\u56de\u5408" and only the latter is parity.
+    if _ZH_COND_ODD.search(frag):
+        return {"round": {"parity": 1}}
+    if _ZH_COND_EVEN.search(frag):
+        return {"round": {"parity": 0}}
+    m = _ZH_COND_ROUND_N.search(frag)
+    if m and re.search(r"\u56de\u5408\u6578|\u7b2c\s*\d+\s*\u56de\u5408|\u56de\u5408(?:\u4ee5\u5167|\u4ee5\u4e0a|\u4ee5\u4e0b)", frag):
+        cmp_, tail, n = m.group("cmp") or "", m.group("tail") or "", int(m.group("n"))
+        op = {"\u4e0d\u9ad8\u65bc": "<=", "\u4e0d\u4f4e\u65bc": ">=", "\u9ad8\u65bc": ">", "\u4f4e\u65bc": "<"}.get(cmp_)
+        if op is None:
+            op = {"\u4ee5\u5167": "<=", "\u4ee5\u4e0b": "<=", "\u4ee5\u4e0a": ">="}.get(tail, "==")
+        return {"round": {"cmp": op, "n": n}}
+
+    # -- "N stacks of X", in the three orders the corpus writes it. Tried BEFORE the
+    # bare hold because \u9054\u5230 and \u81f3\u5c11\u6709 are not hold verbs, so those two forms used to
+    # fall through to None and the effect fired unconditionally.
+    for sm in (_ZH_STACK_NAME_FIRST.search(frag), _ZH_STACK_COUNT_FIRST.search(frag)):
+        if not sm:
+            continue
+        # The capture can swallow the side word in front of the name -- \u82e5\u81ea\u8eab\u300c\u76db\u6012\u300d\u9054\u52305\u5c64
+        # has no separator between \u81ea\u8eab and the name, so the regex starts at \u81ea. Strip it
+        # here (and keep it, because it is also the answer to WHOSE stacks these are).
+        raw = sm.group("name")
+        lead = re.match(r"^(?:\u82e5|\u7576|\u5982\u679c|\u5728|\u653b\u64ca\u6642|\u81ea\u8eab|\u81ea\u5df1|\u6211\u65b9|\u76ee\u6a19|\u5c0d\u8c61|\u6575\u65b9|\u5c0d\u65b9|\u6575\u4eba|\u64c1\u6709|\u6301\u6709)+", raw)
+        name = raw[lead.end():] if lead else raw
+        name = name.strip("\u300c\u300d\u300e\u300f\"' ")
+        if not name:
+            continue
+        en = _zh_status_en(rows, name)
+        before = frag[:sm.start()] + (lead.group(0) if lead else "")
+        who = "caster" if re.search(r"\u81ea\u8eab|\u81ea\u5df1|\u6211\u65b9", before) and not re.search(
+            r"\u76ee\u6a19|\u6575\u65b9|\u5c0d\u65b9|\u6575\u4eba", before) else "target"
+        return {"status": en or name, "on": who, "negate": False,
+                "resolved": bool(en), "count": int(sm.group("n"))}
+
     m = _ZH_COND_HOLDS.search(frag)
     if m:
         # The holder is whichever side word precedes 擁有 in the fragment -- "若攻擊時
@@ -1404,8 +1482,15 @@ def _zh_parse_condition(rows, frag):
         who = "caster" if re.search(r"自身|自己|我方", before) and not re.search(
             r"目標|敵方|對方|敵人", before) else "target"
         en = _zh_status_en(rows, m.group("name"))
-        return {"status": en or m.group("name"), "on": who,
-                "negate": bool(m.group("neg")), "resolved": bool(en)}
+        out = {"status": en or m.group("name"), "on": who,
+               "negate": bool(m.group("neg")), "resolved": bool(en)}
+        # "\u81f3\u5c11\u67091\u5c64" is a MINIMUM, and every stack phrasing in the corpus is one --
+        # \u9054\u52305\u5c64, \u64c1\u67095\u5c64, 3\u5c64\u4ee5\u4e0a. Shipping this as a bare hold (af911ee) made
+        # "if you have 5 stacks of Reload" true on the first stack.
+        sm = _ZH_COND_STACKS.search(frag)
+        if sm and not out["negate"]:
+            out["count"] = int(sm.group("n") or sm.group("n2"))
+        return out
     m = _ZH_COND_HP.search(frag)
     if m and (m.group("cmp") or m.group("tail")):
         who = m.group("who") or ""

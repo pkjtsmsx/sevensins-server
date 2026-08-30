@@ -48,6 +48,12 @@ BASELINE_COEF_EN_FLOOR = 0     # see the provenance note at the check
 # BOTH directions: it must not fall (a parser regression), and it is the count the
 # roadmap's "655 fire unconditionally" line is measured against.
 BASELINE_STATED_CHANCE = 1214
+# Effects carrying an evaluatable `requires` gate, measured 2026-08-29. A ratchet the
+# other way from the ones above: gates may only be ADDED. A fall means the ZH condition
+# parser stopped recognising a shape, and the effects it used to gate went back to
+# firing on every cast -- which is silent, because nothing crashes when a skill is
+# simply too strong.
+BASELINE_GATED = 1822
 
 _fail = 0
 
@@ -308,6 +314,22 @@ def main():
           zh >= 0.95 * len(stated), f"{zh} of {len(stated)}")
     print(f"        (stated chance: zh {zh}, en {len(stated) - zh}, "
           f"unstated {len(applies) - len(stated)} of {len(applies)})")
+
+    gated = [e for s_ in specs.values() for e in s_["effects"] if e.get("requires")]
+    shapes = collections.Counter()
+    for e in gated:
+        rq = e["requires"]
+        shapes[next((k for k in ("killed", "crit", "round", "hp") if k in rq),
+                    "holds+count" if "count" in rq else "holds")] += 1
+    check("compiled condition gates have not regressed",
+          len(gated) >= BASELINE_GATED, f"{len(gated)} < {BASELINE_GATED}")
+    # An unresolvable name is carried, not dropped, and the ENGINE decides what to do
+    # with it (unevaluatable, not shut). It must stay marked, or that guard goes blind.
+    unresolved = [e for e in gated if e["requires"].get("resolved") is False]
+    check("unresolvable gate names stay flagged for the engine",
+          all("status" in e["requires"] for e in unresolved), str(len(unresolved)))
+    print(f"        (gates: {dict(shapes)}, "
+          f"{len(unresolved)} naming a status we cannot resolve)")
 
     print(f"\n{_fail} failure(s)")
     return 1 if _fail else 0

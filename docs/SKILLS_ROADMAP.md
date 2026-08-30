@@ -23,9 +23,9 @@ flips cooldown signs.
 | status magnitudes (kinds that need one) | 2,608/3,512 (74%) |
 | status durations known | 4,445/6,205 (72%) |
 | shields sized (and absorbing at all) | 125/151 — `shield_hp` was never set before 904a24d |
-| conditions gating (holds / HP) | 344 + 33; follow-ups gated 79/399 |
+| conditions gating (holds / HP / round / crit / kill / stacks) | 1,844 effects |
 | status applications rolling their STATED odds | 1,214 (1,181 from the Chinese) |
-| still firing unconditionally | 655 status applications, 320 follow-ups |
+| still firing unconditionally | see item 2 — 545 fewer than at the last count |
 | specs with undecoded opcodes (1/3/6/7/118) | 338 (~290 runtime skips) |
 
 Every number above is recomputed by the census in `test_skill_specs.py` (ratchets) and
@@ -78,23 +78,49 @@ translation.
 statuses once per cast, so a per-swing chance comes out weaker than retail on a
 multi-hit skill. Recorded in `status_chance`; needs the swing loop, not the parser.
 
-### 2. The remaining condition shapes  *(the big one — 655 + 320 effects)*
+### 2. The remaining condition shapes  *(five of them done 2026-08-29)*
 
-Engine gains one capability per shape; the ZH parser (`_zh_parse_condition`) gains a
-branch per shape. Sizes from the census:
+`_condition_met` is now **tri-state**: True, False, or None for "this engine cannot
+answer that here". None takes CONDITIONAL_POLICY, the same treatment an unparsed
+condition gets. That distinction is the load-bearing part — returning False for an
+unanswerable gate deletes the effect from the game, which is a worse bug than the
+unconditional firing the gate was added to stop, and two shapes below were doing
+exactly that before this pass.
 
-| shape | ~count | engine needs | note |
-|---|---|---|---|
-| turn number / parity (奇數/偶數回合, 總回合數不高於N) | 93 | the ROUND at execute time — pass `battle.round` into `execute()` (new kwarg or a context obj); `requires_turn: {parity/cmp,n}` | Battle owns `round`; threading it through `attack_cmd_json → bridge → execute` is mechanical |
-| target attribute (目標為力/速/技屬性, 弱點屬性) | 93 | `requires_attr: {on, attr | "weak"}`; units carry `attribute`, `formula.advantage` answers 弱點 | cheap |
-| this-hit-crit (若本次攻擊暴擊) | 29 | statuses resolve after strikes in the same `execute` — check `any(s.detail.get("crit") for s in out.strikes)` at `_status_event` time; needs event ordering, strikes already precede statuses | verify ordering first |
-| target killed / not killed (若擊倒/未擊倒) | 44 | same pattern via `Strike.died` | |
-| stack count (若…擁有N層X) | 20 + fixes the approximation shipped in af911ee | `requires.count`; `_holds_status` compares `Active.stacks` | the parser already sees `\d+層`, it just drops it |
-| named ally on field (若「傲慢之魔王 路西法」在場) | 34 | `requires_ally: char_id`; map the quoted name via `char._name` | also gates several passives |
-| leftover/compound (~130) | — | triage: print every unparsed 若-fragment, classify, decide | some are two conditions ANDed |
+Done, with the effects each one gained (`test_engine.check_condition_shapes` proves
+every one of them both opens AND shuts):
 
-After each shape: flattened-count ratchet in `test_skill_specs.py` goes DOWN and gets
-pinned so it cannot silently climb back.
+| shape | effects | how it is answered |
+|---|---|---|
+| round parity / comparison (奇數・偶數回合, 總回合數不高於N) | 254 | `round_no` kwarg on `execute`, passed by `bridge` from `battle.round`. The AI's dry runs and the fuzzer pass nothing, so it reads unevaluatable there rather than guessing round 1 |
+| this-cast crit (若本次攻擊暴擊) | 149 | `ctx["strikes"]` — the swing loop finishes before the non-damage effects run, so `detail["crit"]` is already final |
+| stack count (若…擁有N層X, 達到N層, 至少N層) | 193 | `requires.count` vs live `Active.stacks`; fixes the approximation shipped in af911ee, where "5 stacks of Reload" passed on the first stack |
+| this-cast kill (若擊倒/未擊倒敵人) | 55 | `ctx["targets"]` — HP is mutated by the swing loop, so `not alive` is settled |
+| unresolvable gate names | 108 | now unevaluatable instead of a gate that could never open |
+
+Still to do:
+
+| shape | ~count | engine needs |
+|---|---|---|
+| target attribute (目標為力/速/技屬性, 弱點屬性) | 37 | `requires_attr: {on, attr \| "weak"}`; units carry `attribute`, `formula.advantage` answers 弱點 |
+| named ally on field (若「傲慢之魔王 路西法」在場) | 34 | `requires_ally: char_id`; map the quoted name via `char._name`. Also gates several passives |
+| stat-down / category gates (能力下降, 可解除, 不可堆疊能力下降) | 83 | `requires_category` — 能力下降 is "a stat-down", a CATEGORY, not a status name |
+| leftover/compound (~350 fragments) | — | triage: some are two conditions ANDed, some are 次-counts, some are OR-of-two-statuses (金剛或超 •金剛) |
+
+**Blocking item, found while doing the above and sized but NOT shipped:** 162 of the
+193 stack-count gates name a status the registry gives **no `stack_cap`**, so its
+`stacks` is pinned at 1 and the gate is unreachable. `compile_statuses.stack_cap`
+reads only the `(N)` suffix of the English name — but the Chinese states the cap in
+prose for **86 statuses over 2,436 glossary lines** (最多可疊加7次, 可疊加5次), with
+exactly one name disagreeing with itself across the corpus. Reading it is a small
+parser change with a LARGE blast radius, which is why it is not in that commit:
+`Active.stat_delta` multiplies magnitude by `stacks` and DoT ticks scale by it too, so
+86 statuses would get up to N× stronger game-wide. Do it as its own piece of work, with
+its own device pass. Until then the engine reports those gates unevaluatable rather
+than shut.
+
+After each shape: the gated-effect count in `test_skill_specs.py` goes UP and gets
+pinned so it cannot silently fall back.
 
 ### 3. Follow-ups named in prose (opcode 118 and friends)
 

@@ -120,8 +120,13 @@ def attack_combo(battle, attacker_order, defender_order, skill_id, rng=None):
     if caster is None:
         return None
 
+    # The battle's round goes in because 奇數/偶數回合 gates are only answerable with it,
+    # and this is the one call site that has a battle behind it. The AI's dry runs and
+    # the fuzzer pass nothing, so those gates read unevaluatable there rather than
+    # guessing round 1 and firing every odd-round clause in the game.
     outcome = core.execute(caster, spec, list(battle.units.values()),
-                           rng or random.Random(), chosen=defender_order)
+                           rng or random.Random(), chosen=defender_order,
+                           round_no=getattr(battle, "round", None))
     if not (outcome.strikes or outcome.heals or outcome.gauge or outcome.revives
             or outcome.statuses):
         return None
