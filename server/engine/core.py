@@ -229,6 +229,13 @@ def resolve_targets(caster, spec, units, rng=None, chosen=None):
 CONDITIONAL_POLICY = "roll"
 CONDITIONAL_CHANCE = 0.5
 
+# The stand-in for op 113 when the row's own prose states no probability -- 295 of the
+# 688 op-113 sites. A MODELLING CHOICE, like the two above: the opcode says "resistible"
+# and nothing in the pack says how resistible, so this is a neutral base fed through the
+# effect-accuracy path rather than a number read off anything. Where the prose DOES state
+# odds, they are compiled to `chance_pct` and this is not consulted.
+UNSTATED_CHANCE = 0.75
+
 
 def _status_recipients(who, caster, targets, units):
     """-> who a status is applied to. Defaults to the skill's targets."""
@@ -320,17 +327,25 @@ def _status_event(caster, target, eff, rng, snapshot=None):
     if requires:
         if not _condition_met(requires, caster, target, snapshot):
             return None
-    elif eff.get("conditional") and not eff.get("chance"):
+    elif eff.get("conditional") and not eff.get("chance") \
+            and eff.get("chance_pct") is None:
         if CONDITIONAL_POLICY == "skip":
             return None
         if CONDITIONAL_POLICY == "roll" and not formula.effect_lands(
                 caster, target, CONDITIONAL_CHANCE, rng):
             return None
-    if eff.get("chance"):
-        # op 113 is the chance variant. The pack never states the probability, so the
-        # engine uses the effect-accuracy path with a neutral base rather than inventing
-        # a per-skill number.
-        if not formula.effect_lands(caster, target, 0.75, rng):
+    stated = eff.get("chance_pct")
+    if stated is not None:
+        # The prose states the odds -- "30%固定機率附加暈眩" -- and they win outright over
+        # the stand-in below. Emitted for op 112 as well as 113: see status_chance in
+        # tools/compile_skills.py for why the opcode does not decide this.
+        if not formula.effect_lands(caster, target, float(stated) / 100.0, rng):
+            return None
+    elif eff.get("chance"):
+        # op 113 says the application is resistible and this row's prose states no
+        # number, so the engine uses the effect-accuracy path with a neutral base
+        # rather than inventing a per-skill one.
+        if not formula.effect_lands(caster, target, UNSTATED_CHANCE, rng):
             return None
     dur = numbers.get("duration")
     return StatusEvent(

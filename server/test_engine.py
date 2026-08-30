@@ -251,6 +251,48 @@ def check_effect_recipients():
               str([(e.target, e.name) for e in out.statuses]))
 
 
+def check_stated_chance():
+    """A status application lands at the odds the prose states, not at a stand-in.
+
+    Anchored to the RATE, not to the presence of `chance_pct`: the bug was never a
+    missing field, it was 10%機率附加暈眩 landing about 75% of the time (op 113's
+    stand-in) or every single time (op 112, which used to be read as "guaranteed").
+    Both of those pass a test that only asserts the field is there.
+
+    Rolled through `formula.effect_lands`, so the units come from a caster and target
+    with no Effect Hit or Effect RES of their own -- the stated chance and nothing else.
+    """
+    for pct in (10.0, 90.0):
+        spec = {"id": 0, "swings": 1, "target": {"group": "enemy", "select": "count",
+                                                 "count": 1},
+                "effects": [{"op": "apply_status", "chance": True, "chance_pct": pct,
+                             "status": {"id": 3001, "name": "Daze"}, "numbers": {}}]}
+        rng = random.Random(4)
+        landed = 0
+        for _ in range(2000):
+            c, u = field(n_enemy=1)
+            out = core.execute(c, spec, u, rng)
+            landed += sum(1 for e in out.statuses if e.applied)
+        rate = 100.0 * landed / 2000
+        check(f"a stated {pct:.0f}% lands about {pct:.0f}% of the time",
+              abs(rate - pct) < 4.0, f"{rate:.1f}%")
+
+    # The stand-in still governs op 113 rows whose prose states no number, and it must
+    # stay a NAMED constant rather than drifting back into a literal.
+    check("op 113 with no stated chance uses the named stand-in",
+          isinstance(core.UNSTATED_CHANCE, float) and 0 < core.UNSTATED_CHANCE < 1,
+          repr(core.UNSTATED_CHANCE))
+
+    # `chance_pct` is a PERCENT on every path. It was a fraction on the passive path
+    # alone, which happened to read correctly there and would have read as "always" the
+    # moment a second compiler path wrote the key onto an effect the engine executes.
+    frac = [(sid, e) for sid, sp_ in specs.skills().items()
+            for e in sp_.get("effects") or []
+            if e.get("chance_pct") is not None and float(e["chance_pct"]) <= 1.0]
+    check("no compiled chance_pct is a fraction masquerading as a percent",
+          not frac, f"{len(frac)}, e.g. {frac[:2]}")
+
+
 def main():
     print("\ntargeting:")
     caster, units = field()
@@ -353,6 +395,9 @@ def main():
 
     print("\neffect recipients:")
     check_effect_recipients()
+
+    print("\nstated chances:")
+    check_stated_chance()
 
     print("\nconditional application:")
     # Eclipse Slash gates its Freeze on "the caster is affected by The Divine" and its

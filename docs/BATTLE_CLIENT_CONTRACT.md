@@ -640,12 +640,40 @@ do the operand is a **skill row id**:
 
 | op | n | operand | meaning |
 |---|---|---|---|
-| **112** | 20,719 | STATUS row — 100% | **apply status** (guaranteed) |
-| **113** | 688 | STATUS row — 100% | **apply status with a CHANCE** (resistible) |
+| **112** | 20,719 | STATUS row — 100% | **apply status** (see 6.1.1 — *not* "guaranteed") |
+| **113** | 688 | STATUS row — 100% | **apply status**, marked resistible |
 | **114** | 4,523 | STATUS row, or a category code | **remove status** |
 | **117** | 1,357 | type-7 row (1,257), else a real skill | **trigger a follow-up skill** |
 
 Everything else carries no operand and is a trigger/timing condition (§6.3).
+
+### 6.1.1 112 is not "guaranteed", and the client cannot settle it
+
+The reading above — 112 certain, 113 chancy — was inferred from the operand table alone,
+and the prose disagrees with it. Measured over every apply site, restricted to the
+fragment that both names the status and grants it:
+
+| | states odds in its own fragment | states none |
+|---|---|---|
+| op 112 | **772** | 19,937 |
+| op 113 | 409 | 279 |
+
+`以40%的機率附加挑釁` on Wise Prediction III is an op-**112** row. So a probability is a
+property of the *prose*, not of the opcode, and the compiler emits `chance_pct` for both
+(`status_chance` in `tools/compile_skills.py`). 113 with nothing stated keeps a neutral
+stand-in, `engine/core.UNSTATED_CHANCE`, which is a modelling choice and named as one.
+
+**The client settles nothing here, because it never reads the opcode script.**
+`DesignSkillRow` exposes no `Action`/`ActID` property at all, and the one method that
+touches the array — `DesignSkillRow$$AddSkillScripts` at **0x1aacb00** — walks it looking
+for opcode **4**, reads that slot's operand as a skill id, and registers that row's
+`_actName` in the cinematic map. Nothing else — and **op 4 occurs zero times in the EN
+2.2.7 pack**, so even that branch is dead here. `_action` was the retail *server's*
+program; what the client kept of it is a preload list it never uses. (The branch does
+say what op 4 would have meant — "this skill plays another row's cinematic" — but that
+is read off the binary, not off any row we hold.)
+
+What the 112/113 split does mean is still open. It is not the presence of a chance.
 
 ### 6.1 The status id space is organised in category blocks
 
@@ -872,8 +900,9 @@ does not settle it.
 * the precise semantics of the rarer no-operand opcodes (111, 119, 120, 121, 2, 3, 6, 8,
   11, 12) — low volume, and §6.3 is inference from prose rather than proof;
 * whether slot ORDER encodes sequencing (before/after action) or is just a list;
-* where the *chance* for op 113 comes from — presumably Effect Hit vs Effect Res, which
-  the client's own help text mentions but never quantifies.
+* what the 112/113 split encodes. **Not** "guaranteed vs chancy" — the prose states
+  odds on 772 op-112 sites (§6.1.1). Effect Hit vs Effect RES is how the engine applies
+  whatever number it has; the client's help text mentions both and quantifies neither.
 
 ## 7. Where this leaves a rewrite
 

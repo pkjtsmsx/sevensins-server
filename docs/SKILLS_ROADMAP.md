@@ -24,6 +24,7 @@ flips cooldown signs.
 | status durations known | 4,445/6,205 (72%) |
 | shields sized (and absorbing at all) | 125/151 — `shield_hp` was never set before 904a24d |
 | conditions gating (holds / HP) | 344 + 33; follow-ups gated 79/399 |
+| status applications rolling their STATED odds | 1,214 (1,181 from the Chinese) |
 | still firing unconditionally | 655 status applications, 320 follow-ups |
 | specs with undecoded opcodes (1/3/6/7/118) | 338 (~290 runtime skips) |
 
@@ -47,15 +48,35 @@ to `tools/skill_audit.py`.
 
 ## Work items, in order
 
-### 1. Status-application chance from prose  *(small, high value — do first)*
+### 1. Status-application chance from prose  ✅ **done 2026-08-29**
 
-Op 113 (`chance: true`) rolls a flat 0.75 because "the pack never states the
-probability" — but the **Chinese states it constantly**: 30%機率附加斷腕,
-75%固定機率對其附加混亂. The extra-turn work already built the extractor
-(`_ZH_CHANCE` in compile_skills). Wire it: on op-113 effects, find the chance in the
-clause naming the status, emit `chance_pct`, and have `_status_event` roll that via
-`formula.effect_lands` instead of 0.75. Blast radius ~1,900 chance applications.
-Verify: sample rolls at the stated odds; a stated 10% must not land ~75% of the time.
+`status_chance` in compile_skills reads the odds out of the fragment that grants the
+status; `_status_event` rolls them through `formula.effect_lands`. 1,214 sites, 1,181
+of them answered by the Chinese. Pre-fix, a stated 10% landed **73.5%** of the time and
+a stated 90% on an op-112 row landed **100%**; `test_engine.check_stated_chance`
+measures the rate over 2,000 casts and fails on the old gate.
+
+Three things it turned up that were not in the plan:
+
+* **112 is not "guaranteed".** 772 op-112 sites state odds in the very fragment that
+  grants the status, so `chance_pct` is emitted for both opcodes and the contract doc's
+  §6.1.1 now records the correction. What the 112/113 split *does* encode is open.
+* **The client never reads the opcode script**, so it cannot arbitrate: `DesignSkillRow`
+  exposes no Action property, and `AddSkillScripts` (0x1aacb00) walks `_action` only for
+  opcode 4 — which occurs zero times in this pack.
+* **The English states a different probability from the Chinese on 40 sites** (Freeze at
+  40% in English, 25% in the original). Chances now join recipients and cooldown signs
+  on the §3 list. The reader is ZH-first as a result, and the ratchet in
+  `test_skill_specs` pins ≥95% Chinese provenance so an English-first regression fails.
+
+Still English-only, and the next thing to fix in this area: `annotate_passive` reads
+`_note1_en` and nothing else. It no longer overwrites a Chinese-sourced chance, but 23
+passive chances and every passive trigger, recipient and magnitude still come from the
+translation.
+
+**Not covered:** 每段傷害都有50%固定機率 is a roll PER SWING and the engine applies
+statuses once per cast, so a per-swing chance comes out weaker than retail on a
+multi-hit skill. Recorded in `status_chance`; needs the swing loop, not the parser.
 
 ### 2. The remaining condition shapes  *(the big one — 655 + 320 effects)*
 
@@ -89,8 +110,9 @@ path needs a `chance_pct` roll — same three lines as modify_gauge got.
 Contract doc §opcodes: 3 (248 rows) is "will trigger «named» effect" — a cross-skill
 hook, probably the trigger half of what 118 fires; 7 (320) is mixed, several rows pair
 with Deathblow; 6 (46 on casts) unknown. Approach that worked before: dump every
-(opcode, operand, ZH prose) triple, cluster by prose shape, read the client's handler
-for the opcode in IDA if one exists. Do NOT guess semantics into the engine — a
+(opcode, operand, ZH prose) triple, cluster by prose shape. **Do not go looking for a
+client handler** — item 1 established there is none for any opcode (contract §6.1.1),
+so prose clustering is the only tool here. Do NOT guess semantics into the engine — a
 reported skip beats a wrong effect.
 
 ### 5. The ~900 statuses that need a magnitude nobody states

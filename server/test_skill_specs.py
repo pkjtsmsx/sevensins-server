@@ -44,6 +44,10 @@ BASELINE_SRC_SKILL = 9327          # apply sites whose own skill states the numb
 BASELINE_KNOWN_DURATION = 11570    # skill-stated + corpus-default, combined
 BASELINE_COEF_ZH = 633             # coefficients recovered from the original Chinese
 BASELINE_COEF_EN_FLOOR = 0     # see the provenance note at the check
+# Status applications whose odds the prose states, measured 2026-08-29. A ratchet in
+# BOTH directions: it must not fall (a parser regression), and it is the count the
+# roadmap's "655 fire unconditionally" line is measured against.
+BASELINE_STATED_CHANCE = 1214
 
 _fail = 0
 
@@ -284,6 +288,26 @@ def main():
           f"{known} < {BASELINE_COEF_ZH + BASELINE_COEF_EN_FLOOR}")
     print(f"        (coefficient: en {src['en']}, zh {src['zh']}, "
           f"unknown {src[None]} of {len(dmg)})")
+
+    # A stated probability is the difference between 10%機率附加暈眩 landing a tenth of
+    # the time and landing three quarters of it. Two things are checked, and the second
+    # is the one that catches a silent parser regression: the ratchet.
+    applies = [e for s in specs.values() for e in s["effects"]
+               if e["op"] == "apply_status"]
+    stated = [e for e in applies if e.get("chance_pct") is not None]
+    bad_unit = [e for e in stated if not 0 < float(e["chance_pct"]) <= 100]
+    check("every stated chance is a percent in (0, 100]", not bad_unit,
+          f"{len(bad_unit)}, e.g. {bad_unit[:2]}")
+    check("stated status chances have not regressed",
+          len(stated) >= BASELINE_STATED_CHANCE,
+          f"{len(stated)} < {BASELINE_STATED_CHANCE}")
+    zh = sum(1 for e in stated if e.get("chance_source") == "prose_zh")
+    # The original answers all but a handful, and it has to stay that way: on the 40
+    # sites where the two languages state DIFFERENT odds, the English is the wrong one.
+    check("the Chinese answers the overwhelming majority of them",
+          zh >= 0.95 * len(stated), f"{zh} of {len(stated)}")
+    print(f"        (stated chance: zh {zh}, en {len(stated) - zh}, "
+          f"unstated {len(applies) - len(stated)} of {len(applies)})")
 
     print(f"\n{_fail} failure(s)")
     return 1 if _fail else 0

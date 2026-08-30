@@ -389,6 +389,100 @@ def zh_rider(r):
     return None
 
 
+def _en_granting_fragment(note, name):
+    """-> the fragment of `note` that both names `name` and grants it, or None.
+
+    Same discipline as `passive_who` and `status_target`: narrow to the fragment before
+    reading anything out of it.
+    """
+    for sentence in re.split(r"(?<=[.!?])\s+", note or ""):
+        for frag in _split_fragments(sentence):
+            if name.lower() in frag.lower() and _GRANT_VERB.search(frag):
+                return frag
+    return None
+
+
+def _zh_chance_fragment(note, name):
+    """-> (fragment, chance match) where `note` states odds for granting `name`, or None.
+
+    `_GRANT_VERB` alone is too narrow HERE, and being narrow is expensive: the fragment
+    falls through to the English, and on this particular number the English is wrong
+    often enough to matter. Two of twelve blind samples disagreed --
+
+        \u4ee535%\u6a5f\u7387\u9b45\u60d1\u6575\u65b9\u96a8\u6a5f2\u4eba   vs  "a 40% chance to inflict Enchant on 2 random enemy targets"
+        \u4ee530%\u6a5f\u7387\u4f7f\u6575\u5168\u9ad4\u51cd\u7d50   vs  "a 40% chance to inflict Freeze on all enemies"
+
+    -- and in both the Chinese fragment grants with a form `_GRANT_VERB` does not list:
+    the causative \u4f7f/\u4ee4, or the status name used bare as the verb (5%\u6a5f\u7387\u6688\u7729, 25%\u6a5f\u7387\u4e2d\u6bd2).
+    Widening the verb list would change every other reader that shares it, so the
+    widening lives here: within one fragment, a status named AFTER the stated odds is
+    governed by them. \u3001 is deliberately not a fragment separator (see _CLAUSE_SPLIT), so
+    \u4ee530%\u6a5f\u7387\u4f7f\u76ee\u6a19\u6688\u7729\u3001\u4e2d\u6bd2 correctly gives both statuses the one stated chance.
+    """
+    want = sp.norm_name_zh(name)
+    for sentence in re.split(r"[\u3002\n]", note or ""):
+        for frag in _split_fragments(sentence):
+            if want not in sp.norm_name_zh(frag):
+                continue
+            m = _ZH_CHANCE.search(frag)
+            if m and (_GRANT_VERB.search(frag)
+                      or want in sp.norm_name_zh(frag[m.end():])):
+                return frag, m
+            if _GRANT_VERB.search(frag):
+                return frag, None     # granted here, and states no odds
+    return None
+
+
+def status_chance(r, zh_name, en_name):
+    """-> {"chance_pct": N, "chance_source": ...} for a status application, or {}.
+
+    The opcode says an application HAPPENS; only the prose says how LIKELY, and it says
+    so constantly -- \u4ee540%\u7684\u6a5f\u7387\u9644\u52a0\u6311\u91c1, "30% fixed chance to inflict Stun". Without this,
+    op 113 rolled a flat 0.75 stand-in and op 112 landed every time, so a stated 10%
+    landed seven and a half times too often and a stated 80% landed too seldom.
+
+    **Not gated on opcode 113.** The contract doc read 112 as "guaranteed" and 113 as
+    "with a chance", inferred from the operand table alone -- and the prose disagrees:
+    648 op-112 sites state a probability in the very fragment that grants the status
+    (Wise Prediction III: \u4ee5\u4e0b70%\u7684\u6a5f\u7387\u9644\u52a0\u6311\u91c1). The client settles nothing either way,
+    because it never reads the opcode script at all: `DesignSkillRow` exposes no Action
+    property, and `AddSkillScripts` (0x1aacb00) walks `_action` only to find opcode 4 so
+    it can preload that sub-skill's cinematic. The script was the retail SERVER's, and
+    the prose is the only authority we have, so where it states odds we roll them --
+    whichever opcode carries the row. Where it states none, 113 keeps its stand-in.
+
+    STRICTLY the granting fragment. Walking back through earlier fragments -- the way
+    `zh_condition_for` walks back for a \u82e5 -- was measured and is wrong: of the 118 sites
+    it reached, every one sampled took a probability belonging to a DIFFERENT status
+    stated earlier in the same sentence.
+
+        105%\u653b\u64ca\u529b\u76843\u6bb5\u50b7\u5bb3\uff0c25%\u6a5f\u7387\u4f7f\u76ee\u6a19\u6688\u7729\uff1b\u884c\u52d5\u524d\u7372\u5f97\u6c23\u5408\u6548\u679c
+                            ^^^^ Daze's odds       ^^^^ Spirit, which states none
+
+    14 blind samples at distance 0 were all correct; every sample at distance >= 1 was
+    wrong. A status whose own fragment states no probability therefore has none.
+
+    One known approximation, recorded rather than fixed: \u6bcf\u6bb5\u50b7\u5bb3\u90fd\u670950%\u56fa\u5b9a\u6a5f\u7387 is a
+    roll PER SWING, and the engine applies statuses once per cast, so a per-swing chance
+    comes out weaker than retail on a multi-hit skill.
+    """
+    if zh_name:
+        got = _zh_chance_fragment(r.get("_note1"), zh_name)
+        if got:
+            frag, m = got
+            if m:
+                return {"chance_pct": float(m.group(1)), "chance_source": "prose_zh"}
+            return {}          # the original states the grant and states no odds
+    if en_name:
+        frag = _en_granting_fragment(r.get("_note1_en"), en_name)
+        if frag:
+            m = _STATED_CHANCE.search(frag)
+            if m:
+                return {"chance_pct": float(m.group(1) or m.group(2)),
+                        "chance_source": "prose"}
+    return {}
+
+
 def clause_percent(r, op):
     """-> the percentage stated next to THIS effect's own phrase, or None.
 
@@ -853,6 +947,11 @@ def effects(rows, r):
             meta = status_meta(rows, aid)
             out.append({"op": "apply_status", "slot": i,
                         "chance": op == OP_APPLY_CHANCE,
+                        # The stated odds, from the fragment that grants it. See
+                        # status_chance: this is emitted for op 112 as well, because
+                        # the prose states probabilities there too.
+                        **status_chance(r, (rows.get(aid) or {}).get("_name"),
+                                        meta.get("name")),
                         "conditional": is_conditional(r, meta.get("name")),
                         "requires": (condition_requires(r, meta.get("name"))
                                      or zh_condition_for(rows, r, (rows.get(aid) or {}).get("_name"))),
@@ -1744,12 +1843,20 @@ def passive_who(r, name, zh_name=None):
 
 
 def passive_chance(clause):
-    """-> the probability the clause states, as a fraction, or None."""
+    """-> the probability the clause states, as a PERCENT, or None.
+
+    Percent, not a fraction, because it is stored under `chance_pct` and that key has to
+    mean one thing. It used to mean two: this function wrote 0.4 while `effects()` and
+    core.execute's gauge and follow-up paths wrote 40.0 and divided by 100. Nothing was
+    visibly broken only because the two paths never read each other's specs -- and
+    `status_chance` above now writes the key on effects that DO reach both. Unified
+    here, with `engine/passives.py` dividing at the point of use.
+    """
     m = _STATED_CHANCE.search(clause or "")
     if not m:
         return None
     pct = float(m.group(1) or m.group(2))
-    return pct / 100.0 if 0 < pct <= 100 else None
+    return pct if 0 < pct <= 100 else None
 
 
 def passive_select(clause):
@@ -1887,9 +1994,13 @@ def annotate_passive(r, spec, rows=None):
                                    "clause": clause[:160]})
         if sel:
             e["select"] = sel
+        # English only -- this whole annotator reads `_note1_en` -- so it must not
+        # overwrite a probability `status_chance` already read out of the original.
+        # On the 40 sites where the two languages state different odds, the English is
+        # the wrong one, and a passive's are no more trustworthy than a cast's.
         stated = passive_chance(clause)
-        if stated is not None:
-            e["chance_pct"] = stated
+        if stated is not None and e.get("chance_source") != "prose_zh":
+            e["chance_pct"], e["chance_source"] = stated, "prose"
         if trigger is not None and not e.get("requires"):
             # `is_conditional` flags any clause containing if/when/while, and on a
             # passive the trigger IS that word -- "When a battle starts, inflict

@@ -563,8 +563,8 @@ def _compiled_rules(spec):
     Conventions are core.execute's, deliberately -- an effect should not behave
     differently for being on a passive:
 
-      * `chance` (op 113) rolls at the same neutral 0.75, since the pack never states a
-        probability;
+      * a probability the prose states (`chance_pct`) is rolled as stated, and op 113
+        with none stated falls back to core's neutral `UNSTATED_CHANCE`;
       * a `requires` clause becomes a real condition;
       * a conditional with nothing to evaluate follows CONDITIONAL_POLICY, which rolls.
     """
@@ -611,10 +611,15 @@ def _compiled_rules(spec):
         # policy at call time is what keeps the two from importing each other.
         from . import core as _core
         # A stated probability beats op 113's stand-in: the opcode only says "this one
-        # is chancy", while the prose says how chancy.
+        # is chancy", while the prose says how chancy. `chance_pct` is a PERCENT on
+        # every path now (it used to be a fraction on passives alone, which read
+        # correctly here and would have read as "always" the moment any other compiler
+        # path wrote the key -- which `status_chance` now does); Rule.chance is a
+        # fraction, so divide at the point of use.
         chance = eff.get("chance_pct")
+        chance = None if chance is None else float(chance) / 100.0
         if chance is None and eff.get("chance"):
-            chance = 0.75
+            chance = _core.UNSTATED_CHANCE
         if chance is None and eff.get("conditional") and not requires:
             if _core.CONDITIONAL_POLICY == "skip":
                 continue
