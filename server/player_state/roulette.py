@@ -176,7 +176,13 @@ def roulette_bonus_datas_json():
 
 
 def roulette_draw(state, box_id):
-    """Spin box `box_id`. -> (ok, results, why)
+    """Spin box `box_id`. -> (ok, results, why, buckets)
+
+    `buckets` names every sync the caller must push -- the same contract `claim_mail`
+    already has. Ignoring it is what left the two Stamina slots invisible until the
+    next login: they route to `energy` and the handler pushed only currency and Normal
+    storage. Taking the bucket from the grant rather than from a hardcoded list is the
+    point, so a slot added to ROULETTE_SLOTS later cannot reintroduce it.
 
     `results` is cmd 307's strargs[0]: `List<List<int>>`. `Roulette.OnRouletteDraw`
     (0x1AE6B6C) reads each inner list at **[1] = itemId and [2] = amount** (byte offsets
@@ -190,18 +196,22 @@ def roulette_draw(state, box_id):
     expire_roulette_day(state)
     box = str(int(box_id))
     if box not in (str(b) for b in ROULETTE_BOXES):
-        return False, [], f"unknown box {box}"
+        return False, [], f"unknown box {box}", set()
     info = roulette_info(state, box)
     if info["day_drawsum"] >= info["draw_max"]:
-        return False, [], "no draws left today"
+        return False, [], "no draws left today", set()
     cost_id, cost_num = info["cost_item_id"], info["cost_item_num"]
     # spend_cost, not spend_item: the cost may be a currency-backed item id.
     if cost_id and cost_num and not spend_cost(state, cost_id, cost_num):
-        return False, [], f"cannot pay {cost_num}x item {cost_id}"
+        return False, [], f"cannot pay {cost_num}x item {cost_id}", set()
 
     import random
     item_id, amount = random.choice(ROULETTE_SLOTS)
-    grant_reward(state, item_id, amount)
+    # Collect the BUCKET each grant lands in. The wheel pays four different routings --
+    # Diamond/Coin are `_action 5` currency, Stamina is `_action 6` energy, Scrolls are
+    # `_action 0` backpack, the Summon Orbs are `_action 2` -- and the caller has to
+    # push the matching sync or the winnings exist only in the save file.
+    buckets = {grant_reward(state, item_id, amount)}
 
     r = state.setdefault("roulette", {}).setdefault(box, {})
     r["day"] = int(r.get("day", 0)) + 1
@@ -211,6 +221,17 @@ def roulette_draw(state, box_id):
     # The bonus pays out when the spin counter reaches DrawMax, then the track resets.
     if r["sum"] >= ROULETTE_DRAW_MAX:
         for bid, bamt in ROULETTE_BONUS:
-            grant_reward(state, bid, bamt)
+            buckets.add(grant_reward(state, bid, bamt))
         r["sum"] = 0
-    return True, [[int(box), int(item_id), int(amount)]], ""
+    # THE 4-SPIN BONUS IS PAID BUT STILL NOT REPORTED, and that is on purpose here.
+    # It is a real gap -- `results` is all the reply carries, so a bonus that fires is
+    # invisible and the "0/4 Spins Completed!" track resets with nothing shown for it.
+    # But it cannot be fixed by appending a row: per the decompile above, the client
+    # does not read a landing slot, it walks its own `_iiDropItemList` and spins to the
+    # first icon whose ItemID AND ItemCount both match. ROULETTE_BONUS is [210, 50] and
+    # no wheel slot is 210x50 -- 210 appears only as x20 -- so that row matches nothing
+    # and the wheel spins to nothing, in the one panel where a bad payload is known to
+    # hang rather than look wrong. Needs one device check, or its own channel (mail),
+    # before it is written. The bucket the bonus lands in IS reported, so the item
+    # itself now appears in the bag without a relog.
+    return True, [[int(box), int(item_id), int(amount)]], "", buckets

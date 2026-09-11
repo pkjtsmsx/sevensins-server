@@ -3187,7 +3187,7 @@ def stage_execute(r):
 @rpc(PLAYER_GACHA_SERVER, GACHA_REQ_DRAW_ROULETTE)
 def gacha_draw_roulette(r):
     box_id = r.intargs[0] if r.intargs else 101
-    ok, results, why = ps.roulette_draw(r.state, box_id)
+    ok, results, why, buckets = ps.roulette_draw(r.state, box_id)
     if ok:
         ps.save(r.state)
         log(f"    -> roulette {box_id} drew {results}")
@@ -3196,15 +3196,42 @@ def gacha_draw_roulette(r):
             [json.dumps(results, separators=(",", ":")),
              json.dumps(ps.roulette_info(r.state, box_id),
                         separators=(",", ":"))]))
-        # The winnings only exist client-side once we re-push the
-        # bucket they landed in; the panel updates neither by itself.
-        # Push both -- a slot can pay coin/diamond (currency) or
-        # scrolls and orbs (backpack).
-        r.send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
-                               [ps.currency_json(r.state)]))
-        r.send(MSG_RPC, backpack_msg(
-            84, [1],
-            [ps.backpack_json(r.state, ps.BP_STORAGE_NORMAL)]))
+        # The winnings only exist client-side once we re-push the bucket they landed
+        # in; the panel updates none of them by itself.
+        #
+        # This used to push currency and Normal storage UNCONDITIONALLY and nothing
+        # else. That covers Diamond/Coin and the Scrolls, and misses the wheel's two
+        # Stamina slots: item 5 is `_action 6`, which `grant_reward` routes to `energy`.
+        # Both were granted and then invisible until the next login, which reads as the
+        # wheel not paying out. The Summon Orbs (210/211, `_action 2`) were reported as
+        # a third miss and are not one -- `_action 2` is in neither RUNE_ACTION_RANGE
+        # (111..116) nor SOULFRAG_SLOT_INDEX (101..109), so they fall through to
+        # `grant_item` and land in `backpack`, which was already pushed. Measured
+        # across all twelve slots plus the bonus: 6 currency, 5 backpack, 2 energy.
+        #
+        # `roulette_draw` now reports which buckets it actually touched, so each sync
+        # goes out exactly when it is needed -- and a slot added to ROULETTE_SLOTS
+        # later cannot quietly reintroduce the same bug.
+        if "currency" in buckets:
+            r.send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
+                                     [ps.currency_json(r.state)]))
+        if "backpack" in buckets:
+            r.send(MSG_RPC, backpack_msg(
+                84, [1],
+                [ps.backpack_json(r.state, ps.BP_STORAGE_NORMAL)]))
+        if "equipment" in buckets:
+            # No slot reaches this today; it is here so the mapping stays complete.
+            # BACKPACK_CHANGE with the info rows, NOT an 84/BP_STORAGE_EQUIPMENT push:
+            # the former is what every other bucket-aware sender uses (autorun_payout
+            # and three more), and it carries the info rows the Starshards panel's
+            # "Inventory n/999" reads.
+            r.send(MSG_RPC, backpack_msg(
+                BACKPACK_CHANGE, [0],
+                [ps.backpacks_all_json(r.state, {ps.BP_STORAGE_EQUIPMENT}),
+                 ps.backpack_info_json(r.state)]))
+        if "energy" in buckets:
+            # Same message the other bucket-aware senders use rather than a new one.
+            r.send(MSG_RPC, uint_msg(0xAE487D79, 512, [], [ps.energy_json(r.state)]))
     else:
         log(f"    -> roulette {box_id} refused: {why}")
         r.send(MSG_RPC, uint_msg(

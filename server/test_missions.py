@@ -48,19 +48,50 @@ def test_daily_login_ticks():
 
 def test_roulette_spin_ticks_and_resets():
     st = fresh()
-    ok, _res, why = rl.roulette_draw(st, 101)
+    ok, _res, why, _bk = rl.roulette_draw(st, 101)
     check(ok, f"a free spin works: {why}")
     check(cnt(st, 10032) == 1, f"the spin credits the daily, got {cnt(st, 10032)}")
     # Spend the day's allowance, then confirm it is genuinely exhausted...
     for _ in range(rl.ROULETTE_DRAW_MAX):
         rl.roulette_draw(st, 101)
-    ok, _res, why = rl.roulette_draw(st, 101)
+    ok, _res, why, _bk = rl.roulette_draw(st, 101)
     check(not ok, "the daily spin allowance runs out")
     # ...and comes back with the new day. This is the bug: `day` was never cleared.
     st["roulette_day"] = "1999-01-01"
     check(ps.expire_roulette_day(st), "a new day clears the spin counter")
-    ok, _res, why = rl.roulette_draw(st, 101)
+    ok, _res, why, _bk = rl.roulette_draw(st, 101)
     check(ok, f"spins are available again: {why}")
+
+
+def test_roulette_reports_every_bucket_it_pays():
+    """Every wheel slot's sync bucket comes back from the grant, not from a list.
+
+    The handler pushed currency + Normal storage unconditionally, so the two Stamina
+    slots -- item 5, `_action 6`, which `grant_reward` routes to `energy` -- were paid
+    into the save and never synced, and only showed up after a relog. Asserting the
+    bucket SET over the whole wheel rather than "energy is in there somewhere" is the
+    point: a slot added later that routes somewhere new fails this until its sync is
+    wired up.
+    """
+    st = fresh()
+    paid = set()
+    for iid, amount in rl.ROULETTE_SLOTS + rl.ROULETTE_BONUS:
+        paid.add(ps.grant_reward(st, iid, amount))
+    check(paid == {"currency", "backpack", "energy"},
+          f"the wheel pays exactly these buckets, got {sorted(paid)}")
+
+    # And a real spin reports the bucket its own slot landed in -- every time, for
+    # whichever slot the roll picked.
+    st = fresh()
+    for _ in range(rl.ROULETTE_DRAW_MAX):
+        ok, res, why, buckets = rl.roulette_draw(st, 101)
+        if not ok:
+            break
+        iid = res[0][1]
+        check(buckets and buckets <= {"currency", "backpack", "energy"},
+              f"spin reported {buckets}")
+        check(ps.grant_reward(fresh(), iid, res[0][2]) in buckets,
+              f"item {iid} lands in {buckets}")
 
 
 def test_summon_counts_pulls_not_presses():
