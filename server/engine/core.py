@@ -108,6 +108,14 @@ class StatusEvent:
     # percentage OF ("atk" / "caster_max_hp" / "max_hp"). See status.apply_event.
     flat: Optional[float] = None
     basis: Optional[str] = None
+    # +1/-1 when the prose stated a DIRECTION for the magnitude, else None. The compiler
+    # has always emitted `numbers.magnitude_sign` and nothing in the server read it --
+    # a grep for the key across server/ returned only a test. It matters because
+    # `Active.signed_magnitude` falls back to the status's CATEGORY to decide up or
+    # down, and a category outside buff/debuff leaves the direction unknown and the
+    # magnitude unusable. All nine CRI stat_mods are `category: passive_grant`, so
+    # every one of them was inert even once its magnitude arrived. See status.py.
+    sign: Optional[int] = None
 
 
 @dataclasses.dataclass
@@ -434,6 +442,7 @@ def _status_event(caster, target, eff, rng, snapshot=None, ctx=None):
         target=target.order, status_id=st.get("id"), name=st.get("name"),
         applied=True, duration=dur, magnitude=numbers.get("magnitude"),
         stacks=numbers.get("stacks"), flat=numbers.get("flat"), basis=numbers.get("basis"),
+        sign=numbers.get("magnitude_sign"),
         unknown_duration=dur is None and not numbers.get("permanent"),
         permanent=bool(numbers.get("permanent")))
 
@@ -726,7 +735,7 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
 
     # AFTER the riders and follow-ups: those deal damage too, so flagging deaths any
     # earlier would miss a kill that a rider landed.
-    _flag_deaths(out, targets)
+    _flag_deaths(out, targets, units)
 
     # Effects the compiler could not decode at all. Carried, not dropped: a caller that
     # wants to know "did this skill run in full?" must be able to ask.
@@ -818,14 +827,25 @@ def _damage_hooks(caster, targets, out, units, rng):
                 fired=getattr(caster, "_passives_fired", None)))
 
 
-def _flag_deaths(out, targets):
+def _flag_deaths(out, targets, units=()):
     """Mark `died` on the LAST strike naming each unit that ended the skill dead.
 
     Exactly one row per unit, which is what the wire requires -- rows carry final state,
     so flagging every strike after the fatal one would replay the death animation on
     every remaining swing.
+
+    CANDIDATES ARE EVERY UNIT A STRIKE NAMES, not just the skill's targets. A counter
+    kills the ATTACKER, who is never in `targets` -- so a counter that finished off the
+    attacker sent `die: 0` on its row and the client was never told that unit had died.
+    That is the same shape as the DoT soft-lock: the client keeps the unit in its own
+    ActionOrderList and waits for a turn the server will never hand out. Reading the
+    candidates off the strikes instead covers counters, the on-hit extra and the riders
+    in one place, and cannot miss a future path for the same reason -- anything that
+    deals damage has to produce a strike to be on the wire at all.
     """
-    dead = {t.order for t in targets if not t.alive}
+    by_order = {u.order: u for u in (list(targets) + list(units or []))}
+    dead = {o for o in {st.target for st in out.strikes}
+            if by_order.get(o) is not None and not by_order[o].alive}
     if not dead:
         return
     for st in reversed(out.strikes):

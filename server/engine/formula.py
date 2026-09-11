@@ -206,6 +206,14 @@ def strike(caster, target, coefficient, basis="ATK", rng=None, extra_mult=1.0):
 
     crit_rate = getattr(caster, "cri", None)
     crit_rate = BASE_CRIT_RATE if crit_rate is None else float(crit_rate)
+    # ...plus whatever the caster's STATUSES say. Nothing read them before, so every
+    # Critical Surge / Execute Critical / Critical Injection in the game was inert.
+    # Additive on the rate, and the clamp below is what keeps it in range. Imported
+    # here rather than at module scope for the reason the later uses give: `status`
+    # imports `specs`, and keeping formula free of that lets it be exercised on bare
+    # units with no compiled data present.
+    from . import status as _status
+    crit_rate += _status.crit_rate_bonus(caster)
     if adv > 0:
         crit_rate += ADVANTAGE["crit_rate"]
     elif adv < 0:

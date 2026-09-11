@@ -183,7 +183,7 @@ def apply_event(unit, event, caster=None):
         status_id=int(event.status_id), name=event.name or row.get("name"),
         kind=row.get("kind"), category=row.get("category"), stat=row.get("stat"),
         remaining=_remaining_for(event),
-        magnitude=event.magnitude, stack_cap=cap,
+        magnitude=event.magnitude, sign=_sign_for(event, row), stack_cap=cap,
         unremovable=bool(row.get("unremovable")),
         source_atk=int(getattr(caster, "atk", 0) or 0) if caster is not None else None,
         source_order=getattr(caster, "order", None) if caster is not None else None,
@@ -192,6 +192,38 @@ def apply_event(unit, event, caster=None):
         active.shield_hp = shield_size(unit, event, caster)
     unit.statuses.append(active)
     return active
+
+
+def _sign_for(event, row):
+    """-> the direction for this magnitude, or None to let the category decide.
+
+    `tools/compile_skills.py` has always emitted `numbers.magnitude_sign` from the
+    prose's own +/- and NOTHING in the server read it -- a grep for the key across
+    `server/` returned a single test. It matters because `Active.signed_magnitude`
+    otherwise falls back to the status's CATEGORY, and a category outside buff/debuff
+    leaves the direction unknown and the magnitude unusable however well it parsed. All
+    nine CRI stat_mods are `category: passive_grant`, so every Critical Surge / Execute
+    Critical / Critical Injection in the game was inert even once its number arrived.
+
+    **DELIBERATELY LIMITED TO `stat_mod`**, and the reason is the thing this nearly got
+    wrong. Wiring the sign through for every kind changes 2,181 effects, because for
+    697 of them the prose sign DISAGREES with what the category decided -- and the
+    prose is right:
+
+        Fragile      (category debuff) 受到的傷害承受量提高25%  -- the number goes UP
+        Determination(category buff)   降低自己受到的傷害5%     -- the number goes DOWN
+
+    The category answers "is this good for the holder", which is the OPPOSITE of "is
+    the number up" for the whole damage-taken family (503 of the 697 are `damage_mod`).
+    So those disagreements are real bugs and the sign fixes them -- but they move damage
+    numbers across the entire game and want their own change, their own measurement and
+    a device. `stat_mod` cannot have that conflation: the status IS the stat change, so
+    the prose's sign and the magnitude's direction are the same question.
+    """
+    sign = getattr(event, "sign", None)
+    if sign is None or (row or {}).get("kind") != "stat_mod":
+        return None
+    return int(sign)
 
 
 def shield_size(unit, event, caster=None):
@@ -833,6 +865,36 @@ def stat_multiplier(unit, stat):
         if m is not None:
             total += m
     return max(0.0, 1.0 + total / 100.0)
+
+
+def crit_rate_bonus(unit):
+    """-> the CRIT RATE change this unit's statuses add, as a 0..1 DELTA.
+
+    `stat_multiplier` covers ATK/DEF/SPD/HP and nothing else, so the nine `kind=stat_mod`
+    statuses whose stat is CRI -- Execute Critical I-III, Critical Surge I-III, Critical
+    Injection I-III -- applied, drew their icon, counted down and changed nothing:
+    `formula.strike` read crit off the unit's own `cri` attribute and never from a
+    status, in either direction.
+
+    ADDITIVE, not a multiplier, because crit is a RATE: +20% on a 34% base is 54%, not
+    40.8%. That is also why this returns a delta rather than reusing `stat_multiplier`.
+    Not floored -- a reduction is a real effect and `strike` clamps the result to 0..1
+    itself. Stacking is additive and `signed_magnitude` already scales by `stacks`, the
+    same contract `stat_multiplier` has.
+
+    ONLY `kind=stat_mod`. The registry's `other` bucket also holds 146 statuses that
+    name a stat, and it is NOT safe to read as a stat change: `Fear Nothing` (HP) is
+    pursuit damage, `Grand Feast` (HP) is a heal, `Admonition (Reduce CRT)` is its own
+    thing. `other` means unclassified, not "a stat mod we forgot to label".
+    """
+    total = 0.0
+    for st in _actives(unit):
+        if st.kind != "stat_mod" or (st.stat or "").upper() != "CRI":
+            continue
+        m = st.signed_magnitude()
+        if m is not None:
+            total += m
+    return total / 100.0
 
 
 def damage_dealt_multiplier(unit):

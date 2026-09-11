@@ -205,6 +205,11 @@ REVIVE = "revive"
 OF_SELF_ATK = "self_atk"
 OF_SELF_MAX_HP = "self_max_hp"
 OF_OTHER_ATK = "other_atk"          # the other party to the event (attacker or victim)
+# A counter can scale off the holder's DEFENCE, and half of them do: Raphael's
+# 防壁反射 is 以140%防禦力進行反擊 and Belphegor's is 以80%防禦力的傷害回擊. Of the 38
+# compiled counter effects in the pack, 19 are ATK-based and 19 are DEF-based, so
+# assuming ATK would have paid the wall casts a fraction of their real counter.
+OF_SELF_DEF = "self_def"
 
 
 @dataclasses.dataclass
@@ -658,6 +663,44 @@ def _compiled_rules(spec):
             rules.append(Rule(trigger, effect=REVIVE, to=RANDOM_DEAD_ALLY,
                               when=when, chance=chance,
                               magnitude=float(eff["percent"]), note="compiled"))
+        elif (op == "damage" and trigger == ON_DAMAGE_TAKEN
+                and eff.get("coefficient") is not None):
+            # COUNTERATTACKS. This branch did not exist, so every compiled passive
+            # `damage` effect fell off the end of this loop and vanished -- 261 of them
+            # across five triggers, including all 38 counters. Nothing in the game
+            # countered: a sweep of rules_for() over all 14,410 skills returned ZERO
+            # on_damage_taken damage rules, while the compiler had resolved Jealousy
+            # Vortex V as {"op": "damage", "basis": "ATK", "coefficient": 3.5,
+            # "trigger": "on_damage_taken"} the whole time. The loss was here, not in
+            # the compiler, and not in the data.
+            #
+            # ONLY on_damage_taken, deliberately. A compiled damage effect carries
+            # `target: null` on all 261, so who it hits has to come from the trigger.
+            # For a counter the prose settles it -- 反擊/回擊 is aimed at whoever just
+            # struck -- and `core._report`'s docstring already names this exact shape:
+            # "a counter is Rule(ON_DAMAGE_TAKEN, effect=DAMAGE, to=ATTACKER, ...)".
+            # The other 223 (after_action 100, turn_start 69, on_damage_dealt 49,
+            # battle_start 5) have no such tell, and picking a recipient for them would
+            # be inventing one. They stay dropped, visibly, until that is decided.
+            #
+            # Damage is RAW, matching every other non-status effect here: HEAL, GAUGE
+            # and REVIVE all apply their amount directly in `fire`. Routing a counter
+            # through formula.strike would be a different and larger decision than this
+            # branch, not a detail of it.
+            #
+            # NOT GATED ON THE TURN WINDOW. Jealousy Vortex says "(triggers in
+            # Leviathan's first 2 action turns)" and Royal Flush says the same for
+            # Asmodeus; the compiler emits no condition for it (`conditional: false`)
+            # and no per-cast action counter exists to gate on. So these fire on every
+            # hit taken, which is STRONGER than retail, not weaker -- worth knowing
+            # before reading a damage number off a device.
+            rules.append(Rule(
+                trigger, effect=DAMAGE, to=ATTACKER, when=when, chance=chance,
+                basis=(OF_SELF_DEF if (eff.get("basis") or "").upper() == "DEF"
+                       else OF_SELF_ATK),
+                # The compiler stores a multiplier (3.5); Rule.magnitude is a percent.
+                magnitude=float(eff["coefficient"]) * 100.0,
+                note=f"compiled counter: {eff.get('basis')} x{eff.get('coefficient')}"))
     return rules
 
 
@@ -674,9 +717,18 @@ def rules_for(skill_id):
     hand = PASSIVES.get(group)
     if hand:
         return hand
-    if group not in _COMPILED:
-        _COMPILED[group] = _compiled_rules(spec)
-    return _COMPILED[group]
+    # DERIVED RULES CACHE PER SKILL, NOT PER GROUP. The hand table is written per cast
+    # and is level-agnostic, so a group key is right for it. Derived rules are not: the
+    # magnitudes come out of the spec, and the spec is per LEVEL -- Jealousy Vortex is
+    # 175% at I and 350% at V, Serene Way of Harmony 140% at I and 160% at V, and the
+    # same is true of every derived apply_status magnitude in the game. Keying the cache
+    # by group meant the first level anyone happened to ask about won and every other
+    # rank silently inherited its numbers -- and because it was first-ASKED, not lowest,
+    # the result depended on call order: requesting V before I gave the whole ladder
+    # 350%, requesting I first gave it 175%. Two runs of the same fight could disagree.
+    if skill_id not in _COMPILED:
+        _COMPILED[skill_id] = _compiled_rules(spec)
+    return _COMPILED[skill_id]
 
 
 def _amount(rule, holder, target, ctx):
@@ -693,6 +745,8 @@ def _amount(rule, holder, target, ctx):
         return int(target.max_hp * mag / 100.0)
     if rule.basis == OF_SELF_MAX_HP:
         base = holder.max_hp
+    elif rule.basis == OF_SELF_DEF:
+        base = getattr(holder, "defence", 0)
     elif rule.basis == OF_OTHER_ATK:
         other = (ctx or {}).get("attacker") or (ctx or {}).get("victim") or target
         base = getattr(other, "atk", 0)
