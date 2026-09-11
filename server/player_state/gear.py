@@ -18,6 +18,12 @@ from .core import (
     ATTR_ATK,
     QUEST_CASE_OBTAIN_RUNE,
     bump_quest_counter,
+    # The secondary attributes -- newly needed here now that equipped_stat_bonus
+    # passes them through instead of dropping them.
+    ATTR_CDI,
+    ATTR_CRI,
+    ATTR_EANTI,
+    ATTR_EHIT,
     ATTR_DEF,
     ATTR_HP,
     ATTR_PATK,
@@ -1162,6 +1168,22 @@ def bloodpact_game_rule():
 # was looked up. Percent attributes are stored MULTIPLIED BY TEN (340 = 34.0%).
 PERCENT_SCALE = 1000.0          # value / 1000 -> a multiplier (340 -> 0.34)
 
+# Ceilings for the secondary sub-stats, in the design tables' x10 scale (1000 = 100%).
+# Not balance targets -- a guard against pre-repair rolls (CRI _AttrInitV 9990 =
+# CRI+999%). A legitimate roll sits far below these. See equipped_stat_bonus.
+#
+# THESE FOUR NUMBERS ARE A DESIGN CHOICE, NOT A RECONSTRUCTION. Nothing in the pack
+# states a sub-stat ceiling; retail never needed one because it never shipped the bad
+# rows. They exist only because `repair_equipment_rolls` has not been run against every
+# account, so the real end state is to sweep the accounts and delete this dict -- at
+# which point nothing changes for anybody, because no legitimate roll reaches a cap.
+SUBSTAT_CAPS = {
+    "cri": 750,       # 75% crit rate; the pack's own highest legitimate roll is well under
+    "cdi": 1500,      # +150% crit damage on top of the base 1.5x multiplier
+    "ehit": 750,
+    "eanti": 750,
+}
+
 # Which storages hold gear that contributes stats. Bloodpacts (4) are deliberately
 # absent: they carry ReplaceSkill rows, not attributes.
 STAT_BEARING_STORAGES = (BP_STORAGE_EQUIPMENT, BP_STORAGE_SOULFRAG)
@@ -1299,6 +1321,36 @@ def equipped_stat_bonus(state, entry, base):
         pct = totals.get(at, 0)
         if pct:
             flat[key] += int(base.get(key, 0) * pct / PERCENT_SCALE)
+
+    # CRI / CDI / EHIT / EANTI now come through, CLAMPED.
+    #
+    # These were dropped here and the docstring above calls that a gap rather than a
+    # decision: `engine.formula` models all four (`strike` reads cri/cdi/cdr/prc,
+    # `effect_lands` reads ehit/eanti) and `battle.Unit` consumes them off this very
+    # dict, so a starshard's crit sub-stat was the one stat on the piece doing nothing.
+    #
+    # WHY IT WAS PARKED, AND WHY THE CLAMP IS THE ANSWER. The reason for leaving them
+    # out was never that they are unmodelled -- it is that pieces on existing accounts
+    # roll CRI at `_AttrInitV` up to 9990, which is CRI+999.0%. `repair_equipment_rolls`
+    # fixes those, but only for accounts it has been run against, and a piece already
+    # equipped keeps its roll until then. Passing the raw total through would hand those
+    # accounts permanent guaranteed crits.
+    #
+    # So the values pass through a per-attribute ceiling instead of an all-or-nothing
+    # switch. A legitimately rolled sub-stat is far below these caps and is unaffected;
+    # only the absurd legacy rolls are cut, and they are cut to something playable
+    # rather than to zero. This is deliberately a FLOOR under the damage a bad roll can
+    # do, not a balance pass -- once repair_equipment_rolls has swept every account the
+    # caps can be raised or dropped entirely.
+    #
+    # Caps are in the design tables' own x10 scale: 1000 = 100%.
+    for key, at in (("cri", ATTR_CRI), ("cdi", ATTR_CDI),
+                    ("ehit", ATTR_EHIT), ("eanti", ATTR_EANTI)):
+        value = int(totals.get(at, 0))
+        if not value:
+            continue
+        cap = SUBSTAT_CAPS.get(key)
+        flat[key] = min(value, cap) if cap is not None else value
     return flat
 
 
