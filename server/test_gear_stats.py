@@ -199,10 +199,29 @@ def check_battle_applies_gear():
     b0 = bt.Battle(1101, bare, st.get("team_level", 1), st.get("team_star"), 0, 0)
     u0 = next(u for u in b0.units.values()
               if u.team == bt.TEAM_PLAYER and u.uid == uid0)
-    check("an ungeared cast still fights at exactly its base stats",
+
+    # `gear_bonus` is NOT only gear. Two prose ladders ride in the same dict because
+    # battle.Unit already sums it: Consonance (`_flvBonus`, keyed on karma level) and
+    # Skill Up (`_limitBonus`, keyed on total limit). This fixture's cast is awakened
+    # to limit_char 12, so Skill Up really does pay it -- this check asserted raw base
+    # stats and started failing the day that ladder was wired up, which is the wrong
+    # signal: the thing it is for is that EQUIPMENT contributes nothing when nothing
+    # is equipped. So pin the ladders explicitly and let base+ladders be the baseline.
+    me0 = next(p for p in bare if p.get("uid") == uid0)
+    ladders = {}
+    for src in (me0.get("consonance_bonus"), me0.get("skillup_bonus")):
+        for k, v in (src or {}).items():
+            ladders[k] = ladders.get(k, 0) + v
+    check("an ungeared cast picks up its ladders and NOTHING from equipment",
+          {k: v for k, v in (me0.get("gear_bonus") or {}).items() if v} == ladders,
+          f"{me0.get('gear_bonus')} vs ladders {ladders}")
+    check("  ...and that is exactly what it fights at",
           (u0.atk, u0.defence, u0.max_hp, u0.spd)
-          == (base["atk"], base["def"], base["hp"], base["spd"]),
-          f"{u0.atk}/{u0.defence}/{u0.max_hp}/{u0.spd} vs {base}")
+          == (base["atk"] + ladders.get("atk", 0),
+              base["def"] + ladders.get("def", 0),
+              base["hp"] + ladders.get("hp", 0),
+              base["spd"] + ladders.get("spd", 0)),
+          f"{u0.atk}/{u0.defence}/{u0.max_hp}/{u0.spd} vs {base} + {ladders}")
 
     rng = random.Random(3)
     entry["equips_list"] = [

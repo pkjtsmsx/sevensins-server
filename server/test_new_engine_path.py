@@ -373,16 +373,38 @@ def check_damage_and_after_action_hooks():
           f"took {boss_before - boss.hp} for atk {boss.atk}")
 
     # Once per SKILL, not per swing: "triggers once while dealing multiple attacks".
+    #
+    # COUNT THE HOOK, do not budget the damage. This used to assert the whole hit came
+    # in under `plain * swings + plain`, which folds in the skill's own damage -- so it
+    # only held while the skill hit for less than one Return tick, and it went red the
+    # day the Skill Up ladder (`_limitBonus`) raised the ally's ATK. Measuring the hit
+    # with and without Return does not rescue it either: between the +/-VARIANCE roll
+    # and the element-disadvantage miss, the noise on a ~2900 skill runs to several
+    # hundred and the one-trigger and two-trigger cases overlap. `_damage_hooks` calls
+    # on_hit_extra_damage exactly once per struck target per skill (engine/core.py:790),
+    # so the call count IS the rule, and it is deterministic.
     multi = next((s for s in (ally.skills or [])
                   if (specs.skill(s) or {}).get("swings", 0) >= 2), None)
     if multi:
-        boss.hp = boss_before = 10 ** 8
-        plain = est2.on_hit_extra_damage(boss)
-        battle.attack_cmd_json(ally.order, boss.order, multi)
+        boss.hp = 10 ** 8
         swings = (specs.skill(multi) or {}).get("swings", 1)
+        calls = []
+        real = est2.on_hit_extra_damage
+
+        def counted(victim, _real=real, _calls=calls):
+            got = _real(victim)
+            if got and victim.order == boss.order:
+                _calls.append(got)
+            return got
+
+        est2.on_hit_extra_damage = counted
+        try:
+            battle.attack_cmd_json(ally.order, boss.order, multi)
+        finally:
+            est2.on_hit_extra_damage = real
         check("  ...once per skill, not once per swing",
-              boss_before - boss.hp < plain * swings + plain,
-              f"took {boss_before - boss.hp}, extra is {plain} x {swings} swings")
+              len(calls) == 1,
+              f"Return paid {len(calls)}x over {swings} swings: {calls}")
 
     # After-action: the holder acts, the field is selected across.
     battle2, _ = a_battle(stage=1000005)

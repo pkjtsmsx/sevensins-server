@@ -312,6 +312,76 @@ def _annotate_consonance(state, entry):
     entry["consonance_bonus"] = bonus
 
 
+# ---- Skill Up (limit) stat rewards ------------------------------------------
+#
+# THE SECOND DEAD LADDER. Exactly the same shape as Consonance above, and equally
+# unread: a grep for `_limitBonus` across the whole tree returns no hits. Every cast
+# carries one, 291 rows in all.
+#
+# This is what the Skill Up panel lists beside each rank as "HP+ / ATK+ / DEF+", and
+# the reason skill-up looked cosmetic: the RANK itself was always applied correctly
+# (skill_ranks -> skill_at_rank, off limit_book + limit_char), so the upgraded skill
+# and its wider Range/Target did reach battle -- but the flat stats the same panel
+# promises never did.
+#
+# Format is identical to `_flvBonus`: rungs joined by "_", each "limit,attrType,value".
+#
+#     Lucifer  1,2,125_2,1,1250_3,2,200_10,2,125_11,1,1000_12,2,125_13,1,1000_...
+#       = at limit 1 ATK+125, at 2 HP+1250, at 3 ATK+200, at 10 ATK+125, ...
+#
+# The rung is the cast's TOTAL limit, the same number skill_ranks consumes, so the two
+# stay in step by construction. Rungs are cumulative and each fires once reached.
+#
+# Note the ladders run past 13 (Lucifer's go to 19) while MAX_TOTAL_LIMIT is 13 --
+# those upper rungs need limit_suit / super_star on top, which is exactly what
+# battle.Unit already adds when it computes ranks. Nothing here caps: whatever total
+# the cast actually has is what pays out.
+def parse_limit_bonus(raw):
+    """-> [(limit rung, attr type, value)] from a `_limitBonus` string. Never raises."""
+    out = []
+    for part in str(raw or "").split("_"):
+        bits = [b for b in part.split(",") if b.strip()]
+        if len(bits) != 3:
+            continue
+        try:
+            out.append((int(bits[0]), int(bits[1]), int(bits[2])))
+        except ValueError:
+            continue
+    return out
+
+
+def skillup_bonus(char_id, total_limit):
+    """-> {stat key: total} for every Skill Up rung this cast has reached."""
+    row = bt.dd.row("char", int(char_id or 0)) or {}
+    totals = {}
+    for rung, attr, value in parse_limit_bonus(row.get("_limitBonus")):
+        if int(total_limit or 0) < rung:
+            continue
+        key = FLV_ATTR_KEYS.get(attr)
+        if key:
+            totals[key] = totals.get(key, 0) + value
+    return totals
+
+
+def _annotate_skillup(state, entry):
+    """Fold the cast's Skill Up rewards into its gear bonus.
+
+    Uses the SAME total the skill rank is computed from -- limit_book + limit_char plus
+    super_star -- so the stats and the rank can never disagree about how awakened a
+    cast is. `limit_suit` is included when present for the same reason.
+    """
+    total = ((entry.get("limit_book") or 0) + (entry.get("limit_char") or 0)
+             + (entry.get("limit_suit") or 0) + (entry.get("super_star") or 0))
+    bonus = skillup_bonus(entry.get("id"), total)
+    if not bonus:
+        return
+    merged = dict(entry.get("gear_bonus") or {})
+    for key, value in bonus.items():
+        merged[key] = merged.get(key, 0) + value
+    entry["gear_bonus"] = merged
+    entry["skillup_bonus"] = bonus
+
+
 def _annotate_gear(state, entry):
     """Resolve the cast's equipped starshards/soulmirrors into a flat stat bonus.
 
@@ -331,6 +401,8 @@ def _annotate_gear(state, entry):
     # at the call sites because every path that builds a battle party goes through
     # _annotate_gear, and a cast with no gear at all still has a Karma ladder.
     _annotate_consonance(state, entry)
+    # Skill Up rides on top too -- see the block above.
+    _annotate_skillup(state, entry)
 
 
 def _annotate_bloodpact(state, entry):
