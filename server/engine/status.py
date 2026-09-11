@@ -64,6 +64,10 @@ class Active:
     kind: Optional[str]
     category: Optional[str]
     stat: Optional[str] = None
+    # `damage_mod` only: "taken" / "dealt" / None. Which side of the exchange this
+    # status's magnitude applies to -- see _damage_mult, which had to guess it from the
+    # English NAME and was wrong for 84 of the 148 damage_mod statuses.
+    subject: Optional[str] = None
     remaining: Optional[int] = None          # None = lasts the whole battle
     stacks: int = 1
     magnitude: Optional[float] = None
@@ -182,6 +186,7 @@ def apply_event(unit, event, caster=None):
     active = Active(
         status_id=int(event.status_id), name=event.name or row.get("name"),
         kind=row.get("kind"), category=row.get("category"), stat=row.get("stat"),
+        subject=row.get("subject"),
         remaining=_remaining_for(event),
         magnitude=event.magnitude, sign=_sign_for(event, row), stack_cap=cap,
         unremovable=bool(row.get("unremovable")),
@@ -221,7 +226,7 @@ def _sign_for(event, row):
     the prose's sign and the magnitude's direction are the same question.
     """
     sign = getattr(event, "sign", None)
-    if sign is None or (row or {}).get("kind") != "stat_mod":
+    if sign is None or (row or {}).get("kind") not in ("stat_mod", "damage_mod"):
         return None
     return int(sign)
 
@@ -915,12 +920,18 @@ def _damage_mult(unit, taken):
         m = st.signed_magnitude()
         if m is None:
             continue
-        # "Damage taken" and "damage dealt" are the same kind with opposite subjects, and
-        # only the name distinguishes them. A status that names neither is skipped rather
-        # than guessed at -- applying a dealt-modifier as a taken-modifier would invert it.
-        name = (st.name or "").lower()
-        is_taken = "taken" in name or "reduction" in name or "受" in name
-        if is_taken != taken:
+        # "Damage taken" and "damage dealt" are the same kind with opposite subjects.
+        # This used to read the English NAME for it -- "taken"/"reduction"/受 -- and
+        # that is wrong for 84 of the 148 damage_mod statuses, because the names simply
+        # do not say: `Fortitude`, `Legion Aegis`, `My Guardian` and `Wide Defense` are
+        # all damage-TAKEN modifiers, and every one of them was being applied to the
+        # holder's damage DEALT instead. The registry now carries the answer, read from
+        # the Chinese glossary where it speaks (`subject`, compile_statuses.py).
+        #
+        # A status whose subject is UNRESOLVED is skipped rather than guessed at -- 22
+        # of them. The old name heuristic is not a safe fallback here: it is the thing
+        # being replaced, and on this population it is wrong more often than right.
+        if st.subject is None or (st.subject == "taken") != taken:
             continue
         total += m
     return max(0.0, 1.0 + total / 100.0)

@@ -201,6 +201,83 @@ def glossary_lines(note):
     return out
 
 
+# Which side of the exchange a `damage_mod` magnitude applies to. `status._damage_mult`
+# needs this and had only the status NAME to go on -- "taken"/"reduction"/受 -- which is
+# wrong for 84 of the 148 damage_mod statuses: `Fortitude`, `Legion Aegis`, `My Guardian`
+# and `Wide Defense` are all damage-TAKEN modifiers whose English names say nothing of
+# the sort, so every one of them was being applied to the holder's damage DEALT instead.
+#
+# Read from the GLOSSARY CORPUS and voted, exactly like prose_caps above, and for the
+# same two reasons: the status rows themselves carry no note here (`_note1` is null for
+# every one checked -- Fortitude, See Through, Special Training), and the corpus is what
+# lets a disagreement be reported instead of silently picked.
+#
+# Chinese first, English only where the Chinese is silent, per CLAUDE.md §3 -- and here
+# that is load-bearing rather than ceremonial. `See Through` is 對...造成傷害+25%, which
+# is DEALT, and its English glossary says "damage taken"; `Special Training (ATK)` is
+# 受到的最終傷害-5%, which is TAKEN, and its English says dealt. Taking the English
+# would put both on the wrong side of the fight.
+#
+# A line naming BOTH sides casts no vote. `Dazzling Flame` is 受到傷害時，造成...傷害 --
+# "when taking damage, deal damage" -- which is a counter rather than a damage modifier,
+# and picking a side for it would be inventing an answer.
+_ZH_TAKEN = re.compile(r"(受到|承受)[^，。]{0,8}傷害")
+_ZH_DEALT = re.compile(r"造成[^，。]{0,8}傷害")
+_EN_TAKEN = re.compile(r"(damage|dmg)\s+taken", re.I)
+_EN_DEALT = re.compile(r"(damage|dmg)\s+(dealt|output)|deals?\s+[^.]{0,20}damage", re.I)
+
+
+def _subject_of(body, taken_re, dealt_re):
+    """-> "taken"/"dealt" for one glossary line, or None if it names both or neither."""
+    hit_t, hit_d = bool(taken_re.search(body)), bool(dealt_re.search(body))
+    return None if hit_t == hit_d else ("taken" if hit_t else "dealt")
+
+
+def prose_subjects(rows):
+    """-> ({bare name: Counter}, {lowered bare name: Counter}) of subject votes."""
+    zh = collections.defaultdict(collections.Counter)
+    for r in rows.values():
+        for name, body in zh_glossary_lines(r.get("_note1")).items():
+            got = _subject_of(body, _ZH_TAKEN, _ZH_DEALT)
+            if got:
+                # Indexed under the raw glossary name AND its bare form, because the
+                # lookup side bares the status row's name: `調教屬性(攻)` bares to
+                # `調教屬性` and would otherwise never meet its own glossary line, fall
+                # through to English, and take "Increases damage dealt" -- the wrong
+                # side -- for a status whose Chinese says 受到的最終傷害-5%. Merging the
+                # (攻)/(防) variants of one family under the bare key is fine here: a
+                # subject is a property of the mechanic, and they state the same one.
+                zh[name][got] += 1
+                if _bare(name) != name:
+                    zh[_bare(name)][got] += 1
+    en = collections.defaultdict(collections.Counter)
+    for r in rows.values():
+        for name, body in glossary_lines(r.get("_note1_en")).items():
+            got = _subject_of(body, _EN_TAKEN, _EN_DEALT)
+            if got:
+                # `_bare().lower()` to match prose_caps' join, for the reason given there.
+                en[_bare(name).lower()][got] += 1
+    return zh, en
+
+
+def damage_subject(zh_votes, en_votes, description=None, report=None):
+    """-> "taken" / "dealt" / None, Chinese glossary > English glossary > own note.
+
+    The description is a LAST resort and not a peer of the other two: it is one English
+    sentence with no corroboration, and English is where the errors are. It is consulted
+    only because the glossary covers 47 of the 148 damage_mod statuses and leaving the
+    other 101 unresolved would send them all back to the name heuristic this replaces.
+    """
+    for votes in (zh_votes, en_votes):
+        if not votes:
+            continue
+        (top, _), = votes.most_common(1)
+        if report is not None and len(votes) > 1:
+            report.append((top, dict(votes)))
+        return top
+    return _subject_of(description or "", _EN_TAKEN, _EN_DEALT) or None
+
+
 def _kind_of(body):
     low = (body or "").lower()
     if CC_TAG_RE.search(low):
@@ -294,6 +371,9 @@ def build():
                     applied_by[aid] += 1
 
     zh_caps, en_caps = prose_caps(rows)
+    zh_subj, en_subj = prose_subjects(rows)
+    subj_report = {"zh": 0, "en_fallback": 0, "description": 0,
+                   "unknown": 0, "split": []}
     cap_report = {"from_prose": 0, "suffix_confirmed": 0, "suffix_disagrees": [],
                   "split_votes": []}
 
@@ -346,6 +426,23 @@ def build():
         seen = bodies.get(key, [])
         own = (r.get("_note1_en") or "").strip()
         kind, stat, conf, source = classify(own, seen)
+        # Only for damage_mod: it is the one kind whose reader has to know which side of
+        # the exchange the number applies to, and emitting it elsewhere would be a field
+        # nothing consumes.
+        subject = subject_source = None
+        if kind == "damage_mod":
+            split = []
+            # The same join prose_caps uses: Chinese votes are keyed by the Chinese
+            # name, English votes by the bare English name lowered.
+            zv = zh_subj.get(_bare(r.get("_name")))
+            ev = en_subj.get(_bare(raw_name).lower())
+            subject = damage_subject(zv, ev, own, split)
+            subject_source = ("zh_glossary" if zv else "en_glossary" if ev
+                              else "row_note" if subject else None)
+            subj_report["zh" if zv else ("en_fallback" if ev else
+                                         ("description" if subject else "unknown"))] += 1
+            for top, votes in split:
+                subj_report["split"].append((sid, raw_name, top, votes))
         out[sid] = {
             # ---- from columns -------------------------------------------------------
             "id": sid,
@@ -368,6 +465,18 @@ def build():
             "description": own or None,
             "kind": kind,
             "stat": stat,
+            "subject": subject,
+            # Where `subject` came from, same convention as kind_source/stack_cap_source.
+            # `row_note` is the weak one -- a single English sentence with nothing to
+            # corroborate it -- and it is where the two known errors are: `See Through`
+            # reads "damage taken" in English where the Chinese clause is 造成傷害+25%
+            # (dealt), and `Special Training (ATK)` reads "damage dealt" where the
+            # Chinese is 受到的最終傷害-5% (taken). Voting the per-application Chinese
+            # clause would settle both, but only by reading the compiled SKILL artifact
+            # from here, which would make compile_skills a prerequisite of this tool.
+            # Across the 46 statuses that clause vote does cover it agrees with this
+            # field 44 times, so the exposure is those two.
+            "subject_source": subject_source,
             "kind_confidence": round(conf, 3),
             "kind_source": source,
             "unremovable": bool(UNREMOVABLE_RE.search(own)),
@@ -375,6 +484,16 @@ def build():
         }
     # Always printed, not only under --report: a cap that changes silently changes how
     # hard 47 statuses hit, and that deserves a line on every build.
+    # Same reasoning as the stack-cap line below: which side of the exchange a damage
+    # modifier lands on decides whether a buff helps or hurts, so a silent change here
+    # is worth a line on every build.
+    print(f"  damage_mod subjects: {subj_report['zh']} from Chinese, "
+          f"{subj_report['en_fallback']} English glossary, "
+          f"{subj_report['description']} own note, "
+          f"{subj_report['unknown']} unresolved, "
+          f"{len(subj_report['split'])} split votes")
+    for sid, nm, top, votes in subj_report["split"]:
+        print(f"    split    ({sid}, {nm!r}, took {top!r} from {votes})")
     print(f"  stack caps: {cap_report['from_prose']} from prose, "
           f"{cap_report['suffix_confirmed']} suffix confirmed by prose, "
           f"{len(cap_report['suffix_disagrees'])} suffix/prose disagreements, "
