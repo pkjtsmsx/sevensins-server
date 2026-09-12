@@ -3389,10 +3389,27 @@ def challenge_fight(r):
     if not stage_id:
         log(f"    -> guild weekly REFUSED (difficulty "
             f"{difficulty}) -- {why}")
-        # There is no error command in ChallengeRpcClientCmd, so
-        # there is nothing to unblock: the panel never opened a
-        # waiting overlay for this. Re-sync so the "n / 3
-        # challenges" count on screen matches the truth.
+        # There is no error command in ChallengeRpcClientCmd, so there is nothing to
+        # unblock: the panel never opened a waiting overlay for this, and a refused
+        # Challenge tap simply does nothing on screen. Reported from a device
+        # 2026-09-11 as "I'm hitting go and nothing is happening".
+        #
+        # RUNNING OUT IS NORMAL -- three a day is the rule, so every player reaches
+        # this state every day, and the client must have had a way to say so. We can
+        # only supply the inputs it reads. `_lbHomeChallengeTimes` is
+        # `format(text 17001, backpack.GetItemCount(22), MaxChallengeTimes)`, so the
+        # count comes from the BAG, and the bag is what was never re-pushed here: the
+        # last pass leaving the stack makes `spend_item` DELETE the slot, so the row
+        # for item 22 vanishes from `backpack_json` entirely. Push the bag as well as
+        # the panel sync, so whatever the client does with an absent row it is at
+        # least being told the truth at the moment of refusal.
+        #
+        # Whether `OnChallengeClick` then greys the button or pops a message is a
+        # client-side decision we cannot see -- the loaded IDA database is not
+        # libil2cpp, so that call has not been decompiled. This does not claim to
+        # produce a popup; it removes the one way the server was demonstrably lying.
+        r.send(MSG_RPC, backpack_msg(
+            84, [1], [ps.backpack_json(r.state, ps.BP_STORAGE_NORMAL)]))
         r.send(MSG_RPC, sint_msg(
             CHALLENGE_CLIENT, CHALLENGE_RPLY_SYNC,
             ps.challenge_sync_intargs(r.state),
