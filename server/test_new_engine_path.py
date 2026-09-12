@@ -740,11 +740,18 @@ def check_heal_basis():
     if mic is None:
         return
     spec = specs.skill(2090102) or {}
-    heal = next((e for e in spec.get("effects", []) if e["op"] == "heal"), None)
-    check("Gate of Judgement's heal is ATK-based",
-          (heal or {}).get("basis") == "atk", str(heal))
+    # The PARTY heal is 以200%攻擊力恢復我方全體體力 and rides the attack as an op-1
+    # rider; the skill's other heal is 額外恢復自身25%的體力, a `heal` for the caster off
+    # his own pool. Taking the first `op == "heal"` used to find the party one and now
+    # finds the self one, so select on what the check is about instead of on position.
+    heals = [e for e in spec.get("effects", [])
+             if e["op"] == "heal" or (e["op"] == "attack_rider"
+                                      and e.get("kind") == "heal")]
+    heal = next((e for e in heals if e.get("target") == "allies"), None)
+    check("Gate of Judgement's party heal is ATK-based",
+          heal is not None and (heal.get("basis") or "atk") == "atk", str(heals))
     check("  ...and goes to allies, not the enemy it attacks",
-          (heal or {}).get("target") == "allies", str(heal))
+          (heal or {}).get("target") == "allies", str(heals))
 
     for u in b.units.values():
         if u.team == bt.TEAM_PLAYER:
@@ -752,7 +759,10 @@ def check_heal_basis():
     boss = next(u for u in b.units.values() if u.team == bt.TEAM_ENEMY)
     out = core.execute(mic, spec, list(b.units.values()), random.Random(3),
                        chosen=[boss])
-    healed = [h for h in out.heals if h.get("basis") == "atk"]
+    # The rider tags its rows `from: rider` rather than carrying a basis, so select the
+    # party heal by where it came from -- the self heal is the one with basis max_hp.
+    healed = [h for h in out.heals
+              if h.get("basis") == "atk" or h.get("from") == "rider"]
     check("the party is healed", bool(healed), str(out.heals))
     for h in healed:
         # The whole point: an ATK heal is a flat number, so it must NOT scale with the

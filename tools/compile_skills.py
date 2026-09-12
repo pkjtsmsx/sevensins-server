@@ -296,8 +296,16 @@ def _zh_side(clause, default=None):
     return default
 
 
-def zh_heal(r):
-    """-> {percent, target, basis} from "回復自身20%最大體力" / "回復10%體力"."""
+def zh_heals(r):
+    """-> EVERY heal the Chinese states, in order. See zh_heal for the single-value form.
+
+    Plural because a skill routinely states more than one: Michael's Gate of Judgement
+    heals the party off ATK and then heals himself for a share of his own pool, and
+    Lucifer's passive heals only himself. Returning the first and stopping is what left
+    ~190 heal clauses across the corpus compiled as nothing at all -- they are emitted
+    per OPCODE, and a clause with no heal opcode behind it had no other way in.
+    """
+    out = []
     for c, prev in _zh_clauses_with(r.get("_note1"), re.compile(r"回復|恢復|補血")):
         if "行動值" in c:                        # a GAUGE recovery, not HP
             continue
@@ -306,10 +314,24 @@ def zh_heal(r):
             continue
         basis = "atk" if "攻擊力" in c else (
             "caster_max_hp" if re.search(r"自身|自己", c) and "最大" in c else "max_hp")
-        # A heal with no stated side heals the caster: an unstated "回復N%體力" on an
-        # attack is the actor recovering, not the target.
-        return {"percent": pct, "target": _zh_side_of(c, prev, "caster"), "basis": basis}
-    return None
+        entry = {"percent": pct, "target": _zh_side_of(c, prev, "caster"),
+                 "basis": basis}
+        # 回復我方體力最低的2人20%體力 -- the N lowest-HP allies, not the whole party.
+        low = re.search(r"體力最低的?\s*(\d+)\s*[人名]", c)
+        if low:
+            entry["target"], entry["count"] = "allies_lowest", int(low.group(1))
+        out.append(entry)
+    return out
+
+
+def zh_heal(r):
+    """-> {percent, target, basis} for the FIRST heal clause, or None.
+
+    A heal with no stated side heals the caster: an unstated "回復N%體力" on an attack
+    is the actor recovering, not the target.
+    """
+    heals = zh_heals(r)
+    return heals[0] if heals else None
 
 
 def zh_gauge(r):
@@ -379,9 +401,16 @@ def zh_rider(r):
         tail = m.group(2)
         cnt = re.search(r"最低的?\s*(\d+)\s*人", tail)
         out = {"kind": "heal", "percent": float(m.group(1)), "source": "prose_zh"}
-        if "我方" in tail or "最低" in tail:
+        # 最低 is what makes it the lowest-HP N; 我方 alone is the WHOLE party. Reading
+        # a bare 我方 as allies_lowest sent Michael's 以200%攻擊力恢復我方全體體力 --
+        # "restores HP of ALL allies" -- to one ally, and because the heal opcode read
+        # the same clause correctly, he paid it twice and healed himself 20,000 where
+        # the prose says 10,000.
+        if "最低" in tail:
             out["target"] = "allies_lowest"
             out["count"] = int(cnt.group(1)) if cnt else 1
+        elif "我方" in tail:
+            out["target"] = "allies"
         return out
     m = re.search(r"(?:回復|恢復)\s*(\d+(?:\.\d+)?)\s*[%％]\s*(?:的)?體力", note)
     if m:
@@ -1800,6 +1829,71 @@ def extra_maxhp_damage(r):
     return out
 
 
+def _heal_key(e):
+    """The identity of a heal for dedupe: what it pays, off what, to whom.
+
+    `basis` is normalised because the two readers spell the same thing differently --
+    the op-1 rider leaves it unset and defaults to ATK in the engine, while the heal
+    opcode writes "atk" -- and `caster_max_hp` and `max_hp` are the same pool when the
+    recipient IS the caster.
+    """
+    basis = (e.get("basis") or "atk").replace("caster_", "")
+    return (e.get("percent"), basis, e.get("target"))
+
+
+def dedupe_heals(effects):
+    """Drop repeats of one heal clause, keeping the first. -> the list, in place.
+
+    Two readers can fire on the same sentence: the op-1 rider (`zh_hp_rider`/the ATK
+    heal pattern) and the heal opcode both match 以200%攻擊力恢復我方全體體力. Nothing
+    reconciled them, so the clause was paid twice.
+    """
+    seen, out = set(), []
+    for e in effects:
+        if e.get("op") == "heal" or (e.get("op") == "attack_rider"
+                                     and e.get("kind") == "heal"):
+            key = _heal_key(e)
+            if key in seen:
+                continue
+            seen.add(key)
+        out.append(e)
+    return out
+
+
+def uncovered_heals(r, effects_so_far):
+    """-> heal effects the Chinese states that nothing else already emitted.
+
+    Heals reach `effects` through the OPCODE walker, so a clause with no heal opcode
+    behind it -- which is most passives, and any active skill whose heal rides its
+    attack -- produced nothing. `tools/clause_coverage.py` ranked the damage: roughly
+    190 fragments across six shapes, all heals, the largest single family in the corpus.
+
+    DEDUPED against what is already there, and that half matters as much. Michael's
+    Gate of Judgement states one heal -- 以200%攻擊力恢復我方全體體力 -- and two readers
+    fire on it, the op-1 rider and the heal opcode, so he healed himself 20,000 where
+    the prose says 10,000 and the party got the right number by luck. Matching on
+    (percent, basis) drops the repeat wherever it comes from, so the clause pays once.
+    """
+    have = []
+    for e in effects_so_far:
+        if e.get("op") == "heal" or (e.get("op") == "attack_rider"
+                                     and e.get("kind") == "heal"):
+            have.append(_heal_key(e))
+    out = []
+    for h in zh_heals(r):
+        key = _heal_key({"percent": h["percent"], "basis": h["basis"],
+                         "target": h["target"]})
+        if key in have:
+            continue
+        have.append(key)
+        entry = {"op": "heal", "percent": h["percent"], "basis": h["basis"],
+                 "target": h["target"], "source": "prose_zh"}
+        if h.get("count"):
+            entry["count"] = h["count"]
+        out.append(entry)
+    return out
+
+
 def damage(r, targets_enemy):
     """-> the damage entry, or None if this skill genuinely does not attack.
 
@@ -2368,6 +2462,11 @@ def compile_skill(rows, sid, swings_by_act):
             spec["effects"].append(extra)
     eff, unknown = effects(rows, r)
     spec["effects"].extend(eff)
+    # Heal clauses the opcode walker had no opcode for -- and, by the same dedupe, the
+    # ones it emitted twice. Before `annotate_passive` so a passive's heal is given the
+    # trigger its own sentence states.
+    spec["effects"] = dedupe_heals(spec["effects"])
+    spec["effects"].extend(uncovered_heals(r, spec["effects"]))
     if unknown:
         spec["unknown"] = unknown
     if typ == "passive":

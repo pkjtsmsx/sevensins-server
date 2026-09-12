@@ -59,10 +59,17 @@ KNOWN_GAPS = {
     ("passive", "damage", "on_damage_dealt"),
 }
 
-# Headroom over the measured total (1,128) for the artifact shifting under a recompile.
-# Not so much that a real regression fits inside it: the smallest whole-cell gap in the
-# set is 5 effects.
-MAX_GAP_EFFECTS = 1250
+# A ceiling on MISSED SAMPLES, not on the extrapolated effect count.
+#
+# The gap list scales a cell's sample miss-rate onto the whole cell, which is right for
+# RANKING and wrong for a ratchet: one extra miss in a 60-sample draw on the 15,700-strong
+# `apply_status/None` cell moves the headline by ~260 effects. Recompiling the skills
+# changed cell membership and swung that number 525 -> 1050 with nothing broken, which
+# tripped an effects-based ceiling on pure noise.
+#
+# Missed samples are bounded (60 per cell, 40 cells) and move only when coverage really
+# changes, so this is the number that can hold a line.
+MAX_MISSED_SAMPLES = 210
 
 _fail = 0
 
@@ -96,8 +103,14 @@ def main():
 
     print("\ncheck_the_gaps_are_not_quietly_getting_worse:")
     # The set cannot see a PARTIAL cell degrading, which is most of them.
-    check(f"the gap list still costs at most {MAX_GAP_EFFECTS} effects",
-          cost <= MAX_GAP_EFFECTS, f"now {cost}")
+    missed = 0
+    for _op, trig, _tot, act_ok, pas_ok, n, _sid in rows:
+        if trig is None:
+            missed += n - act_ok
+        if pas_ok is not None:
+            missed += n - pas_ok
+    check(f"at most {MAX_MISSED_SAMPLES} probe samples miss",
+          missed <= MAX_MISSED_SAMPLES, f"now {missed} (gap list reads {cost} effects)")
 
     print("\ncheck_the_matrix_itself_still_looks_sane:")
     # Guards against the probe silently breaking and reporting a clean sheet. It has

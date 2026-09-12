@@ -224,8 +224,12 @@ def check_damage_with_a_stated_recipient_is_paid():
     field = [me, low, high, mid]
     before = {u.order: u.hp for u in field}
     fired = P.fire_all(P.AFTER_ACTION, [me], field)
-    check("it fires, on exactly one unit",
-          [(t.order, e) for t, e, _a in fired] == [("3", P.DAMAGE)], str(fired))
+    # DAMAGE rows only. The same passive also heals Lucifer 15% of his max HP --
+    # 並對自己恢復最大體力的15%(可暴擊) -- which the compiler only started emitting once
+    # prose-only heals were read, so an exact-match on the whole list is the wrong
+    # assertion: it fails when an unrelated clause of the same passive starts working.
+    dmg = [(t.order, e) for t, e, _a in fired if e == P.DAMAGE]
+    check("it fires, on exactly one unit", dmg == [("3", P.DAMAGE)], str(fired))
     check("  ...the ENEMY WITH THE HIGHEST HP, as the prose says",
           high.hp < before["3"] and low.hp == before["2"] and mid.hp == before["4"],
           str({u.order: before[u.order] - u.hp for u in field}))

@@ -208,9 +208,17 @@ def check_effect_recipients():
 
     # Michael's Gate of Judgement: an ENEMY-targeting attack that heals all ALLIES.
     spec = specs.skill(2090101)
-    heals = [e for e in spec["effects"] if e["op"] == "heal"]
-    check("Gate of Judgement's heal is marked for allies",
-          heals and heals[0].get("target") == "allies", str(heals[:1]))
+    # The party heal is an op-1 RIDER, not a `heal` opcode: 以200%攻擊力恢復我方全體體力
+    # rides the attack. The skill also has a second, separate heal -- 額外恢復自身25%的
+    # 體力 -- which is a `heal` for the caster alone, so keying this on `op == "heal"`
+    # and taking the first now finds the wrong one.
+    heals = [e for e in spec["effects"]
+             if e["op"] == "heal" or (e["op"] == "attack_rider"
+                                      and e.get("kind") == "heal")]
+    party = [e for e in heals if e.get("target") == "allies"]
+    check("Gate of Judgement's party heal is marked for allies", party, str(heals))
+    check("  ...and it is stated once, not twice",
+          len(party) == 1, f"{len(party)} copies: {party}")
     for u in units:
         u.hp = u.max_hp // 2
     out = core.execute(caster, spec, units, random.Random(1))

@@ -897,6 +897,18 @@ def _rider(caster, eff, targets, out, rng, apply_damage, skill_id, units=(),
         base = float(caster.max_hp)
     else:
         base = float(formula.effective_atk(caster))
+    if kind == "heal" and eff.get("target") == "allies":
+        # 以200%攻擊力恢復我方全體體力 -- the WHOLE party. The rider's generic heal below
+        # reaches the caster alone, which was right while every rider heal was a
+        # self-heal; it stopped being right once the compiler learned that 我方 without
+        # 最低 means all of them. Michael's Gate of Judgement is the case: it healed him
+        # for the party's share and left the party on nothing.
+        amount = int(base * pct / 100.0)
+        for who in [u for u in units if u.team == caster.team and u.alive]:
+            if apply_damage:
+                who.hp = min(who.max_hp, who.hp + amount)
+            out.heals.append({"target": who.order, "amount": amount, "from": "rider"})
+        return
     if kind == "heal" and eff.get("target") == "allies_lowest":
         # "以200%的攻擊力回復我方體力最低的2人": ATK-sized, onto the N lowest-HP living
         # allies (the caster included), not the caster alone.
