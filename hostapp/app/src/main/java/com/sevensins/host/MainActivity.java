@@ -119,7 +119,20 @@ public class MainActivity extends android.app.Activity {
         });
         root.addView(update);
 
-        setContentView(root);
+        // SCROLLED, because `root` is a vertical LinearLayout and the window height is
+        // all it gets: children past the bottom edge are not scrolled off, they are
+        // unreachable. With ten children (title, status, eight buttons) that bites on
+        // any short viewport -- a tablet in landscape shows the first five and the user
+        // simply has no Check for updates, Server rates or View crash log. Reported
+        // 2026-09-12 by a tester on the offline bundle, whose APK was correct; the
+        // buttons were below the fold with no way to reach them.
+        //
+        // setFillViewport so a screen TALLER than the content still renders as it does
+        // today: without it the column wraps its children instead of filling the window.
+        ScrollView scroller = new ScrollView(this);
+        scroller.setFillViewport(true);
+        scroller.addView(root);
+        setContentView(scroller);
 
         if (Build.VERSION.SDK_INT >= 33
                 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
