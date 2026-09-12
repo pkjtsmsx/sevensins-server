@@ -1793,12 +1793,24 @@ def is_conditional(r, status_name):
     return bool(_CONDITIONAL.search(clause))
 
 
+# A percentage that belongs to a HEAL is not the skill's damage coefficient, however
+# much it looks like one: 以40%攻擊力回復自身體力 states 攻擊力 and a number, which is
+# exactly the shape `_COEF_ZH` hunts for. Blanking the heal fragments first is what keeps
+# the two apart -- without it the guard below rejected the heal as "just the damage
+# coefficient restated" and `damage()` read a passive with no attack as a 40% hit.
+_HEAL_FRAGMENT = re.compile(r"[^，。\n]*(?:回復|恢復|補血)[^，。\n]*")
+
+
+def _without_heal_clauses(note):
+    return _HEAL_FRAGMENT.sub(" ", note or "")
+
+
 def _is_damage_coefficient(r, pct):
     """Is `pct` just the skill's own damage coefficient restated?"""
-    m = _COEF.search(r.get("_note1_en") or "")
+    m = _COEF.search(_without_heal_clauses(r.get("_note1_en") or ""))
     if m and abs(float(m.group(1)) - pct) < 1e-6:
         return True
-    m = _COEF_ZH.search(r.get("_note1") or "")
+    m = _COEF_ZH.search(_without_heal_clauses(r.get("_note1") or ""))
     if m and abs(float(m.group(2) or m.group(3)) - pct) < 1e-6:
         return True
     return False
@@ -2026,7 +2038,7 @@ def damage(r, targets_enemy):
     else:
         # The Chinese writes the percentage BEFORE the stat -- `95%攻擊力的2段傷害` --
         # which is why the English-shaped pattern finds nothing in these rows.
-        m = _COEF_ZH.search(r.get("_note1") or "")
+        m = _COEF_ZH.search(_without_heal_clauses(r.get("_note1") or ""))
         if m:
             stat = m.group(1) or m.group(4)
             pct = m.group(2) or m.group(3)

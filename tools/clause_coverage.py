@@ -51,17 +51,29 @@ CLAIMS = [
     # mention is not a claim that the gauge changes. Require a direction or a magnitude.
     ("gauge",     re.compile(r"行動值\s*[+\-＋－]|行動值[^，。]{0,6}(增加|減少|提升|降低|\d+\s*[%％])"),
                   {"modify_gauge"}),
-    ("cooldown",  re.compile(r"冷卻"), {"modify_cd"}),
+    # 冷卻 also appears inside STATUS NAMES that a clause grants -- 禁止技能冷卻減少
+    # ("Cooldown Reduction Ban"), 免疫冷卻增加 -- and those are apply_status, not a
+    # cooldown change. A grant verb in the fragment means it is naming a status.
+    ("cooldown",  re.compile(r"冷卻"), {"modify_cd", "apply_status"}),
     # NOT a cleanse when it is negated. 不可解除 / 不可清除 / 解除不可 are the
     # unremovable MARKER on a status the skill grants, and they were the single biggest
     # "gap" in the first run at 309 fragments -- all of them noise.
-    ("cleanse",   re.compile(r"(?<!不可)(?<!無法)(解除|清除|消除)(?!不可)"),
+    # `可解除` / `可清除` is the adjective "removable" inside a CONDITION -- 若自身擁有
+    # 可解除的「持續傷害」狀態, "if you hold a removable damage-over-time" -- and not a
+    # cleanse at all. `(?<!可)` covers it and the negated 不可 forms in one.
+    ("cleanse",   re.compile(r"(?<!可)(?<!無法)(?<!被)(解除|清除|消除)(?!不可)"),
                   {"remove_status"}),
+    # A shield can be STRIPPED as well as granted -- 清除敵方全體目標護盾 -- so a
+    # remove_status satisfies the mention just as an apply_status does.
     ("shield",    re.compile(r"(護盾|吸收[^，。]{0,6}傷害)"),
-                  {"apply_status", "attack_rider"}),
+                  {"apply_status", "attack_rider", "remove_status"}),
     # Damage only when a PERCENTAGE is attached: "造成傷害時" is a trigger, not an amount.
-    ("damage",    re.compile(r"\d+\s*[%％][^，。]{0,10}傷害|傷害[^，。]{0,6}\d+\s*[%％]"),
-                  {"damage", "attack_rider"}),
+    # 受到/承受 + 傷害 is damage TAKEN, which is a damage_mod STATUS ("受到的最終傷害
+    # -5%"), not damage this skill deals. Claiming it as damage made every such status
+    # description look like a missing attack.
+    ("damage",    re.compile(r"(?<!受到)(?<!承受)(?:\d+\s*[%％][^，。]{0,10}傷害"
+                             r"|傷害[^，。]{0,6}\d+\s*[%％])"),
+                  {"damage", "attack_rider", "apply_status"}),
     ("status",    re.compile(r"(附加|賦予|獲得|使自身|使目標)"), {"apply_status"}),
 ]
 
