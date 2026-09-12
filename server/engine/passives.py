@@ -34,7 +34,7 @@ import dataclasses
 import re
 from typing import Callable, Optional
 
-from . import specs, status as _status
+from . import formula, specs, status as _status
 
 # --- trigger points ----------------------------------------------------------------
 BATTLE_START = "battle_start"
@@ -815,15 +815,25 @@ def _amount(rule, holder, target, ctx):
     if rule.effect == REVIVE:
         # A revive's percentage is of the REVIVED unit's own pool, not the holder's.
         return int(target.max_hp * mag / 100.0)
+    # STATUS-MODIFIED, both of them, via the same helpers `formula._basis_value` uses
+    # for a skill's own coefficient. This read the raw attributes, so a passive that
+    # scales off ATK or DEF ignored every buff on the stat it scales from -- and the
+    # comment in `_basis_value` already calls that out as the bug it is: "a DEF-scaling
+    # one got nothing at all from its own DEF buffs ... cosmetic on the exact characters
+    # whose damage they exist to drive".
+    #
+    # Raphael is precisely that cast. 待客之道 gives him DEF +75% for three turns and
+    # 防壁反射 counters for 140% of DEF, so the buff and the counter are one kit -- and
+    # the counter was paying off his unbuffed defence.
     if rule.basis == OF_SELF_MAX_HP:
         base = holder.max_hp
     elif rule.basis == OF_SELF_DEF:
-        base = getattr(holder, "defence", 0)
+        base = formula.effective_def(holder)
     elif rule.basis == OF_OTHER_ATK:
         other = (ctx or {}).get("attacker") or (ctx or {}).get("victim") or target
-        base = getattr(other, "atk", 0)
+        base = formula.effective_atk(other) if other is not None else 0
     else:
-        base = holder.atk
+        base = formula.effective_atk(holder)
     return int(abs(base) * mag / 100.0)
 
 

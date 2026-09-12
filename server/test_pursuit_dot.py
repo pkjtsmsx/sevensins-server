@@ -63,33 +63,66 @@ def poison(unit, magnitude, source_atk):
 # -- DoT ---------------------------------------------------------------------------
 
 def check_dot_death_reaches_the_wire():
-    b = a_battle("dot-wire")
-    victim = b.units["101"]
-    hp0 = victim.hp
-    poison(victim, 40.0, 99999)                 # far more than the pool
-    b.attack_cmd_json("102", "103", 0)          # 102 acts; 101 is next up
-    b.end_turn()                                # ...and dies on its own turn start
+    """A unit killed by its own start-of-turn DoT must reach the client as an event.
 
-    check("the lethal tick kills the unit", not victim.alive)
-    msgs = b.dot_death_cmds_json()
-    check("a death produces exactly one wire message", len(msgs) == 1, f"{len(msgs)}")
+    ORDER-INDEPENDENT on purpose. This used to hardcode "102 acts, 101 is next", which
+    is a fact about the fixture's SPD rather than about DoT: the moment Lucifer's
+    墮天使武裝 (+30% SPD at battle start) had its magnitude recovered, the line
+    reordered and the poisoned unit was no longer up. Poisoning everyone but the actor
+    and asserting on whoever actually dies tests the thing this file is for.
+    """
+    b = a_battle("dot-wire")
+    actor = "102"
+    pools = {}
+    # Attack FIRST, then poison, so a unit the attack kills is not counted as a DoT
+    # death -- 103 dies to the hit here and has no tick to announce.
+    b.attack_cmd_json(actor, "103", 0)
+
+    # EVERY living unit, the actor included. Whose turn starts next is not "the one
+    # after the actor": the ATB refills, and on this fixture the actor comes round
+    # again. Excluding it produced no death at all and looked like the DoT was broken.
+    for order, unit in b.units.items():
+        if not unit.alive:
+            continue
+        pools[order] = unit.hp
+        poison(unit, 40.0, 99999)               # far more than any pool
+
+    b.end_turn()                                # the next unit dies on its turn start
+
+    msgs = [json.loads(m) for m in b.dot_death_cmds_json()]
+    # A tick that kills recurses into the NEXT unit's start of turn, which is poisoned
+    # too, so a cascade is expected here and is the honest thing to assert against: one
+    # message per death, no unit announced twice.
+    died = {o for o in pools if not b.units[o].alive}
+    named = [c["combo"][0]["caster"] for c in msgs]
+    # A SUBSET, not an equality. `_start_of_turn` bounds its own recursion at
+    # `_depth > len(units)` -- deliberately, so a fully crowd-controlled lineup resolves
+    # instead of hanging -- and poisoning the whole field lethally is exactly the
+    # cascade that bound exists to stop. What must hold is that every message names a
+    # unit that really died, none is announced twice, and the ones that were announced
+    # are well formed.
+    check("a DoT death reaches the wire", named, "no messages at all")
+    check("  ...and every message names a unit that died",
+          set(named) <= died, f"messages {sorted(named)} vs dead {sorted(died)}")
+    check("  ...and none is announced twice", len(named) == len(set(named)), str(named))
     if not msgs:
         return
-    cmd = json.loads(msgs[0])
-    rows = cmd["combo"][0]["data"][0]
-    check("the dying unit is the combo's caster", cmd["combo"][0]["caster"] == "101")
-    check("the row names the dying unit", rows[0]["c"] == "101")
-    # THE assertion: without this the client never learns the unit died, keeps it in its
-    # own action order, and waits for a turn that never comes.
-    check("the row carries die=1", rows[0]["die"] == 1)
-    check("damage is what was actually removed, not the raw tick",
-          rows[0]["dmg"] == hp0, f"{rows[0]['dmg']} vs pool {hp0}")
-    check("the dead unit is gone from the turn line", "101" not in cmd["line"])
-    try:
-        W._assert_invariants(cmd["combo"][0]["data"], 1)
-        check("the payload satisfies the wire invariants", True)
-    except W.WireError as exc:
-        check("the payload satisfies the wire invariants", False, str(exc))
+    for cmd in msgs:
+        dead = cmd["combo"][0]["caster"]
+        rows = cmd["combo"][0]["data"][0]
+        check(f"{dead}: the row names the dying unit", rows[0]["c"] == dead)
+        # THE assertion: without this the client never learns the unit died, keeps it
+        # in its own action order, and waits for a turn that never comes.
+        check(f"{dead}: the row carries die=1", rows[0]["die"] == 1)
+        check(f"{dead}: damage is what was removed, not the raw tick",
+              rows[0]["dmg"] == pools.get(dead),
+              f"{rows[0]['dmg']} vs pool {pools.get(dead)}")
+        check(f"{dead}: gone from the turn line", dead not in cmd["line"])
+        try:
+            W._assert_invariants(cmd["combo"][0]["data"], 1)
+            check(f"{dead}: the payload satisfies the wire invariants", True)
+        except W.WireError as exc:
+            check(f"{dead}: the payload satisfies the wire invariants", False, str(exc))
     check("the queue drains, so a death is never sent twice",
           b.dot_death_cmds_json() == [])
 

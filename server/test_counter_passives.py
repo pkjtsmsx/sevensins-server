@@ -197,8 +197,15 @@ def check_a_counter_kill_reaches_the_client():
     check("the counter reaches the wire at all", len(rows) == 1, json.dumps(rows))
     if not rows:
         return
-    check("  ...for 350% of the holder's 4000 ATK", rows[0]["dmg"] == -14000,
-          str(rows[0]["dmg"]))
+    # 350% of the holder's EFFECTIVE ATK, not the raw attribute. The fixture's party
+    # taunts the boss (Taunt is 攻擊力-35%), so the number is 65% of 4000 -- and that is
+    # the point: a counter scales off the stat it is written in, buffs and debuffs
+    # included, the same way `formula._basis_value` reads a skill's own coefficient.
+    from engine import formula as _f
+    want = -int(_f.effective_atk(foe) * 3.5)
+    check("  ...for 350% of the holder's EFFECTIVE ATK", rows[0]["dmg"] == want,
+          f'{rows[0]["dmg"]} vs {want} (raw atk {foe.atk}, '
+          f'effective {_f.effective_atk(foe):.0f})')
     check("  ...and the attacker it killed is flagged dead",
           not me.alive and rows[0]["die"] == 1,
           f"alive={me.alive} die={rows[0]['die']}")

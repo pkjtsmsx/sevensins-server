@@ -2369,6 +2369,26 @@ def annotate_passive(r, spec, rows=None):
         elif re.search(r"entire battle|whole battle|整場|持續整場", clause, re.I):
             nums["duration"] = None
             nums["permanent"] = True
+        # ...AND THE MAGNITUDE, which is the whole reason the clause is worth claiming.
+        # This set the trigger, the recipient and the duration and then dropped the
+        # number, so a status matched this way applied, drew its icon, counted down and
+        # moved nothing. Raphael's 待客之道 is the case that showed it: 自身防禦力+75%
+        # for 3 turns reached the fight as a 3-turn `Dedication` with magnitude None --
+        # and because his counter is 140% of DEF, the buff missing cost him the counter
+        # too, not just the defence.
+        #
+        # The stat and direction come from `want`, which is how the clause was matched
+        # in the first place -- the same pair on both sides is the condition for getting
+        # here, so there is nothing to re-derive and nothing to guess.
+        if nums.get("magnitude") is None:
+            pm = re.search(r"(\d+(?:\.\d+)?)\s*[%％]", clause)
+            if pm:
+                nums["magnitude"] = float(pm.group(1))
+                nums["magnitude_sign"] = 1 if want[1] == "up" else -1
+                nums["stat"] = want[0]
+                nums["source"] = "prose_by_stat"
+                nums["raw"] = clause[:120]
+                continue
         unmodelled.append({"effect": name, "why": "claimed by stat, not by name",
                            "clause": clause[:160]})
 
