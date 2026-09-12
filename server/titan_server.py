@@ -1296,6 +1296,13 @@ def play_turn_msgs(battle, target_team):
     if not move:
         return []
     attacker, defender, skill, slot = move
+    # Log the SKILL, not just the unit. This said only "auto turn for 104" for as long
+    # as auto-battle existed, so a move the AI played left no record of what it cast --
+    # a Jack Shall Have Jill that revived three allies was untraceable in a log that
+    # recorded every manual cast in full. The callers each logged their own line and
+    # none of them had the skill; it lives here, where the move is chosen.
+    log(f"    -> {'auto' if target_team == bt.TEAM_ENEMY else 'enemy'} "
+        f"{attacker} -> {defender} (slot {slot + 1} = skill {skill})")
     body = battle_msg(bt.CMD_ATTACK, [],
                       [battle.attack_cmd_json(attacker, defender, skill)])
     battle.spend_skill(attacker, slot)
@@ -1390,15 +1397,8 @@ def battle_replies(battle, cmd, intargs, strargs, state=None, uid=""):
             # will sit in SituationJudge forever waiting on us. Send the Judge (the
             # panel still refreshes off it) and then immediately play the move.
             msgs = [battle_msg(bt.CMD_JUDGE, battle.judge_args(), [uid])]
-            acting = battle.acting_unit()
-            msgs += play_turn_msgs(battle, bt.TEAM_ENEMY)
-            log(f"    -> auto turn for {acting.order if acting else '?'}")
-            return msgs
-        acting = battle.acting_unit()
-        msgs = play_turn_msgs(battle, bt.TEAM_PLAYER)
-        if msgs:
-            log(f"    -> enemy {acting.order if acting else '?'} attacks")
-        return msgs
+            return msgs + play_turn_msgs(battle, bt.TEAM_ENEMY)
+        return play_turn_msgs(battle, bt.TEAM_PLAYER)
     if cmd == bt.REQ_ATTACK:
         # PlayerBattle.ServerRPCAttack: intargs [skillKey, skillClass],
         # strargs [attacker order, defender order].
@@ -1413,11 +1413,17 @@ def battle_replies(battle, cmd, intargs, strargs, state=None, uid=""):
         # A locked slot (on cooldown, gauge short, or ability_seal) is normally caught
         # by the disabled button client-side; re-check server-side so a raw/replayed
         # request can't bypass a seal.
+        asked = skill_key
         if unit and (skill_key - 1) not in battle.usable_slots(unit):
             skill_key = 1
         skill = skills[skill_key - 1] if 0 < skill_key <= len(skills) else 0
+        # Say when the slot was downgraded. It used to log the slot it FELL BACK to, so
+        # a player who tapped skill 3 and got a basic attack was indistinguishable in
+        # the log from one who tapped skill 1 -- and the fallback is silent client-side
+        # too, so nothing anywhere recorded that the tap did not do what it looked like.
         log(f"    -> attack {attacker} -> {defender} "
-            f"(slot {skill_key} = skill {skill})")
+            f"(slot {skill_key} = skill {skill})"
+            + (f" [asked slot {asked}, not usable]" if asked != skill_key else ""))
         battle.spend_skill(attacker, skill_key - 1)
         body = battle_msg(bt.CMD_ATTACK, [],
                           [battle.attack_cmd_json(attacker, defender, skill)])
