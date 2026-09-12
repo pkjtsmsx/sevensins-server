@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Lint server/ with pyflakes, then run every server/test_*.py -- one line each.
+"""Lint server/ with pyflakes, then run every server/test_*.py and tools/test_*.py.
 
     python3 tools/run_tests.py            # all suites
     python3 tools/run_tests.py gear karma # only suites whose name contains a word
@@ -26,6 +26,7 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVER = os.path.join(ROOT, "server")
+TOOLS = os.path.join(ROOT, "tools")
 
 
 # What lint is allowed to FAIL the run. pyflakes exits 1 on any message, and most of
@@ -75,7 +76,11 @@ def main(argv):
         print(f"{'ok  ' if ok else 'FAIL'}  {'pyflakes':<34} {time.time() - t0:5.1f}s  {summary}")
         if not ok:
             failed.append("pyflakes")
-    suites = sorted(glob.glob(os.path.join(SERVER, "test_*.py")))
+    # tools/ suites too. They test the COMPILERS rather than the server, which until
+    # the clause ledger had no test at all -- the only check on a compile_skills change
+    # was to diff 14,410 compiled skills by hand.
+    suites = (sorted(glob.glob(os.path.join(SERVER, "test_*.py")))
+              + sorted(glob.glob(os.path.join(TOOLS, "test_*.py"))))
     if words:
         suites = [s for s in suites if any(w in os.path.basename(s) for w in words)]
     if not suites:

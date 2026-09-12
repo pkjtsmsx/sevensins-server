@@ -199,7 +199,7 @@ def check_clause_numbers_come_from_the_original_language():
     check("Dream Script II: 以25%機率恢復...14%體力 -> heal 14, not the 25% chance",
           got and got["percent"] == 14.0, str(got))
     r = rows.get(next(s for s, rr in rows.items() if (rr.get("_name_en") or "") == "Dancing Slash IV"))
-    got = cs.zh_cd(r)
+    got = (cs.zh_cds(r) or [(None, None)])[0][1]
     check("Dancing Slash IV: 使自身技能冷卻-1 -> turns -1 on the caster",
           got and got["turns"] == -1 and got["target"] == "caster", str(got))
     r = rows.get(next(s for s, rr in rows.items() if (rr.get("_name_en") or "") == "Seductive Night VI"))

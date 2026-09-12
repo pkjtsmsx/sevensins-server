@@ -213,3 +213,49 @@ matters: a per-tier default coefficient as a **named design choice** in settings
 - Fuzz proves not-crashing, not correctness (§13). The phone is the gate (§8).
 - Chinese wins on any disagreement (§3) — this is now true of *numbers*, not just
   recipients; keep new parsers ZH-first, EN fallback, provenance recorded.
+
+## The clause ledger
+
+Vocabulary, since the compiler now has a concept worth naming.
+
+A **clause** is one fragment of `_note1`, cut on `_ZH_SPLIT` (`，。；、\n`). Its
+**identity** is its index in the note: every reader splits the same way, so clause 2
+means the same fragment to all of them. `_zh_clauses_with` returns it.
+
+A clause is **claimed** when an opcode has consumed it. `effects()` fills a `claimed`
+set with `(kind, index)` as its queues pop — one clause per opcode, in order. The
+`uncovered_*` pass then emits exactly the clauses nothing claimed. Keyed on kind as
+well as index because `_ZH_SPLIT` does not cut on 並, so one fragment can state two
+families (224 skills; 復活…並恢復其50%體力 is seen by both the revive and heal readers).
+
+The rule, and what a compile run prints a line about: **every clause is paid exactly
+once.** Before the ledger the two sides reconciled by comparing the values they had
+produced, which is wrong in both directions and was wrong in shipped data — one clause
+paid twice when the readers spelled a heal differently, two clauses paid once when a
+note states the same number deliberately.
+
+### What is still off the ledger
+
+Both are the same shape: readers that `re.search` the whole note, so they have no clause
+to claim with. Moving them onto `_zh_clauses_with` is one piece of work.
+
+- **`zh_rider` / `zh_hp_rider`.** Until they move, `drop_rider_duplicates` folds a heal
+  a rider already pays, by value. That is the last of the value-keyed dedupe and it is
+  load-bearing: it is the Gate of Judgement fix, verified on a device. The same
+  double-read affects `bonus_damage` riders and is not handled.
+- **`uncovered_removes`.** Bails entirely if any `remove_status` exists, because
+  `OP_REMOVE` carries a status id or a category and never a clause index. Matching the
+  two sides needs a category comparison, not a queue. **726 of the 2,177 skills with an
+  opcode remove also state a cleanse in prose that this drops** — e.g. 153002001 clears
+  the target's 持續回復 by opcode and states 行動後清除敵方攻擊力最高2名的能力上升狀態,
+  which never compiles.
+
+### Measured gaps the ledger makes visible
+
+The compile line reports these every run; they are not fixed, they are now counted.
+
+- **111 cd clauses** no opcode claimed. There is no `uncovered_cd`, so they compile as
+  nothing. Emitting them is a behaviour change and wants its own commit.
+- **788 value conflicts** (heal 252, gauge 416, cd 120, revive 25) where an opcode and
+  the clause it claimed state different numbers. The opcode wins, per CLAUDE.md §1.
+  Nobody has read a sample of these.

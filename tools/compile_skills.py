@@ -18,6 +18,7 @@ script: pure-damage skills often carry no opcodes at all.
     tools/compile_skills.py [--skill ID ...] [--out FILE] [--stats]
 """
 import argparse
+import collections
 import json
 import os
 import re
@@ -252,11 +253,49 @@ _ZH_SPLIT = re.compile(r"[，。；、\n]")
 _ZH_PCT = re.compile(r"(\d+(?:\.\d+)?)\s*[%％]")
 # "以25%機率", "30%的固定機率", "有40%固定機率" -- a chance, never a magnitude.
 _ZH_CHANCE = re.compile(r"(\d+(?:\.\d+)?)\s*[%％]\s*的?(?:固定)?機率")
+# "200%攻擊力" -- a coefficient stated inside the clause itself, as opposed to the
+# skill's own, which is what `_is_damage_coefficient` checks.
+_ZH_ATK_COEF = re.compile(r"(\d+(?:\.\d+)?)\s*[%％]\s*攻擊力")
 _ZH_EXTRA_TURN = re.compile(r"再度行動|再次行動|額外回合|額外行動|可以再行動")
 
 
+# The clause ledger's running totals, printed unconditionally at the end of a compile
+# rather than behind `--stats`: a drop in claim coverage is a regression, and it should
+# show up in a build nobody asked a question of. `seen` counts clauses the readers found,
+# `unclaimed` the ones no opcode took (which the `uncovered_*` pass then emits), and
+# `disagree` the times an opcode and its own clause stated different numbers -- the
+# opcode wins, per the evidence hierarchy, but how often the pack contradicts itself is
+# worth a number rather than a shrug.
+LEDGER = collections.Counter()
+
+
+def _note_disagreement(kind, opcode_value, prose_value):
+    """Count an opcode/prose value conflict. The opcode already won; this only tallies."""
+    if (opcode_value is not None and prose_value is not None
+            and opcode_value != prose_value):
+        LEDGER[kind + ".disagree"] += 1
+
+
+def _count_clauses(r, claimed):
+    """Tally one skill's clauses against the ledger: how many seen, how many claimed."""
+    for kind, reader in (("heal", zh_heals), ("gauge", zh_gauges),
+                         ("cd", zh_cds), ("revive", zh_revives)):
+        for i, _entry in reader(r):
+            LEDGER[kind + ".seen"] += 1
+            if (kind, i) in claimed:
+                LEDGER[kind + ".claimed"] += 1
+
+
 def _zh_clauses_with(note, word_re):
-    """-> [(own, prev)] for the clauses of `note` that contain `word_re`.
+    """-> [(i, own, prev)] for the clauses of `note` that contain `word_re`.
+
+    `i` is the fragment's index in the note, and it is the CLAUSE'S IDENTITY: every
+    reader splits on the same `_ZH_SPLIT`, so index 3 means the same fragment to all of
+    them. That is what lets the opcode walker record which clauses it consumed and the
+    `uncovered_*` pass emit only the rest, instead of the two sides reconstructing the
+    answer from the VALUES they produced -- which is how one clause came to be paid
+    twice (Michael's Gate of Judgement healed 20,000 where the prose says 10,000) and
+    how two clauses stating the same number collapsed into one.
 
     Numbers are read from `own` ONLY. The first cut prepended `prev` and read from
     the join, and Poison Injection's gauge came out as 180 -- the damage coefficient
@@ -267,7 +306,7 @@ def _zh_clauses_with(note, word_re):
     out = []
     for i, c in enumerate(parts):
         if word_re.search(c):
-            out.append((c, parts[i - 1] if i else ""))
+            out.append((i, c, parts[i - 1] if i else ""))
     return out
 
 
@@ -306,7 +345,7 @@ def zh_heals(r):
     per OPCODE, and a clause with no heal opcode behind it had no other way in.
     """
     out = []
-    for c, prev in _zh_clauses_with(r.get("_note1"), re.compile(r"回復|恢復|補血")):
+    for i, c, prev in _zh_clauses_with(r.get("_note1"), re.compile(r"回復|恢復|補血")):
         if "行動值" in c:                        # a GAUGE recovery, not HP
             continue
         if "復活" in c or "復活" in (prev or ""):
@@ -327,7 +366,7 @@ def zh_heals(r):
         low = re.search(r"體力最低的?\s*(\d+)\s*[人名]", c)
         if low:
             entry["target"], entry["count"] = "allies_lowest", int(low.group(1))
-        out.append(entry)
+        out.append((i, entry))
     return out
 
 
@@ -338,7 +377,7 @@ def zh_heal(r):
     is the actor recovering, not the target.
     """
     heals = zh_heals(r)
-    return heals[0] if heals else None
+    return heals[0][1] if heals else None
 
 
 def zh_gauges(r):
@@ -351,13 +390,13 @@ def zh_gauges(r):
     """
     note = r.get("_note1") or ""
     out = []
-    for c, _prev in _zh_clauses_with(note, _ZH_EXTRA_TURN):
+    for i, c, _prev in _zh_clauses_with(note, _ZH_EXTRA_TURN):
         cm = _ZH_CHANCE.search(c)
         entry = {"percent": 100.0, "target": "caster", "source": "prose_zh"}
         if cm:
             entry["chance_pct"] = float(cm.group(1))
-        out.append(entry)
-    for c, prev in _zh_clauses_with(note, re.compile(r"行動值")):
+        out.append((i, entry))
+    for i, c, prev in _zh_clauses_with(note, re.compile(r"行動值")):
         m = re.search(r"行動值\s*([+\-－])\s*(\d+(?:\.\d+)?)\s*[%％]", c)
         if m:
             pct = float(m.group(2)) * (-1 if m.group(1) in "-－" else 1)
@@ -367,24 +406,39 @@ def zh_gauges(r):
                 continue
             if re.search(r"減少|降低|下降|扣除", c) and not re.search(r"增加|提升|提高|回復", c):
                 pct = -pct
+            dm = _ZH_ATK_COEF.search(c)
+            if dm and "傷害" in c and float(dm.group(1)) == abs(pct):
+                # The clause states its OWN damage coefficient. Oresama Golden Wheel's
+                # 再以200%攻擊力的2段傷害對敵方行動值最高的敵人進行追擊 mentions 行動值
+                # only to pick a target, and the 200 belongs to the pursuit -- it came
+                # out as a 200% move-gauge grant to the enemy team. `_is_damage_coef`
+                # misses it because it compares against the SKILL's coefficient (440%
+                # here), not one written inline. 50 entries across 25 skills.
+                continue
         entry = {"percent": pct, "target": _zh_side_of(c, prev, "caster"),
                  "source": "prose_zh"}
         cm = _ZH_CHANCE.search(c)
         if cm:
             entry["chance_pct"] = float(cm.group(1))
-        out.append(entry)
+        out.append((i, entry))
     return out
 
 
 def zh_gauge(r):
     """-> the FIRST gauge change the Chinese states, or None."""
     gauges = zh_gauges(r)
-    return gauges[0] if gauges else None
+    return gauges[0][1] if gauges else None
 
 
-def zh_cd(r):
-    """-> {turns, target} from "技能冷卻-1" / "技能加速1回合" / "冷卻減少1"."""
-    for c, prev in _zh_clauses_with(r.get("_note1"), re.compile(r"冷卻|技能加速")):
+def zh_cds(r):
+    """-> [(i, {turns, target})] for EVERY "技能冷卻-1" / "技能加速1回合" clause.
+
+    Plural for the reason `zh_heals` and `zh_gauges` are: this used to return the first
+    match and stop, so the Nth cd opcode re-read clause #1 and a skill stating two
+    different cooldown changes compiled the first one twice.
+    """
+    out = []
+    for i, c, prev in _zh_clauses_with(r.get("_note1"), re.compile(r"冷卻|技能加速")):
         turns = None
         m = re.search(r"冷卻\s*([+\-－])\s*(\d+)", c)
         if m:
@@ -399,8 +453,8 @@ def zh_cd(r):
                     turns = int(m.group(2)) * (-1 if m.group(1) in ("減少", "縮短") else 1)
         if turns is None:
             continue
-        return {"turns": turns, "target": _zh_side_of(c, prev, "caster")}
-    return None
+        out.append((i, {"turns": turns, "target": _zh_side_of(c, prev, "caster")}))
+    return out
 
 
 def zh_rider(r):
@@ -1033,8 +1087,15 @@ def status_numbers(rows, skill_row, status_id):
     return out
 
 
-def effects(rows, r):
+def effects(rows, r, claimed=None):
     """-> (effects, unknown) read straight off the opcode slots.
+
+    `claimed` is the clause ledger: a set this fills with (kind, clause index) for every
+    prose clause an opcode consumed, so `uncovered_*` can emit exactly the clauses
+    nothing took. Keyed by KIND as well as index because one fragment can state two
+    families -- `_ZH_SPLIT` cuts on ，。；、 and not on 並, so 復活…並回復其50%體力 is a
+    single fragment that both the revive and heal readers see (224 skills), and a bare
+    index would let the first claim silence the second.
 
     A repeated (op, operand) pair is emitted VERBATIM, one entry per slot, carrying its
     slot index. It is ambiguous by nature -- sometimes stacks, sometimes the same effect
@@ -1049,7 +1110,10 @@ def effects(rows, r):
     # 自身的行動值+10% compiled as -10% to the target, twice. The queues run out rather
     # than wrap: more opcodes than clauses means the extras carry no prose, which is the
     # honest answer and is what `clause_percent` already falls back to.
+    if claimed is None:
+        claimed = set()
     zh_gauge_q, zh_heal_q = list(zh_gauges(r)), list(zh_heals(r))
+    zh_cd_q, zh_revive_q = list(zh_cds(r)), list(zh_revives(r))
     for i, op in enumerate(acts):
         if not op:
             continue
@@ -1096,8 +1160,10 @@ def effects(rows, r):
         elif op == OP_MODIFY_CD:
             entry = {"op": "modify_cd", "slot": i}
             entry.update(cd_effect(r))
-            zh = zh_cd(r)
+            ci, zh = zh_cd_q.pop(0) if zh_cd_q else (None, None)
             if zh:                                   # the original language wins
+                _note_disagreement("cd", entry.get("turns"), zh.get("turns"))
+                claimed.add(("cd", ci))
                 entry.update(zh)
             out.append(entry)
         elif op == OP_HP_RIDER and zh_hp_rider(r):
@@ -1134,8 +1200,11 @@ def effects(rows, r):
                 # THE ORIGINAL LANGUAGE WINS where it states a value; English fills the
                 # rest. "以25%機率恢復12%體力" read in English gave the CHANCE as the
                 # magnitude; the Chinese reader blanks chances before it looks.
-                zh = zh_gauge_q.pop(0) if zh_gauge_q else None
+                ci, zh = zh_gauge_q.pop(0) if zh_gauge_q else (None, None)
                 if zh:
+                    claimed.add(("gauge", ci))
+                    _note_disagreement("gauge", entry.get("percent"),
+                                       zh.get("percent"))
                     if zh.get("percent") is not None:
                         entry.update(zh)
                     elif entry.get("target") is None:
@@ -1144,10 +1213,32 @@ def effects(rows, r):
                 # Same recipient problem as the gauge: a heal on an attack skill goes to
                 # allies, not to the enemy being hit.
                 entry["target"] = clause_target(r, name)
+                if name == "revive":
+                    ci, zh = zh_revive_q.pop(0) if zh_revive_q else (None, None)
+                    if zh:
+                        claimed.add(("revive", ci))
+                        _note_disagreement("revive", entry.get("percent"),
+                                           zh.get("percent"))
+                        if zh.get("percent") is not None:
+                            entry["percent"], entry["source"] = zh["percent"], "prose_zh"
+                        if zh.get("count"):
+                            entry["count"] = zh["count"]
+                        entry["target"] = zh.get("target") or entry.get("target")
                 if name == "heal":
                     entry["basis"] = heal_basis(r)
-                    zh = zh_heal_q.pop(0) if zh_heal_q else None
+                    ci, zh = zh_heal_q.pop(0) if zh_heal_q else (None, None)
+                    if zh is None:
+                        # No clause left for this opcode. `clause_percent`/`heal_basis`
+                        # above already filled it from the WHOLE note, which is the
+                        # "always clause #1" bug in another dress -- a second heal
+                        # opcode re-derives the first clause's number. Flagged rather
+                        # than dropped here, because a skill with a heal opcode and no
+                        # prose at all still has to emit something.
+                        entry["_no_clause"] = True
                     if zh:
+                        claimed.add(("heal", ci))
+                        _note_disagreement("heal", entry.get("percent"),
+                                           zh.get("percent"))
                         if zh.get("percent") is not None:
                             entry["percent"], entry["source"] = zh["percent"], "prose_zh"
                             entry["basis"] = zh["basis"]
@@ -1887,9 +1978,16 @@ def zh_revives(r):
     there IS a revive opcode -- and a revive stated inside a follow-up clause has none.
     """
     out = []
-    for c, prev in _zh_clauses_with(r.get("_note1"), re.compile(r"復活")):
+    for i, c, prev in _zh_clauses_with(r.get("_note1"), re.compile(r"復活")):
         if re.search(r"禁止復活|不會復活|無法復活|復活道具", c):
             continue                              # a ban, a caveat, or the retry UI
+        if re.search(r"復活(?:後|時)", c) and not re.search(r"復活我方|復活.*[人名體]", c):
+            # 復活後清除此狀態 -- "AFTER reviving, clear this status". The clause REFERS
+            # to the revive the sentence before it grants; it does not grant a second
+            # one. Invisible until the clause ledger replaced value-keyed dedupe, which
+            # had been collapsing the reference into the real revive by luck: Soul
+            # Resurrection states one revive and compiled to two.
+            continue
         m = _ZH_REVIVE_PCT.search(c) or _ZH_REVIVE_PCT.search(prev or "")
         pct = (m.group(1) or m.group(2)) if m else None
         if pct is None:
@@ -1906,7 +2004,7 @@ def zh_revives(r):
         n = _ZH_REVIVE_N.search(c)
         if n:
             entry["count"] = int(n.group(1))
-        out.append(entry)
+        out.append((i, entry))
     return out
 
 
@@ -1930,16 +2028,13 @@ def lifesteal_rider(r):
             "percent": round(float(m.group(1)), 4), "source": "prose_zh"}
 
 
-def uncovered_revives(r, effects_so_far):
-    """-> revive effects the Chinese states that no opcode emitted."""
-    have = {(e.get("percent"), e.get("target"))
-            for e in effects_so_far if e.get("op") == "revive"}
+def uncovered_revives(r, claimed):
+    """-> revive effects for the revive clauses no opcode claimed."""
     out = []
-    for v in zh_revives(r):
-        key = (v.get("percent"), v.get("target"))
-        if key in have:
+    for i, v in zh_revives(r):
+        if ("revive", i) in claimed:
             continue
-        have.add(key)
+        LEDGER["revive.unclaimed"] += 1
         out.append({"op": "revive", "percent": v["percent"],
                     "target": v.get("target"), "source": "prose_zh",
                     **({"count": v["count"]} if v.get("count") else {})})
@@ -1964,11 +2059,22 @@ _ZH_CLEANSE_VERB = re.compile(r"(?<!可)(?<!無法)(?<!被)(清除|解除|消除
 
 
 def uncovered_removes(r, effects_so_far):
-    """-> remove_status effects for prose cleanses no opcode covered."""
+    """-> remove_status effects for prose cleanses no opcode covered.
+
+    NOT on the clause ledger, unlike the three families below it. The opcode walker
+    emits `remove_status` from OP_REMOVE, which carries a status id or a category and
+    never a clause index, so there is nothing for a clause to be claimed BY -- matching
+    the two sides needs a category comparison, not a queue.
+
+    Until that lands this stays all-or-nothing, and that is a known gap, not a design:
+    726 of the 2,177 skills with an opcode remove also state a cleanse in prose that
+    this bail drops. 153002001 clears the target's 持續回復 by opcode and states a
+    second cleanse -- 行動後清除敵方攻擊力最高2名的能力上升狀態 -- that never compiles.
+    """
     if any(e.get("op") == "remove_status" for e in effects_so_far):
         return []                                 # the walker already found one
     out, seen = [], set()
-    for c, _prev in _zh_clauses_with(r.get("_note1"), _ZH_CLEANSE_VERB):
+    for _i, c, _prev in _zh_clauses_with(r.get("_note1"), _ZH_CLEANSE_VERB):
         # 若...擁有可清除的... is a CONDITION on the clause, not the cleanse itself.
         if re.search(r"若[^，。]*可(?:清除|解除)", c):
             continue
@@ -1987,21 +2093,18 @@ def uncovered_removes(r, effects_so_far):
     return out
 
 
-def uncovered_gauges(r, effects_so_far):
+def uncovered_gauges(r, claimed):
     """-> gauge effects the Chinese states that no opcode emitted.
 
     Same seam as `uncovered_heals`: `modify_gauge` reaches `effects` through the opcode
     walker, so a clause with no gauge opcode behind it -- 我方全體行動值+15% on a passive,
     or the 使其行動值-25% riding a follow-up -- produced nothing.
     """
-    have = {(e.get("percent"), e.get("target"))
-            for e in effects_so_far if e.get("op") == "modify_gauge"}
     out = []
-    for g in zh_gauges(r):
-        key = (g.get("percent"), g.get("target"))
-        if key in have:
+    for i, g in zh_gauges(r):
+        if ("gauge", i) in claimed:
             continue
-        have.add(key)
+        LEDGER["gauge.unclaimed"] += 1
         out.append({"op": "modify_gauge", "percent": g["percent"],
                     "target": g.get("target"), "source": "prose_zh",
                     **({"chance_pct": g["chance_pct"]} if g.get("chance_pct") else {})})
@@ -2020,51 +2123,88 @@ def _heal_key(e):
     return (e.get("percent"), basis, e.get("target"))
 
 
-def dedupe_heals(effects):
-    """Drop repeats of one heal clause, keeping the first. -> the list, in place.
+def drop_clauseless_repeats(effects):
+    """Drop a heal an opcode derived from the whole note when another heal says it.
 
-    Two readers can fire on the same sentence: the op-1 rider (`zh_hp_rider`/the ATK
-    heal pattern) and the heal opcode both match 以200%攻擊力恢復我方全體體力. Nothing
-    reconciled them, so the clause was paid twice.
+    The narrow survivor of value-keyed dedupe, and the ledger says exactly when to use
+    it: an opcode flagged `_no_clause` had no clause of its own, so its magnitude came
+    from re-reading the note and duplicating a heal that IS clause-backed. Angel Healing
+    VI states one 50% party heal and has two heal opcodes; without this it pays twice,
+    which is the Gate of Judgement bug that was verified on a device.
+
+    A `_no_clause` heal with nothing to duplicate is KEPT -- a skill with a heal opcode
+    and an empty note still heals, and `damage` makes the same call for the same reason.
     """
-    seen, out = set(), []
+    keys = {_heal_key(e) for e in effects
+            if e.get("op") == "heal" and not e.get("_no_clause")}
+    out = []
     for e in effects:
-        if e.get("op") == "heal" or (e.get("op") == "attack_rider"
-                                     and e.get("kind") == "heal"):
+        if e.pop("_no_clause", False):
             key = _heal_key(e)
-            if key in seen:
+            if key in keys:
+                LEDGER["heal.clauseless_repeat"] += 1
                 continue
-            seen.add(key)
+            keys.add(key)
         out.append(e)
     return out
 
 
-def uncovered_heals(r, effects_so_far):
-    """-> heal effects the Chinese states that nothing else already emitted.
+def drop_rider_duplicates(effects):
+    """Fold heals that a RIDER already pays. -> the list.
+
+    The whole residue of value-keyed dedupe, in one place, and the ledger says exactly
+    why it has to stay: `zh_rider`/`zh_hp_rider` search the WHOLE note rather than a
+    clause, so they have no index to claim with and the ledger cannot see them. Two
+    shapes, both of them shipped bugs:
+
+      * two rider opcodes read one sentence -- Spine Break V states 以75%攻擊力回復自身
+        體力 once and both its rider slots emitted it;
+      * a rider and a heal opcode read one sentence -- Michael's Gate of Judgement
+        states 以200%攻擊力恢復我方全體體力 once, and he healed himself 20,000 where the
+        prose says 10,000. That fix was verified on a device; `server/test_engine.py`
+        holds the line.
+
+    The rider wins, because it is the one carrying the animation. This goes away when
+    those two readers move onto `_zh_clauses_with` and can claim like everything else;
+    the same double-read affects `bonus_damage` riders and is deliberately NOT touched
+    here -- widening it changes a family this work has no business changing.
+    """
+    seen, out = set(), []
+    for e in effects:
+        if e.get("op") == "attack_rider" and e.get("kind") == "heal":
+            key = _heal_key(e)
+            if key in seen:
+                LEDGER["heal.rider_repeat"] += 1
+                continue
+            seen.add(key)
+        out.append(e)
+    riders = {_heal_key(e) for e in out
+              if e.get("op") == "attack_rider" and e.get("kind") == "heal"}
+    kept = []
+    for e in out:
+        if e.get("op") == "heal" and _heal_key(e) in riders:
+            LEDGER["heal.rider_covered"] += 1
+            continue
+        kept.append(e)
+    return kept
+
+
+def uncovered_heals(r, claimed):
+    """-> heal effects for the heal clauses nothing claimed.
 
     Heals reach `effects` through the OPCODE walker, so a clause with no heal opcode
     behind it -- which is most passives, and any active skill whose heal rides its
     attack -- produced nothing. `tools/clause_coverage.py` ranked the damage: roughly
     190 fragments across six shapes, all heals, the largest single family in the corpus.
 
-    DEDUPED against what is already there, and that half matters as much. Michael's
-    Gate of Judgement states one heal -- 以200%攻擊力恢復我方全體體力 -- and two readers
-    fire on it, the op-1 rider and the heal opcode, so he healed himself 20,000 where
-    the prose says 10,000 and the party got the right number by luck. Matching on
-    (percent, basis) drops the repeat wherever it comes from, so the clause pays once.
+    Emits by clause alone: a heal a rider already pays is folded afterwards by
+    `drop_rider_duplicates`, which is where the last of the value-keyed dedupe lives.
     """
-    have = []
-    for e in effects_so_far:
-        if e.get("op") == "heal" or (e.get("op") == "attack_rider"
-                                     and e.get("kind") == "heal"):
-            have.append(_heal_key(e))
     out = []
-    for h in zh_heals(r):
-        key = _heal_key({"percent": h["percent"], "basis": h["basis"],
-                         "target": h["target"]})
-        if key in have:
+    for i, h in zh_heals(r):
+        if ("heal", i) in claimed:
             continue
-        have.append(key)
+        LEDGER["heal.unclaimed"] += 1
         entry = {"op": "heal", "percent": h["percent"], "basis": h["basis"],
                  "target": h["target"], "source": "prose_zh"}
         if h.get("count"):
@@ -2659,16 +2799,20 @@ def compile_skill(rows, sid, swings_by_act):
         extra = extra_maxhp_damage(r)
         if extra:
             spec["effects"].append(extra)
-    eff, unknown = effects(rows, r)
+    # The clause ledger. `effects` fills it with the (kind, index) of every prose
+    # clause an opcode consumed; the `uncovered_*` pass emits the clauses nothing took.
+    # Before `annotate_passive` so a passive's heal is given the trigger its own
+    # sentence states.
+    claimed = set()
+    eff, unknown = effects(rows, r, claimed)
     spec["effects"].extend(eff)
-    # Heal clauses the opcode walker had no opcode for -- and, by the same dedupe, the
-    # ones it emitted twice. Before `annotate_passive` so a passive's heal is given the
-    # trigger its own sentence states.
-    spec["effects"] = dedupe_heals(spec["effects"])
-    spec["effects"].extend(uncovered_heals(r, spec["effects"]))
-    spec["effects"].extend(uncovered_gauges(r, spec["effects"]))
+    _count_clauses(r, claimed)
+    spec["effects"] = drop_clauseless_repeats(spec["effects"])
+    spec["effects"].extend(uncovered_heals(r, claimed))
+    spec["effects"].extend(uncovered_gauges(r, claimed))
     spec["effects"].extend(uncovered_removes(r, spec["effects"]))
-    spec["effects"].extend(uncovered_revives(r, spec["effects"]))
+    spec["effects"].extend(uncovered_revives(r, claimed))
+    spec["effects"] = drop_rider_duplicates(spec["effects"])
     if spec["type"] != "status":
         steal = lifesteal_rider(r)
         if steal and not any(e.get("basis") == "damage_dealt"
@@ -2764,8 +2908,18 @@ def main():
         for sid, name, zh, en in _WHO_DISAGREEMENTS[:5]:
             print(f"    skill {sid} / {name}: zh={zh} en={en}")
 
+    # The clause ledger. One line, always: see LEDGER. `cd` has no `uncovered_cd`, so
+    # its unclaimed clauses are a measured gap rather than something that gets emitted.
+    for k in ("heal", "gauge", "cd", "revive"):
+        seen, claimed = LEDGER[k + ".seen"], LEDGER[k + ".claimed"]
+        print(f"  clauses/{k:<7}  : {seen} seen, {claimed} claimed by an opcode, "
+              f"{seen - claimed} not ({LEDGER[k + '.unclaimed']} emitted from prose, "
+              f"{LEDGER[k + '.disagree']} value conflicts)")
+    print(f"  heal clauses a rider already covered: {LEDGER['heal.rider_covered']}"
+          f"; repeated rider heals dropped: {LEDGER['heal.rider_repeat']}"
+          f"; clause-less heal repeats dropped: {LEDGER['heal.clauseless_repeat']}")
+
     if args.stats:
-        import collections
         ops, unk = collections.Counter(), collections.Counter()
         partial = full = 0
         for sid in index:
