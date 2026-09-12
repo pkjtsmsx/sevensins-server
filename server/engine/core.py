@@ -916,6 +916,32 @@ def _rider(caster, eff, targets, out, rng, apply_damage, skill_id, units=(),
         if apply_damage:
             caster.hp = min(caster.max_hp, caster.hp + amount)
         out.heals.append({"target": caster.order, "amount": amount, "from": "rider"})
+    elif kind == "bonus_damage" and basis == "target_max_hp":
+        # 額外造成敵方最大體力15%的傷害 -- an extra hit sized on the TARGET's pool, not
+        # the caster's. 150 attack skills state one and it was compiled as nothing at
+        # all, which is why the Guild Weekly boss (Special Sanction, 35% max HP) could
+        # not hurt a level-100 party: its only real damage was the clause that vanished.
+        #
+        # Through `strike`, NOT flat, because the prose says so in as many words:
+        # 此傷害會計算防禦與屬性 -- "this damage DOES calculate defence and attribute".
+        # That is also what separates it from the caster_*_hp riders above, which the
+        # prose never qualifies that way and which stay flat.
+        #
+        # A RIDER rather than a second `damage` effect, because `execute` runs every
+        # damage effect once per SWING: Special Sanction has two, so a damage-op form
+        # would pay 35% twice. The rider fires once, at swing 0.
+        for tgt in targets:
+            amount, detail = formula.strike(caster, tgt, pct / 100.0, "MAX_HP", rng)
+            if amount is None:
+                continue
+            if apply_damage:
+                amount, absorbed = _status.absorb(tgt, amount)
+                if absorbed:
+                    detail["absorbed"] = absorbed
+                tgt.hp = max(0, tgt.hp - amount)
+            detail["rider"] = True
+            out.strikes.append(Strike(swing=0, target=tgt.order, amount=amount,
+                                      detail=detail, died=False))
     elif kind == "bonus_damage" and basis != "atk":
         # 額外對目標造成自身8%當前體力的傷害. Not a coefficient on a stat the strike formula
         # knows, so it is dealt as a FLAT amount: no crit, no advantage roll, but it does

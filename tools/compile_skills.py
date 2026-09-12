@@ -1751,6 +1751,55 @@ def _is_damage_coefficient(r, pct):
     return False
 
 
+# --- additional damage sized on the TARGET's max HP ----------------------------------
+#
+# 150 attack skills state one and NONE of them compiled it. `damage()` below reads the
+# FIRST coefficient it finds and stops, so `100%攻擊力的2段傷害，附加敵方35%最大體力的
+# 傷害` produced the 100% ATK and silently dropped the rest -- and `unmodelled` stayed
+# null, so nothing flagged it either. That clause is the Guild Weekly boss's entire
+# damage output: Special Sanction is 35% of a ~35,000 HP unit, ten times what its ATK
+# hits do, which is why a level-150 boss could not dent a level-100 party.
+#
+# Emitted as an attack_rider, not a second damage effect, because `core.execute` runs
+# every damage effect once per SWING -- Special Sanction has two, so a damage-op form
+# would pay 35% twice.
+#
+# The side is always the TARGET: 142 rows say 敵方 and 9 say 目標, none say otherwise.
+# Status ROWS describing self-inflicted max-HP damage (「受到傷害後自身獲得15%最大體力
+# 的傷害」) are a different mechanic and are excluded by requiring one of those two words.
+_ZH_EXTRA_MAXHP = re.compile(
+    r"(?:額外|附加)[^。\n]{0,14}?"
+    r"(?:敵方|目標)\s*"
+    r"(?:(\d+(?:\.\d+)?)\s*[%％]\s*(?:的)?\s*最大體力"
+    r"|最大體力\s*(\d+(?:\.\d+)?)\s*[%％])"
+    r"[^。\n]{0,8}?傷害")
+
+# 239 of the 150 skills' rows carry the same parenthetical exemption, and it is a real
+# gate rather than flavour: 對擁有「精英」狀態的敵人不會發動 -- "does not trigger against
+# enemies with the Elite status". `Elite` is status 140 and the engine matches by name.
+_ZH_ELITE_EXEMPT = re.compile(r"對擁有\s*[「『]?\s*精英\s*[」』]?\s*狀態的敵人不會發動")
+
+
+def extra_maxhp_damage(r):
+    """-> an attack_rider for an "additionally deal N% of the target's Max HP" clause.
+
+    The prose says this one is mitigated -- 此傷害會計算防禦與屬性, "calculates defence
+    and attribute" -- which is why `_rider` routes the `target_max_hp` basis through
+    `formula.strike` instead of paying it flat like the caster_*_hp riders.
+    """
+    note = r.get("_note1") or ""
+    m = _ZH_EXTRA_MAXHP.search(note)
+    if not m:
+        return None
+    pct = m.group(1) or m.group(2)
+    out = {"op": "attack_rider", "kind": "bonus_damage", "basis": "target_max_hp",
+           "percent": round(float(pct), 4), "source": "prose_zh"}
+    if _ZH_ELITE_EXEMPT.search(note):
+        out["requires"] = {"status": "Elite", "on": "target", "negate": True,
+                           "resolved": True}
+    return out
+
+
 def damage(r, targets_enemy):
     """-> the damage entry, or None if this skill genuinely does not attack.
 
@@ -2310,6 +2359,13 @@ def compile_skill(rows, sid, swings_by_act):
                and spec["type"] in ("com_attack", "skill", "sp_skill", "sub_skill"))
     if d:
         spec["effects"].append(d)
+    # ...and the "additionally deal N% of the target's Max HP" clause the coefficient
+    # reader above stops before. Skills only; the status rows that describe self-damage
+    # in the same words are excluded by the pattern itself.
+    if spec["type"] != "status":
+        extra = extra_maxhp_damage(r)
+        if extra:
+            spec["effects"].append(extra)
     eff, unknown = effects(rows, r)
     spec["effects"].extend(eff)
     if unknown:
