@@ -450,13 +450,56 @@ def check_guild_daily_rewards():
               amounts == {1}, str(amounts))
 
 
+def check_passes_refill_each_day():
+    """The Guild Weekly stays playable. Nothing granted item 22 and it was only spent.
+
+    Found on a device 2026-09-11: the player ran out, tapped Challenge, and NOTHING
+    HAPPENED -- the client sends fight (528), the server refuses, and there is no
+    refusal panel, so the button is simply inert. The log said
+    `guild weekly REFUSED (difficulty 3) -- no Weekly Guild Pass (item 22)`.
+
+    The rule is the client's own: `MaxChallengeTimes` is 3 and `_lbHomeChallengeTimes`
+    renders `GetItemCount(22)` OVER it, so the panel's "2 / 3" is the item count over
+    the constant -- a counter only coherent if the numerator is restored daily.
+    """
+    st = _default(1000001)
+    _seed_roster(st)
+    check("a fresh account starts the day with a full allowance",
+          ch.item_count(st, ch.CHALLENGE_PASS_ITEM) == 0, "seeded empty on purpose")
+    ch._challenge(st)
+    check("  ...once the day is rolled",
+          ch.item_count(st, ch.CHALLENGE_PASS_ITEM) == ch.CHALLENGE_MAX_TIMES,
+          str(ch.item_count(st, ch.CHALLENGE_PASS_ITEM)))
+
+    for _ in range(ch.CHALLENGE_MAX_TIMES):
+        ps.spend_item(st, ch.CHALLENGE_PASS_ITEM, 1)
+    check("spending them all leaves the raid locked, as it should within a day",
+          not ch.have_challenge_pass(st))
+
+    st["challenge"]["day"] = "yesterday"
+    ch._challenge(st)
+    check("the 4AM rollover restores them", 
+          ch.item_count(st, ch.CHALLENGE_PASS_ITEM) == ch.CHALLENGE_MAX_TIMES,
+          str(ch.item_count(st, ch.CHALLENGE_PASS_ITEM)))
+
+    # TOPPED UP, not added: a week away must not bank 21 attempts, because the panel
+    # has one slot for the numerator and the rule is "three a day".
+    ps.spend_item(st, ch.CHALLENGE_PASS_ITEM, 1)
+    for i in range(6):
+        st["challenge"]["day"] = f"day{i}"
+        ch._challenge(st)
+    check("  ...and six more days do not bank 18 of them",
+          ch.item_count(st, ch.CHALLENGE_PASS_ITEM) == ch.CHALLENGE_MAX_TIMES,
+          str(ch.item_count(st, ch.CHALLENGE_PASS_ITEM)))
+
+
 def main():
     for fn in (check_content_exists, check_weekday_wiring, check_stages_json,
                check_sync_shape, check_try_scores_accumulate,
                check_formation_slots, check_guild_member_record,
                check_fight_uses_the_raid_team, check_guild_daily_rewards,
                check_fight_and_score, check_daily_roll,
-               check_rank_json):
+               check_passes_refill_each_day, check_rank_json):
         print(f"\n{fn.__name__}:")
         fn()
     print(f"\n{_fail} failure(s)")

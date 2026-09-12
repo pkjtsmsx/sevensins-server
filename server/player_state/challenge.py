@@ -41,6 +41,7 @@ import json, time
 from .core import (
     FORMATION_CHALLENGE_BASE,
     _daily_period,
+    grant_item,
     grant_reward,
     item_count,
     spend_item,
@@ -280,11 +281,39 @@ def _challenge(state, now=None):
         # Remember which boss's tables today's runs are earning against, so a
         # settlement can pay the right ones however late it happens.
         ch["group"] = challenge_weekday(now)
+        _refill_passes(state)
     ch.setdefault("today", [])
     ch.setdefault("best", 0)
     ch.setdefault("runs", 0)
     ch.setdefault("group", challenge_weekday(now))
     return ch
+
+
+def _refill_passes(state):
+    """Top the Weekly Guild Pass back up to the day's allowance.
+
+    **NOTHING GRANTED ITEM 22.** It was only ever spent (`start_challenge`) and counted
+    (`have_challenge_pass`), so an account ran out and the Guild Weekly became
+    permanently unplayable -- the client sends fight (528), the server refuses, and
+    because there is no refusal panel the button simply does nothing. Reported from a
+    device 2026-09-11 as "I'm hitting go and nothing is happening"; the log said
+    `guild weekly REFUSED (difficulty 3) -- no Weekly Guild Pass (item 22)` three times
+    in four seconds.
+
+    A RECONSTRUCTION, not a design choice. `PanelGuildWeekly.ConstantDefine
+    .MaxChallengeTimes` is 3, and `_lbHomeChallengeTimes` renders
+    `format(text 17001, backpack.GetItemCount(22), MaxChallengeTimes)` -- the panel puts
+    the player's count of item 22 OVER that constant, "2 / 3". A counter shaped like
+    that only makes sense if the numerator is restored to the denominator each day, so
+    three a day is what the client itself states.
+
+    TOPS UP rather than adds, for the same reason: the panel has one slot for the
+    numerator and retail's own wording is "three tries a day", so a week away should not
+    bank 21 attempts. A player who already has some keeps them.
+    """
+    have = item_count(state, CHALLENGE_PASS_ITEM)
+    if have < CHALLENGE_MAX_TIMES:
+        grant_item(state, CHALLENGE_PASS_ITEM, CHALLENGE_MAX_TIMES - have)
 
 
 def take_pending_settlement(state):
@@ -360,9 +389,15 @@ def start_challenge(state, difficulty, now=None):
     stage_id = challenge_stage_id(weekday, difficulty)
     if not stage_id:
         return None, f"no book-{CHALLENGE_BOOK} stage for day {weekday} difficulty {difficulty}"
+    # ROLL THE DAY BEFORE CHARGING, not after. The pass was spent first and the day
+    # rolled second, so on the first fight after 4AM the charge was made against
+    # YESTERDAY's balance -- and once the roll started restoring the allowance, the
+    # restore landed after the spend and handed the pass straight back. Rolling first
+    # is also simply the right order: whether the player may play is a question about
+    # today, and `_challenge` is what makes it today.
+    ch = _challenge(state, now)
     if not spend_item(state, CHALLENGE_PASS_ITEM, 1):
         return None, "no Weekly Guild Pass (item 22)"
-    ch = _challenge(state, now)
     ch["runs"] = int(ch.get("runs", 0)) + 1
     ch["pending"] = difficulty
     return stage_id, ""
