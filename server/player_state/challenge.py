@@ -278,14 +278,31 @@ def _challenge(state, now=None):
         ch["today"] = []
         ch["best"] = 0
         ch["runs"] = 0
+        # Re-arm the allowance. The marker below is what actually grants, and clearing
+        # it here means a rolled day always re-arms whichever way the roll was noticed
+        # -- the period moving on, or the record being rolled for any other reason.
+        # Without this the two mechanisms could disagree about whether today is new.
+        ch.pop("refilled", None)
         # Remember which boss's tables today's runs are earning against, so a
         # settlement can pay the right ones however late it happens.
         ch["group"] = challenge_weekday(now)
-        _refill_passes(state)
     ch.setdefault("today", [])
     ch.setdefault("best", 0)
     ch.setdefault("runs", 0)
     ch.setdefault("group", challenge_weekday(now))
+    # Keyed on its OWN marker, not on the day-change branch above. Hanging the refill
+    # off the rollover meant it only ever fired for an account whose day changed AFTER
+    # the code landed: a player already rolled over for today -- which is every player,
+    # every day, the moment the build reaches them -- stayed at 0/3 until 4AM. Reported
+    # from a device within minutes of the first deploy: "I reloaded the game and it
+    # still says Daily Tryouts: 0/3".
+    #
+    # A per-period marker is also what keeps it from being an infinite supply: the
+    # top-up happens once per period whenever it is first noticed, and spending after
+    # that leaves `refilled` alone.
+    if ch.get("refilled") != period:
+        ch["refilled"] = period
+        _refill_passes(state)
     return ch
 
 

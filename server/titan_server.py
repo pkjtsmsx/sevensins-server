@@ -3404,10 +3404,25 @@ def challenge_fight(r):
         # the panel sync, so whatever the client does with an absent row it is at
         # least being told the truth at the moment of refusal.
         #
-        # Whether `OnChallengeClick` then greys the button or pops a message is a
-        # client-side decision we cannot see -- the loaded IDA database is not
-        # libil2cpp, so that call has not been decompiled. This does not claim to
-        # produce a popup; it removes the one way the server was demonstrably lying.
+        # DECOMPILED, so this is no longer a guess. `PanelGuildWeekly.InitHome`
+        # (0x15A5C74) is the ONLY consumer of the pass count, and all it does is:
+        #
+        #     Text        = CommonUtil.GetText(17001)
+        #     ItemCount   = PlayerBackpack.GetItemCount(22)
+        #     String.Format(Text, ItemCount, ConstantDefine.MaxChallengeTimes)
+        #     UILabel.set_text(_lbHomeChallengeTimes, ...)
+        #
+        # It sets a LABEL. There is no `_btnHomeChallenge.isEnabled`, no
+        # ShowConfirmMsg, and no gate -- and neither `OnChallengeClick` (0x15A7C5C)
+        # nor `EnterGuildWeekly` (0x15A7B88) checks the count either: the first
+        # resolves the stage and calls OpenPanelHelper unconditionally, the second
+        # just saves the difficulty and fires the request.
+        #
+        # So the client has NO refusal UX for this panel and never had one. At zero
+        # passes retail also left the button live, opened the prep panel, sent the
+        # request and showed nothing -- the "0 / 3" label is the entire feedback the
+        # game has. That makes the label the notification, and makes a stale label the
+        # actual defect: this push is the remedy, not a consolation for lacking one.
         r.send(MSG_RPC, backpack_msg(
             84, [1], [ps.backpack_json(r.state, ps.BP_STORAGE_NORMAL)]))
         r.send(MSG_RPC, sint_msg(

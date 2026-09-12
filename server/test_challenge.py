@@ -492,6 +492,28 @@ def check_passes_refill_each_day():
           ch.item_count(st, ch.CHALLENGE_PASS_ITEM) == ch.CHALLENGE_MAX_TIMES,
           str(ch.item_count(st, ch.CHALLENGE_PASS_ITEM)))
 
+    # THE CASE THE FIRST ATTEMPT MISSED. Hanging the refill off the day-change branch
+    # meant it only fired for an account whose day rolled AFTER the code landed -- which
+    # is nobody, on the day the build ships. Reported from a device minutes after the
+    # first deploy: "I reloaded the game and it still says Daily Tryouts: 0/3". An
+    # account already rolled over for today, with no refill marker, must be topped up
+    # the moment it is next read.
+    for slot in list(st["backpack"].get("1", {})):
+        if st["backpack"]["1"][slot].get("iid") == ch.CHALLENGE_PASS_ITEM:
+            del st["backpack"]["1"][slot]
+    st["challenge"].pop("refilled", None)
+    ch._challenge(st)
+    check("an account already rolled over today is still topped up",
+          ch.item_count(st, ch.CHALLENGE_PASS_ITEM) == ch.CHALLENGE_MAX_TIMES,
+          str(ch.item_count(st, ch.CHALLENGE_PASS_ITEM)))
+    # ...and having been topped up, spending them stays spent within the day.
+    for _ in range(ch.CHALLENGE_MAX_TIMES):
+        ps.spend_item(st, ch.CHALLENGE_PASS_ITEM, 1)
+    ch._challenge(st)
+    check("  ...and that does not become an infinite supply",
+          ch.item_count(st, ch.CHALLENGE_PASS_ITEM) == 0,
+          str(ch.item_count(st, ch.CHALLENGE_PASS_ITEM)))
+
 
 def main():
     for fn in (check_content_exists, check_weekday_wiring, check_stages_json,
