@@ -3349,11 +3349,24 @@ def challenge_sync(r):
     # Guild Weekly home. SyncChallengeDataReply tests
     # `intargs.Count == 5 && strargs.Count == 1` and logs-and-
     # returns on anything else, so the counts are not advisory.
+    # THIS is where the day's passes are granted: `challenge_sync_intargs` rolls the
+    # record, and the roll tops item 22 back up to three. That ordering is the whole
+    # problem the push below solves -- the client's bag snapshot arrives at LOGIN, and
+    # the grant happens later, when the panel is opened. `PanelGuildWeekly.InitHome`
+    # (0x15A5C74) then formats its "n / 3" from `PlayerBackpack.GetItemCount(22)` out
+    # of that stale snapshot and renders 0 / 3 against a bag the server had already
+    # refilled. Reported twice from a device: the fight started fine, the label lied.
+    #
+    # So push the bag with the panel data. Sending it BEFORE the 784 is deliberate:
+    # InitHome runs off the sync reply, so the counts it reads have to already be in.
     ints = ps.challenge_sync_intargs(r.state)
     ps.save(r.state)
     log(f"    -> challenge sync: best {ints[1]}, "
         f"reset in {ints[3]}s, boss group "
-        f"{ps.challenge_weekday()}")
+        f"{ps.challenge_weekday()}, passes "
+        f"{ps.item_count(r.state, ps.CHALLENGE_PASS_ITEM)}")
+    r.send(MSG_RPC, backpack_msg(
+        84, [1], [ps.backpack_json(r.state, ps.BP_STORAGE_NORMAL)]))
     r.send(MSG_RPC, sint_msg(
         CHALLENGE_CLIENT, CHALLENGE_RPLY_SYNC, ints,
         [ps.challenge_stages_json(r.state)]))
