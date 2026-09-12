@@ -185,9 +185,46 @@ def attack_json(outcome, *, caster_order=None, skill_id=None):
 
     # Non-damage effects have no swing of their own; they ride the first group so they
     # resolve at the start of the animation.
+    #
+    # HEALS GO IN THE LEAD ROW'S `extra`, NOT ALONGSIDE IT -- when the healed unit is not
+    # already named in group 0. Reported from a device: Michael's Gate of Judgement
+    # played its crush cinematic ON the healed party members while the damage went to the
+    # enemy and the healing went to the party. The numbers were right; the animation
+    # aimed at the wrong people.
+    #
+    # `AttackBehavior.PlayStart` (0x1BE0298) builds the cinematic's track targets by
+    # walking `DmgInfo[0]` -- group 0, TOP LEVEL ONLY -- and adding `GetUnit(row.c).Doll`
+    # for every row it finds, then handing that list to
+    # `BscPlayCmd.SetTrackTargetsToOverride(7, ...)` and `NormalizeSkillAimpoint`. So any
+    # unit named in group 0 becomes something the attack animation is aimed at, whatever
+    # its mode or sign.
+    #
+    # `extra` escapes that and keeps everything else. `OnDamage` (0x1BE2A18) finishes by
+    # recursing through `args.Extra`, resolving each row's OWN target with `GetUnit` and
+    # calling itself -- so an extra row still runs the mode switch, `ShowHpBar`, the
+    # floating number and `updateStatus`. A positive mode-1 row there heals and displays
+    # exactly as before; `PlayInjured` is gated on `Damage < 0`, so it stays quiet.
+    #
+    # A unit ALREADY in group 0 keeps the fold. It is a track target regardless, so
+    # nothing is gained by moving it, and folding is what keeps the one-row-per-unit rule
+    # below -- `PlayStart` does an unguarded `Dictionary.Add(row.c, ...)` that throws on
+    # a second row for the same unit.
+    #
+    # If group 0 has no row to hang `extra` off, the heals stay where they were. A skill
+    # with no damage at all is not playing an attack cinematic at anybody, and emptying
+    # group 0 would leave `NormalizeSkillAimpoint` with no targets -- a different and
+    # worse unknown than the one being fixed.
     lead = groups[0]
     for h in outcome.heals:
-        fold(lead, h["target"], MODE_HP, int(h["amount"]), False, False)
+        target, amount = h["target"], int(h["amount"])
+        host = next((r for r in lead if r["md"] == MODE_HP and r["dmg"] < 0), None)
+        if host is None or any(r["c"] == target for r in lead):
+            fold(lead, target, MODE_HP, amount, False, False)
+            continue
+        host.setdefault("extra", [])
+        if not host["extra"]:
+            host["extra"].append([])
+        host["extra"][0].append(_row(target, MODE_HP, amount))
     # NO mode-4 rows. Emitting the move-gauge change as a DamageInfo row stalls the
     # client outright -- found on device: every skill carrying `modify_gauge` (Lucifer's
     # Eclipse Slash, Metatron's Poison Injection) hung the fight after the animation,
