@@ -204,6 +204,76 @@ def check_a_counter_kill_reaches_the_client():
           f"alive={me.alive} die={rows[0]['die']}")
 
 
+def check_triggered_cleanses_fire_on_the_right_side():
+    print("\ncheck_triggered_cleanses_fire_on_the_right_side:")
+    # `Rule` had no removal effect, so all 361 triggered `remove_status` effects did
+    # nothing. The side is the interesting half: all 4,523 compiled removals carry
+    # `target: null`, so the CATEGORY has to answer it -- and it is the inverse of the
+    # apply-side convention, because clearing a debuff is a self-cleanse while clearing
+    # a buff is a strip. Reusing the apply selector would have sent every
+    # damage-over-time cleanse in the game at the enemy team.
+    from engine import core as ecore, status as est2
+
+    def unit(order, team):
+        u = ecore.Unit(order=order, team=team, max_hp=50000, hp=30000, atk=3000,
+                       defence=1000, spd=100)
+        u.statuses = []
+        return u
+
+    # 1004131 Desire Park: 若自身擁有可解除的「持續傷害」狀態，解除 -- SELF.
+    me, foe = unit("1", 0), unit("2", 1)
+    me.statuses.append(est2.Active(status_id=5001, name="Poison", kind="dot",
+                                   category="damage_over_time", magnitude=10.0,
+                                   remaining=3))
+    me.skills = [1004131]
+    fired = P.fire_all(P.TURN_START, [me], [me, foe])
+    check("a DoT cleanse removes the holder's OWN damage-over-time",
+          [(t.order, e) for t, e, _a in fired] == [("1", P.REMOVE)], str(fired))
+    check("  ...and the status is really gone",
+          not any(getattr(s, "status_id", 0) == 5001 for s in me.statuses))
+
+    # 1002166 Cuteness Is Justice!! VI: 攻擊時清除目標的「剛體」、「金剛」 -- the TARGET.
+    me, foe = unit("1", 0), unit("2", 1)
+    for u in (me, foe):
+        u.statuses.append(est2.Active(status_id=2003, name="Harden", kind="other",
+                                      category="buff", remaining=3))
+    me.skills = [1002166]
+    fired = P.fire_all(P.ON_DAMAGE_DEALT, [me], [me, foe])
+    check("a buff strip takes it off the ENEMY",
+          [t.order for t, _e, _a in fired] == ["2"], str(fired))
+    check("  ...and leaves the caster's own copy alone",
+          any(getattr(s, "status_id", 0) == 2003 for s in me.statuses))
+
+    # Unremovable is still honoured -- 509 statuses say a cleanse cannot touch them.
+    me, foe = unit("1", 0), unit("2", 1)
+    me.statuses.append(est2.Active(status_id=5001, name="Poison", kind="dot",
+                                   category="damage_over_time", magnitude=10.0,
+                                   remaining=3, unremovable=True))
+    me.skills = [1004131]
+    check("an unremovable status survives a cleanse",
+          P.fire_all(P.TURN_START, [me], [me, foe]) == []
+          and len(me.statuses) == 1)
+
+
+def check_a_cleanse_reaches_the_client():
+    print("\ncheck_a_cleanse_reaches_the_client:")
+    # A removal reaches the client as a status row carrying that id with a round of 0,
+    # so the Active has to survive out of `fire` and into the Outcome -- a name alone
+    # cannot be sent. `_report` grew a branch for it; without one the cleanse would
+    # happen server-side and the icon would stay on the client's bar.
+    from engine import core as ecore, status as est2
+    out = ecore.Outcome(caster="1", skill_id=0, swings=1)
+    victim = ecore.Unit(order="2", team=1, max_hp=100, hp=100)
+    dead = est2.Active(status_id=2003, name="Harden", kind="other", category="buff")
+    ecore._report(out, [(victim, P.REMOVE, dead)])
+    check("the removal becomes a status row", len(out.statuses) == 1, str(out.statuses))
+    if out.statuses:
+        ev = out.statuses[0]
+        check("  ...carrying the id, on the right unit, flagged as a REMOVAL",
+              (ev.status_id, ev.target, ev.applied) == (2003, "2", False),
+              f"{ev.status_id}/{ev.target}/{ev.applied}")
+
+
 if __name__ == "__main__":
     check_counters_exist_at_all()
     check_defence_basis()
@@ -211,5 +281,7 @@ if __name__ == "__main__":
     check_crit_from_statuses()
     check_strike_uses_it()
     check_a_counter_kill_reaches_the_client()
+    check_triggered_cleanses_fire_on_the_right_side()
+    check_a_cleanse_reaches_the_client()
     print(f"\n{_fail} failure(s)")
     sys.exit(1 if _fail else 0)

@@ -30,21 +30,19 @@ import effect_coverage as ec                 # noqa: E402
 # in their commit. Shrinking this set is the goal; growing it silently is the thing being
 # prevented.
 #
-#   remove_status -- `Rule` has no removal effect at all. 361 effects. A passive that
-#     cleanses on a trigger ("at the start of the battle, remove all debuffs") does
-#     nothing today.
 #   damage -- handled for `on_damage_taken` only, which is the counterattack shape. The
 #     other four triggers carry 223 effects and are NOT a missing branch so much as a
 #     missing decision: every compiled damage effect has `target: null`, and only a
 #     counter's prose says who to hit. Picking a recipient for the rest would be
 #     inventing one. See engine/passives.py.
+#
+# CLOSED, and left here as the record this file exists to keep:
+#   remove_status, all six triggers, 361 effects -- `Rule` had no removal effect at all,
+#     so every triggered cleanse in the game did nothing. Closed by the same commit that
+#     shrank this set. Its recipient WAS answerable where damage's is not: all 4,523
+#     compiled removals also carry `target: null`, but the category settles it, because
+#     clearing a debuff is a self-cleanse and clearing a buff is a strip.
 KNOWN_GAPS = {
-    ("passive", "remove_status", "battle_start"),
-    ("passive", "remove_status", "turn_start"),
-    ("passive", "remove_status", "after_action"),
-    ("passive", "remove_status", "on_damage_dealt"),
-    ("passive", "remove_status", "on_damage_taken"),
-    ("passive", "remove_status", "on_death"),
     ("passive", "damage", "battle_start"),
     ("passive", "damage", "turn_start"),
     ("passive", "damage", "after_action"),

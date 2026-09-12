@@ -200,6 +200,7 @@ HEAL = "heal"
 DAMAGE = "damage"
 GAUGE = "gauge"
 REVIVE = "revive"
+REMOVE = "remove"
 
 # What a magnitude is a percentage OF.
 OF_SELF_ATK = "self_atk"
@@ -514,6 +515,31 @@ def _selector(eff, category):
     return ENEMIES if category in ("debuff", "damage_over_time") else SELF
 
 
+# WHICH SIDE A REMOVAL LANDS ON, and it is the INVERSE of `_selector`'s fallback above.
+# That one answers "who does a status get applied to" -- a debuff goes to the enemy. A
+# REMOVAL asks the opposite question about the same category: clearing a debuff is a
+# self-cleanse, clearing a buff is a strip aimed at whoever has it. Reusing `_selector`
+# here would have sent every damage-over-time cleanse in the game to the enemy team.
+#
+# All 4,523 compiled `remove_status` effects carry `target: null`, so the category is the
+# only thing that answers this -- and it does, checked against the prose:
+#
+#   1004131  若自身擁有可解除的「持續傷害」狀態，解除     self, a DoT cleanse
+#   1005182  行動結束後清除自身重傷狀態                   self, a debuff cleanse
+#   1002166  攻擊時清除目標的「剛體」、「金剛」           the TARGET's buffs
+#   1014131  將攻擊目標身上的護盾清除                     the attack target's shield
+#   1007151  清除自身的破滅魔劍                           self, an `other` marker
+#
+# `other` / `passive_grant` / `unknown` go to SELF because that is what they are in this
+# data: a marker the holder accumulates and the passive spends (Claymore, Hide Weakness).
+_REMOVE_FROM_ENEMY = ("buff", "shield")
+
+
+def _removal_selector(category):
+    """-> who a triggered `remove_status` cleanses. See the note above."""
+    return ENEMIES if (category or "").lower() in _REMOVE_FROM_ENEMY else SELF
+
+
 def _denies_turns(eff):
     """Would this status stop its holder from taking turns? -> bool.
 
@@ -663,6 +689,16 @@ def _compiled_rules(spec):
             rules.append(Rule(trigger, effect=REVIVE, to=RANDOM_DEAD_ALLY,
                               when=when, chance=chance,
                               magnitude=float(eff["percent"]), note="compiled"))
+        elif op == "remove_status":
+            # A triggered cleanse. `Rule` had no removal effect at all, so all 361 of
+            # these did nothing: "at the start of the turn, clear your own damage-over-
+            # time", "when you attack, strip the target's Harden". The category travels
+            # on the rule because that is what `status.remove_category` takes, and it is
+            # also what picks the side -- see _removal_selector.
+            cat = eff.get("category") or (eff.get("status") or {}).get("category")
+            rules.append(Rule(trigger, effect=REMOVE, to=_removal_selector(cat),
+                              when=when, chance=chance, stat=cat,
+                              note=f"compiled cleanse: {cat}"))
         elif (op == "damage" and trigger == ON_DAMAGE_TAKEN
                 and eff.get("coefficient") is not None):
             # COUNTERATTACKS. This branch did not exist, so every compiled passive
@@ -813,7 +849,15 @@ def fire(trigger, holder, passive_skill_id, units, ctx=None, fired=None):
                     if target.alive:
                         continue
                     target.hp = max(1, amount)
-                applied.append((target, rule.effect, amount))
+                if rule.effect == REMOVE:
+                    # One row per status actually removed, carrying the Active itself:
+                    # the client is told about a removal by a status row with that id
+                    # and a round of 0, so a name alone cannot be sent (see
+                    # status.remove_category).
+                    for dead in _status.remove_category(target, rule.stat):
+                        applied.append((target, REMOVE, dead))
+                else:
+                    applied.append((target, rule.effect, amount))
             if rule.once and fired is not None:
                 fired.add(key)
             continue

@@ -772,6 +772,15 @@ def _report(out, applied):
                 stacks=active.stacks, permanent=active.permanent))
             continue
         target, effect, amount = row
+        if effect == _passives.REMOVE:
+            # A triggered cleanse. `amount` is the Active that was removed, not a
+            # number: the client learns about a removal from a status row carrying that
+            # id with a round of 0, so the id has to survive to here (status.py's
+            # remove_category returns the objects for exactly this reason).
+            out.statuses.append(StatusEvent(
+                target=target.order, status_id=amount.status_id, name=amount.name,
+                applied=False))
+            continue
         if not amount:
             continue
         if effect == _passives.DAMAGE:
