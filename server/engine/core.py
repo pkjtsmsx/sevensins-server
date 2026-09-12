@@ -897,6 +897,23 @@ def _rider(caster, eff, targets, out, rng, apply_damage, skill_id, units=(),
         base = float(caster.max_hp)
     else:
         base = float(formula.effective_atk(caster))
+    if kind == "heal" and basis == "damage_dealt":
+        # 攻擊後吸收30%傷害 -- life steal, sized on the damage this skill actually did.
+        # The pack's own English for the sibling family 攻擊吸收 is "Life Steal", and
+        # its long form spells the mechanic out: 擊傷時最多1次，以25%機率恢復6%體力.
+        #
+        # Off the STRIKES, not off ATK. A share of "the damage" is what the words say,
+        # and the two differ by everything the strike formula does -- crit, attribute
+        # advantage, the target's DEF, a shield eating part of it. Riders run after the
+        # swing loop, so `out.strikes` already holds this skill's output.
+        dealt = sum(st.amount for st in out.strikes)
+        amount = int(dealt * pct / 100.0)
+        if amount:
+            if apply_damage:
+                caster.hp = min(caster.max_hp, caster.hp + amount)
+            out.heals.append({"target": caster.order, "amount": amount,
+                              "from": "lifesteal"})
+        return
     if kind == "heal" and eff.get("target") == "allies":
         # 以200%攻擊力恢復我方全體體力 -- the WHOLE party. The rider's generic heal below
         # reaches the caster alone, which was right while every rider heal was a

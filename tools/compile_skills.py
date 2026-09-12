@@ -1910,6 +1910,26 @@ def zh_revives(r):
     return out
 
 
+# 攻擊後吸收N%傷害 -- life steal, on 28 mob basic attacks. `吸收` is the pack's own word
+# for it: the sibling family 攻擊吸收 is translated "Life Steal" and writes the mechanic
+# out in full (擊傷時最多1次，以25%機率恢復6%體力). Everywhere else 吸收 means a SHIELD
+# and says so -- 吸收7000點傷害的護盾, 232 of them carry 護盾 or 點 -- so the percent form
+# with neither is the drain, not a barrier.
+_ZH_LIFESTEAL = re.compile(r"吸收\s*(\d+(?:\.\d+)?)\s*[%％]\s*(?:的)?傷害")
+
+
+def lifesteal_rider(r):
+    """-> an attack_rider healing a share of the damage dealt, or None."""
+    note = r.get("_note1") or ""
+    if "護盾" in note:
+        return None                              # a shield sized in percent, not a drain
+    m = _ZH_LIFESTEAL.search(note)
+    if not m:
+        return None
+    return {"op": "attack_rider", "kind": "heal", "basis": "damage_dealt",
+            "percent": round(float(m.group(1)), 4), "source": "prose_zh"}
+
+
 def uncovered_revives(r, effects_so_far):
     """-> revive effects the Chinese states that no opcode emitted."""
     have = {(e.get("percent"), e.get("target"))
@@ -1923,6 +1943,47 @@ def uncovered_revives(r, effects_so_far):
         out.append({"op": "revive", "percent": v["percent"],
                     "target": v.get("target"), "source": "prose_zh",
                     **({"count": v["count"]} if v.get("count") else {})})
+    return out
+
+
+# A cleanse stated in prose with no remove_status opcode behind it. The CATEGORY forms
+# only -- 清除自身可堆疊類型的能力下降狀態 -- because `status.remove_category` removes by
+# category and that is exactly what these name.
+#
+# The NAMED forms are deliberately left alone: 清除我方全體混亂、幻惑、凍結狀態 lists
+# three specific statuses, and the engine's removal takes a category, so compiling it
+# would clear every `misc` status the ally holds rather than those three. Over-removing
+# is worse than not removing, and it would be invisible.
+_ZH_CLEANSE_CAT = [
+    (re.compile(r"能力(?:下降|低下)"), "debuff"),
+    (re.compile(r"能力(?:上升|上昇|提升)"), "buff"),
+    (re.compile(r"持續傷害"), "damage_over_time"),
+    (re.compile(r"護盾"), "shield"),
+]
+_ZH_CLEANSE_VERB = re.compile(r"(?<!可)(?<!無法)(?<!被)(清除|解除|消除)(?!不可)")
+
+
+def uncovered_removes(r, effects_so_far):
+    """-> remove_status effects for prose cleanses no opcode covered."""
+    if any(e.get("op") == "remove_status" for e in effects_so_far):
+        return []                                 # the walker already found one
+    out, seen = [], set()
+    for c, _prev in _zh_clauses_with(r.get("_note1"), _ZH_CLEANSE_VERB):
+        # 若...擁有可清除的... is a CONDITION on the clause, not the cleanse itself.
+        if re.search(r"若[^，。]*可(?:清除|解除)", c):
+            continue
+        for pat, cat in _ZH_CLEANSE_CAT:
+            if not pat.search(c):
+                continue
+            if cat in seen:
+                break
+            seen.add(cat)
+            entry = {"op": "remove_status", "category": cat, "source": "prose_zh"}
+            cm = _ZH_CHANCE.search(c)
+            if cm:
+                entry["chance_pct"] = float(cm.group(1))
+            out.append(entry)
+            break
     return out
 
 
@@ -2606,7 +2667,13 @@ def compile_skill(rows, sid, swings_by_act):
     spec["effects"] = dedupe_heals(spec["effects"])
     spec["effects"].extend(uncovered_heals(r, spec["effects"]))
     spec["effects"].extend(uncovered_gauges(r, spec["effects"]))
+    spec["effects"].extend(uncovered_removes(r, spec["effects"]))
     spec["effects"].extend(uncovered_revives(r, spec["effects"]))
+    if spec["type"] != "status":
+        steal = lifesteal_rider(r)
+        if steal and not any(e.get("basis") == "damage_dealt"
+                             for e in spec["effects"]):
+            spec["effects"].append(steal)
     if unknown:
         spec["unknown"] = unknown
     if typ == "passive":
