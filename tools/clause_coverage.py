@@ -71,10 +71,18 @@ CLAIMS = [
     # 受到/承受 + 傷害 is damage TAKEN, which is a damage_mod STATUS ("受到的最終傷害
     # -5%"), not damage this skill deals. Claiming it as damage made every such status
     # description look like a missing attack.
-    ("damage",    re.compile(r"(?<!受到)(?<!承受)(?:\d+\s*[%％][^，。]{0,10}傷害"
-                             r"|傷害[^，。]{0,6}\d+\s*[%％])"),
+    # ...and a parenthetical caveat is not a damage clause: 自身行動值+8%(多段傷害時僅
+    # 發動一次) puts 傷害 within ten characters of a percentage while being about the
+    # gauge. Requiring no bracket or 時 between the two keeps them apart.
+    ("damage",    re.compile(r"(?<!受到)(?<!承受)(?:\d+\s*[%％][^，。()（）時]{0,10}傷害"
+                             r"|傷害[^，。()（）時]{0,6}\d+\s*[%％])"),
                   {"damage", "attack_rider", "apply_status"}),
-    ("status",    re.compile(r"(附加|賦予|獲得|使自身|使目標)"), {"apply_status"}),
+    # A fragment about 行動值 is a GAUGE clause however it is phrased -- 則自身獲得100%
+    # 行動值 uses the same 獲得 verb a status grant does. All 119 skills writing it that
+    # way already carry a modify_gauge, so claiming them as an unsatisfied status was
+    # the marker's fault, not a gap.
+    ("status",    re.compile(r"(?![^，。]*行動值)(附加|賦予|獲得|使自身|使目標)"),
+                  {"apply_status", "modify_gauge"}),
 ]
 
 # Fragments that are glossary, UI copy or menu flavour rather than battle mechanics.

@@ -47,6 +47,11 @@ import effect_coverage as ec                 # noqa: E402
 #     at all. Its recipient WAS answerable where damage's is not: the category settles
 #     it, because clearing a debuff is a self-cleanse and clearing a buff is a strip.
 KNOWN_GAPS = {
+    # ~23 gauge effects state a percentage and no recipient (`target: null`, from the
+    # English reader). `core.execute` has nobody to move, and picking a side would be
+    # the same invention refused for the damage effects below. Surfaced by this ratchet
+    # when the cell grew, not introduced by that growth.
+    ("active", "modify_gauge", None),
     ("active", "apply_status", None),
     ("active", "follow_up", None),
     ("active", "attack_rider", None),

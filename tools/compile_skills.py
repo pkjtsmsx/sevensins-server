@@ -1799,10 +1799,17 @@ def is_conditional(r, status_name):
 # the two apart -- without it the guard below rejected the heal as "just the damage
 # coefficient restated" and `damage()` read a passive with no attack as a 40% hit.
 _HEAL_FRAGMENT = re.compile(r"[^，。\n]*(?:回復|恢復|補血)[^，。\n]*")
+# ...and the ENGLISH note needs the same treatment, for the same reason and on its own
+# punctuation. `_COEF` matches `N% HP` as readily as `N% ATK`, so "restores 18% HP" read
+# as an 18% damage coefficient and the guard then threw the heal away as a restatement
+# of it. Blanking only the Chinese fragments left every mob heal written this way --
+# Healing Breath, HP Regen and 66 more -- compiling to nothing.
+_HEAL_FRAGMENT_EN = re.compile(r"[^.,;\n]*\b(?:restor\w*|recover\w*|heal\w*)\b[^.,;\n]*",
+                               re.I)
 
 
 def _without_heal_clauses(note):
-    return _HEAL_FRAGMENT.sub(" ", note or "")
+    return _HEAL_FRAGMENT_EN.sub(" ", _HEAL_FRAGMENT.sub(" ", note or ""))
 
 
 def _is_damage_coefficient(r, pct):
