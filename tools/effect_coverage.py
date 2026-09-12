@@ -64,7 +64,12 @@ REQUIRED = {
     "modify_cd": lambda e: e.get("turns") is not None,
     "follow_up": lambda e: e.get("skill") is not None,
     "apply_status": lambda e: (e.get("status") or {}).get("id") is not None,
-    "remove_status": lambda e: True,
+    # A cleanse needs a category that some status can actually HAVE. 'unknown' is the
+    # compiler failing to decode the category-block operand, and no status in the
+    # registry carries it, so such an effect can never match anything -- a data defect,
+    # not an engine one, and counting it as a gap blamed the wrong component.
+    "remove_status": lambda e: ((e.get("category") or (e.get("status") or {}).get(
+        "category")) in PROBE_CATEGORIES) or bool((e.get("status") or {}).get("id")),
     "attack_rider": lambda e: True,
 }
 
@@ -72,17 +77,39 @@ REQUIRED = {
 # per-op expectation on purpose: the question this tool asks is "did the engine do
 # ANYTHING with this effect", and an op that lands in a channel other than the obvious
 # one is still handled. Being wrong about which channel is a different audit.
-CHANNELS = ("strikes", "statuses", "heals", "gauge", "revives", "cooldowns")
+# `immune` belongs here: a status the engine processed and the TARGET resisted is
+# handled -- the engine ran the effect and recorded the refusal, which is the behaviour
+# the client's "IMMUNE" float depends on. Leaving it out counted every resisted
+# application as "nothing happened" and invented gaps out of working code.
+#
+# `skipped` deliberately does NOT belong here. That is the engine saying it declined to
+# run the effect, which is exactly what this tool is looking for.
+CHANNELS = ("strikes", "statuses", "heals", "gauge", "revives", "cooldowns", "immune")
 
-SAMPLES_PER_CELL = 12           # enough to clear a chance roll; see _probe_active
+# Per-cell sample size. Deliberately generous: the gap list EXTRAPOLATES a sample's miss
+# rate onto the whole cell, so a small sample makes the ranking noisy rather than merely
+# imprecise. At 12 a cell whose true miss rate was 2% (`heal/None`, 3 of 150 measured by
+# hand) drew one miss and reported 54 of 649. A handled effect exits on its first seed,
+# so the cost of raising this falls almost entirely on cells that really do have gaps.
+SAMPLES_PER_CELL = 60
 
 
-# Every category a `remove_status` effect actually names, counted off the artifact.
-# `core._removable` matches a cleanse's category against the HELD status's category, so
-# a probe field missing one of these reports "unhandled" for want of something to
-# remove. Getting this wrong hid the remove_status row behind a false gap once already.
-PROBE_CATEGORIES = ("other", "shield", "buff", "debuff", "damage_over_time",
-                    "passive_grant", "heal_over_time", "misc")
+def _registry_categories():
+    """Every category a status in the registry actually has.
+
+    READ, not hardcoded. `remove_category` matches a cleanse's category against the HELD
+    status's, so a probe field missing one reports "unhandled" for want of something to
+    remove -- and the hand-written list this replaces was already wrong, carrying `misc`
+    and `other` while missing `stat_up` and `content`.
+    """
+    import json as _json
+    path = os.path.join(SERVER, "battle_data", "statuses.json")
+    with open(path) as fh:
+        return sorted({v.get("category") for v in _json.load(fh).values()
+                       if v.get("category")})
+
+
+PROBE_CATEGORIES = _registry_categories()
 
 
 def _statuses():
@@ -121,6 +148,7 @@ def _summary(out):
     """A comparable fingerprint of an Outcome -- what happened, not how hard."""
     return (len(out.strikes), len(out.statuses), len(out.heals), len(out.gauge),
             len(out.revives), len(out.cooldowns), len(out.children),
+            len(out.immune),
             sum(1 for s in out.statuses if not s.applied),
             tuple(sorted(getattr(s, "status_id", 0) or 0 for s in out.statuses)))
 
@@ -136,7 +164,12 @@ def _run(spec, effects, seed):
     caster, units = _field()
     try:
         return _summary(_EXECUTE(caster, _probe_spec(spec, effects), units,
-                                 rng=random.Random(seed), round_no=1))
+                                 rng=random.Random(seed), round_no=1,
+                                 # The player's pick, for the `select: count` breadth
+                                 # rule -- `resolve_targets` leads with it and fills the
+                                 # rest by slot, which makes a multi-target probe
+                                 # reproducible instead of order-dependent.
+                                 chosen="4"))
     except Exception:
         # An effect that RAISES is not a coverage question -- that is a bug, and the
         # fuzzer is what hunts those. Report the seed as inconclusive.
@@ -203,10 +236,19 @@ def coverage():
     # (op, trigger) -> complete effects, and separately the starved ones.
     cells = collections.defaultdict(list)
     starved = collections.Counter()
+    untargetable = collections.Counter()
     for sid, spec, eff in effects:
         op = eff.get("op")
         if not REQUIRED.get(op, lambda _e: True)(eff):
             starved[op] += 1
+            continue
+        # NOT PROBEABLE THROUGH `execute`, and not a gap. `resolve_targets` returns []
+        # for `select` in (None, "none", "unknown") by design: these are the status-row
+        # pseudo-skills, which reach the field through `status.run_nested` rather than
+        # by being cast. Probing them anyway put 21 of the first 60 `apply_status/None`
+        # misses into the gap list as engine faults when the engine was right.
+        if (spec.get("target") or {}).get("select") in (None, "none", "unknown"):
+            untargetable[op] += 1
             continue
         cells[(op, eff.get("trigger"))].append((sid, spec, eff))
 
@@ -224,19 +266,33 @@ def coverage():
         # members are a minority would pass on one run and report a gap on the next.
         picker = random.Random(zlib.crc32(f"{op}/{trigger}".encode()))
         sample = picker.sample(members, min(SAMPLES_PER_CELL, len(members)))
-        active = any(_probe_active(sp, e) for _s, sp, e in sample)
+        # A FRACTION, not a boolean. "Any sampled member worked" is the wrong question:
+        # a cell is routinely part-handled, because whether an effect can be paid often
+        # depends on the effect rather than on the op. `damage / after_action` is the
+        # case that forced this -- 62 of its members carry a resolved `select` and the
+        # rest do not, so a boolean called the whole cell closed and hid 38 effects.
+        act_ok = sum(1 for _s, sp, e in sample if _probe_active(sp, e))
         # A passive rule needs a trigger the rule table knows; an untriggered effect is
         # an ACTIVE effect and its passive cell is not a gap, it is not applicable.
         if trigger in passives.ALL_TRIGGERS:
-            passive = any(_probe_passive(sp, e) for _s, sp, e in sample)
+            pas_ok = sum(1 for _s, sp, e in sample if _probe_passive(sp, e))
         else:
-            passive = None
-        rows.append((op, trigger, len(members), active, passive, sample[0][0]))
-        if trigger in passives.ALL_TRIGGERS and not passive:
-            gaps.append(("passive", op, trigger, len(members), sample[0][0]))
-        if trigger is None and not active:
-            gaps.append(("active", op, trigger, len(members), sample[0][0]))
-    return rows, gaps, starved, len(effects)
+            pas_ok = None
+        n = len(sample)
+        rows.append((op, trigger, len(members), act_ok, pas_ok, n, sample[0][0]))
+
+        def _gap(path, ok):
+            if ok is None or ok == n:
+                return
+            # Scale the sample's miss rate back onto the cell, so the gap list ranks by
+            # how many effects it actually costs rather than by how many cells it spans.
+            missing = int(round(len(members) * (n - ok) / n))
+            gaps.append((path, op, trigger, missing, len(members), sample[0][0]))
+
+        _gap("passive", pas_ok)
+        if trigger is None:
+            _gap("active", act_ok)
+    return rows, gaps, starved, untargetable, len(effects)
 
 
 def main():
@@ -245,19 +301,23 @@ def main():
                     help="name a sample skill id for every cell")
     args = ap.parse_args()
 
-    rows, gaps, starved, total = coverage()
+    rows, gaps, starved, untargetable, total = coverage()
     print(f"{total} effects, {len(rows)} (op, trigger) cells, "
           f"{sum(starved.values())} starved of the data they need\n")
 
-    def mark(v):
-        return "  -  " if v is None else (" yes " if v else " NO  ")
+    def mark(ok, n):
+        if ok is None:
+            return "  -  "
+        if ok == n:
+            return " yes "
+        return " NO  " if ok == 0 else f"{ok}/{n}"
 
     print(f"{'op':<15}{'trigger':<18}{'effects':>9}  {'active':^6} {'passive':^7}"
           + ("  sample" if args.verbose else ""))
     print("-" * (50 + 16 + (10 if args.verbose else 0)))
-    for op, trigger, n, active, passive, sid in rows:
-        line = (f"{op:<15}{str(trigger):<18}{n:>9}  {mark(active):^6} "
-                f"{mark(passive):^7}")
+    for op, trigger, total_n, act_ok, pas_ok, n, sid in rows:
+        line = (f"{op:<15}{str(trigger):<18}{total_n:>9}  "
+                f"{mark(act_ok, n):^6} {mark(pas_ok, n):^7}")
         if args.verbose:
             line += f"  {sid}"
         print(line)
@@ -266,12 +326,21 @@ def main():
     if gaps:
         print("GAPS -- effects the engine carries and does nothing with, "
               "worst first:\n")
-        for path, op, trigger, n, sid in sorted(gaps, key=lambda g: -g[3]):
-            print(f"  {n:>6} effects  {path:<8} {op} / {trigger}   (e.g. skill {sid})")
+        for path, op, trigger, miss, total_n, sid in sorted(gaps, key=lambda g: -g[3]):
+            of = f" of {total_n}" if miss != total_n else ""
+            print(f"  {miss:>6} effects{of:<10}  {path:<8} {op} / {trigger}"
+                  f"   (e.g. skill {sid})")
         print(f"\n  {sum(g[3] for g in gaps)} effects total.")
     else:
         print("No gaps: every complete effect produces something on every path "
               "that applies to it.")
+
+    if untargetable:
+        print("\nNot probed -- specs whose own target is `none`/`unknown`, so `execute`\n"
+              "resolves no targets by design. These reach the field through\n"
+              "`status.run_nested`, not by being cast:\n")
+        for op, n in untargetable.most_common():
+            print(f"  {n:>6} {op}")
 
     if starved:
         print("\nNot counted above -- effects missing the data they need. These are a "

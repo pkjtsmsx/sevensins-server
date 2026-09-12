@@ -204,6 +204,44 @@ def check_a_counter_kill_reaches_the_client():
           f"alive={me.alive} die={rows[0]['die']}")
 
 
+def check_damage_with_a_stated_recipient_is_paid():
+    print("\ncheck_damage_with_a_stated_recipient_is_paid:")
+    # 62 of the 223 non-counter passive damage effects carry a RESOLVED `select`:
+    # 57 are {"who": "enemy", "top": "HP", "n": 1} and 5 the ally-highest-ATK form.
+    # Those state their recipient, so they need no guess -- Lucifer's 睥睨眾星 is
+    # 攻擊行動結束後，對敵方體力最高者進行180%攻擊力的傷害.
+    from engine import core as ecore
+
+    def unit(order, team, hp):
+        u = ecore.Unit(order=order, team=team, max_hp=100000, hp=hp, atk=2000,
+                       defence=500, spd=100)
+        u.statuses = []
+        return u
+
+    me = unit("1", 0, 50000)
+    me.skills = [1000131]                      # Lucifer, after_action, 180% ATK
+    low, high, mid = unit("2", 1, 10000), unit("3", 1, 90000), unit("4", 1, 50000)
+    field = [me, low, high, mid]
+    before = {u.order: u.hp for u in field}
+    fired = P.fire_all(P.AFTER_ACTION, [me], field)
+    check("it fires, on exactly one unit",
+          [(t.order, e) for t, e, _a in fired] == [("3", P.DAMAGE)], str(fired))
+    check("  ...the ENEMY WITH THE HIGHEST HP, as the prose says",
+          high.hp < before["3"] and low.hp == before["2"] and mid.hp == before["4"],
+          str({u.order: before[u.order] - u.hp for u in field}))
+    check("  ...for 180% of the holder's own ATK",
+          before["3"] - high.hp == 3600, str(before["3"] - high.hp))
+
+    # And an effect that states NO recipient is still refused rather than guessed at:
+    # `_stated_selector` returns None where `_selector` would fall back to a default.
+    check("an effect with no stated recipient produces no rule",
+          P._stated_selector({"op": "damage", "coefficient": 1.0}) is None)
+    check("  ...while a stated one resolves",
+          P._stated_selector({"op": "damage", "coefficient": 1.0,
+                              "select": {"who": "enemy", "top": "HP", "n": 1}})
+          is not None)
+
+
 def check_triggered_cleanses_fire_on_the_right_side():
     print("\ncheck_triggered_cleanses_fire_on_the_right_side:")
     # `Rule` had no removal effect, so all 361 triggered `remove_status` effects did
@@ -281,6 +319,7 @@ if __name__ == "__main__":
     check_crit_from_statuses()
     check_strike_uses_it()
     check_a_counter_kill_reaches_the_client()
+    check_damage_with_a_stated_recipient_is_paid()
     check_triggered_cleanses_fire_on_the_right_side()
     check_a_cleanse_reaches_the_client()
     print(f"\n{_fail} failure(s)")

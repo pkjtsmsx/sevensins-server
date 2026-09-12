@@ -535,6 +535,23 @@ def _selector(eff, category):
 _REMOVE_FROM_ENEMY = ("buff", "shield")
 
 
+def _stated_selector(eff):
+    """-> the selector this effect's own `select` states, or None if it states nothing.
+
+    The difference from `_selector` is the FALLBACK, and it is the whole point. That one
+    ends with "enemies if this is a debuff, else self", which is a fair reading of an
+    unstated recipient for a STATUS -- a buff is for you, a debuff is for them. A damage
+    effect has no such tell: dealing damage to yourself and dealing it to the enemy are
+    both real mechanics in this pack, and defaulting either way would invent a recipient
+    for 161 effects rather than admit they do not state one.
+    """
+    sel = eff.get("select") or {}
+    if sel.get("who") == "attacker" or sel.get("top") or sel.get("who") in (
+            "self", "ally", "enemy"):
+        return _selector(eff, "")
+    return None
+
+
 def _removal_selector(category):
     """-> who a triggered `remove_status` cleanses. See the note above."""
     return ENEMIES if (category or "").lower() in _REMOVE_FROM_ENEMY else SELF
@@ -699,6 +716,25 @@ def _compiled_rules(spec):
             rules.append(Rule(trigger, effect=REMOVE, to=_removal_selector(cat),
                               when=when, chance=chance, stat=cat,
                               note=f"compiled cleanse: {cat}"))
+        elif (op == "damage" and eff.get("coefficient") is not None
+                and _stated_selector(eff) is not None):
+            # A triggered damage effect whose RECIPIENT THE DATA STATES. 62 of the 223
+            # non-counter damage effects carry a resolved `select` -- 57 are
+            # {"who": "enemy", "top": "HP", "n": 1} ("the 1 enemy with the highest HP",
+            # Lucifer's 對敵方體力最高者) and 5 are the ally-highest-ATK form. Those need
+            # no guess at all, so they are paid exactly like the counters below.
+            #
+            # `_stated_selector`, NOT `_selector`: the latter falls back to "enemies if
+            # this is a debuff, else self" when nothing is stated, which is a sensible
+            # default for a STATUS and pure invention for a damage effect. The remaining
+            # 161 stay dropped, visibly, in the coverage ratchet.
+            rules.append(Rule(
+                trigger, effect=DAMAGE, to=_stated_selector(eff), when=when,
+                chance=chance,
+                basis=(OF_SELF_DEF if (eff.get("basis") or "").upper() == "DEF"
+                       else OF_SELF_ATK),
+                magnitude=float(eff["coefficient"]) * 100.0,
+                note=f"compiled damage: {eff.get('basis')} x{eff.get('coefficient')}"))
         elif (op == "damage" and trigger == ON_DAMAGE_TAKEN
                 and eff.get("coefficient") is not None):
             # COUNTERATTACKS. This branch did not exist, so every compiled passive
