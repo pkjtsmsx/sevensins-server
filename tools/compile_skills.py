@@ -309,6 +309,13 @@ def zh_heals(r):
     for c, prev in _zh_clauses_with(r.get("_note1"), re.compile(r"回復|恢復|補血")):
         if "行動值" in c:                        # a GAUGE recovery, not HP
             continue
+        if "復活" in c or "復活" in (prev or ""):
+            # 復活我方被擊倒的隨機1人，並回復其50%體力 -- the percentage is the HP the
+            # REVIVE brings them back on, not a heal of its own. Reading it as a second
+            # effect gave Metatron's Sacrifice a 50% party heal the prose never grants,
+            # on top of the revive that already pays it. The two halves are separate
+            # FRAGMENTS, split on the comma, so the preceding one has to be checked too.
+            continue
         pct = _zh_magnitude(c)
         if pct is None or _is_damage_coefficient(r, pct):
             continue
@@ -334,19 +341,22 @@ def zh_heal(r):
     return heals[0] if heals else None
 
 
-def zh_gauge(r):
-    """-> {percent, target, chance_pct?} from the 行動值 clause, or an extra-turn clause.
+def zh_gauges(r):
+    """-> EVERY gauge change the Chinese states, in order.
 
-    "使自己可以再度行動" is a full refill of the caster's gauge -- percent 100 -- and the
-    number beside it ("10%的機率") is the CHANCE it happens, which the engine rolls.
+    Plural for the reason `zh_heals` is: returning the first and stopping made the Nth
+    gauge OPCODE read the FIRST clause, so Ocean Strike's 行動後目標行動值-10%，自身的
+    行動值+10% compiled as -10% to the target twice -- the self buff lost, the debuff
+    doubled. A skill stating a gauge change with no opcode behind it got nothing at all.
     """
     note = r.get("_note1") or ""
+    out = []
     for c, _prev in _zh_clauses_with(note, _ZH_EXTRA_TURN):
         cm = _ZH_CHANCE.search(c)
-        out = {"percent": 100.0, "target": "caster", "source": "prose_zh"}
+        entry = {"percent": 100.0, "target": "caster", "source": "prose_zh"}
         if cm:
-            out["chance_pct"] = float(cm.group(1))
-        return out
+            entry["chance_pct"] = float(cm.group(1))
+        out.append(entry)
     for c, prev in _zh_clauses_with(note, re.compile(r"行動值")):
         m = re.search(r"行動值\s*([+\-－])\s*(\d+(?:\.\d+)?)\s*[%％]", c)
         if m:
@@ -357,12 +367,19 @@ def zh_gauge(r):
                 continue
             if re.search(r"減少|降低|下降|扣除", c) and not re.search(r"增加|提升|提高|回復", c):
                 pct = -pct
-        out = {"percent": pct, "target": _zh_side_of(c, prev, "caster"), "source": "prose_zh"}
+        entry = {"percent": pct, "target": _zh_side_of(c, prev, "caster"),
+                 "source": "prose_zh"}
         cm = _ZH_CHANCE.search(c)
         if cm:
-            out["chance_pct"] = float(cm.group(1))
-        return out
-    return None
+            entry["chance_pct"] = float(cm.group(1))
+        out.append(entry)
+    return out
+
+
+def zh_gauge(r):
+    """-> the FIRST gauge change the Chinese states, or None."""
+    gauges = zh_gauges(r)
+    return gauges[0] if gauges else None
 
 
 def zh_cd(r):
@@ -1026,6 +1043,13 @@ def effects(rows, r):
     """
     acts, ids = r.get("_action") or [], r.get("_actID") or []
     out, unknown = [], []
+    # Prose clauses are consumed IN ORDER, one per opcode of that kind. Re-reading the
+    # note per opcode always returned clause #1, so a skill with two gauge opcodes and
+    # two gauge clauses got the first one twice -- Ocean Strike's 目標行動值-10% and
+    # 自身的行動值+10% compiled as -10% to the target, twice. The queues run out rather
+    # than wrap: more opcodes than clauses means the extras carry no prose, which is the
+    # honest answer and is what `clause_percent` already falls back to.
+    zh_gauge_q, zh_heal_q = list(zh_gauges(r)), list(zh_heals(r))
     for i, op in enumerate(acts):
         if not op:
             continue
@@ -1110,7 +1134,7 @@ def effects(rows, r):
                 # THE ORIGINAL LANGUAGE WINS where it states a value; English fills the
                 # rest. "以25%機率恢復12%體力" read in English gave the CHANCE as the
                 # magnitude; the Chinese reader blanks chances before it looks.
-                zh = zh_gauge(r)
+                zh = zh_gauge_q.pop(0) if zh_gauge_q else None
                 if zh:
                     if zh.get("percent") is not None:
                         entry.update(zh)
@@ -1122,7 +1146,7 @@ def effects(rows, r):
                 entry["target"] = clause_target(r, name)
                 if name == "heal":
                     entry["basis"] = heal_basis(r)
-                    zh = zh_heal(r)
+                    zh = zh_heal_q.pop(0) if zh_heal_q else None
                     if zh:
                         if zh.get("percent") is not None:
                             entry["percent"], entry["source"] = zh["percent"], "prose_zh"
@@ -1829,6 +1853,81 @@ def extra_maxhp_damage(r):
     return out
 
 
+_ZH_REVIVE_PCT = re.compile(r"以\s*(\d+(?:\.\d+)?)\s*[%％]\s*(?:的)?體力[^，。]{0,6}復活"
+                            r"|復活[^，。]{0,20}?(\d+(?:\.\d+)?)\s*[%％]\s*(?:的)?體力")
+# The count is its own search: folding it into the percent pattern with `(\d+)?` let the
+# lazy middle match nothing and report no count at all on 復活我方被擊倒的隨機2人.
+_ZH_REVIVE_N = re.compile(r"復活[^，。]{0,20}?(\d+)\s*[人名]")
+
+
+def zh_revives(r):
+    """-> every revive the Chinese states: {percent, count, target}.
+
+    `復活我方被擊倒的隨機2人` with `以50%體力` in front of it. The percent is the HP they
+    come back on and the count is how many, both of which the opcode path only gets when
+    there IS a revive opcode -- and a revive stated inside a follow-up clause has none.
+    """
+    out = []
+    for c, prev in _zh_clauses_with(r.get("_note1"), re.compile(r"復活")):
+        if re.search(r"禁止復活|不會復活|無法復活|復活道具", c):
+            continue                              # a ban, a caveat, or the retry UI
+        m = _ZH_REVIVE_PCT.search(c) or _ZH_REVIVE_PCT.search(prev or "")
+        pct = (m.group(1) or m.group(2)) if m else None
+        if pct is None:
+            pm = re.search(r"(\d+(?:\.\d+)?)\s*[%％]", c)
+            pct = pm.group(1) if pm else None
+        if pct is None:
+            continue
+        # ALWAYS allies. A revive raises the caster's own fallen, which is what the
+        # pack writes (復活我方被擊倒的...) and what `core.execute` says in as many words:
+        # "A revive raises the CASTER's fallen allies, not the units it is aimed at."
+        # Reading the side off the clause let a neighbouring 敵方 turn 14 of them into
+        # revives aimed at the enemy team, which resolve to an empty pool and do nothing.
+        entry = {"percent": float(pct), "target": "allies"}
+        n = _ZH_REVIVE_N.search(c)
+        if n:
+            entry["count"] = int(n.group(1))
+        out.append(entry)
+    return out
+
+
+def uncovered_revives(r, effects_so_far):
+    """-> revive effects the Chinese states that no opcode emitted."""
+    have = {(e.get("percent"), e.get("target"))
+            for e in effects_so_far if e.get("op") == "revive"}
+    out = []
+    for v in zh_revives(r):
+        key = (v.get("percent"), v.get("target"))
+        if key in have:
+            continue
+        have.add(key)
+        out.append({"op": "revive", "percent": v["percent"],
+                    "target": v.get("target"), "source": "prose_zh",
+                    **({"count": v["count"]} if v.get("count") else {})})
+    return out
+
+
+def uncovered_gauges(r, effects_so_far):
+    """-> gauge effects the Chinese states that no opcode emitted.
+
+    Same seam as `uncovered_heals`: `modify_gauge` reaches `effects` through the opcode
+    walker, so a clause with no gauge opcode behind it -- 我方全體行動值+15% on a passive,
+    or the 使其行動值-25% riding a follow-up -- produced nothing.
+    """
+    have = {(e.get("percent"), e.get("target"))
+            for e in effects_so_far if e.get("op") == "modify_gauge"}
+    out = []
+    for g in zh_gauges(r):
+        key = (g.get("percent"), g.get("target"))
+        if key in have:
+            continue
+        have.add(key)
+        out.append({"op": "modify_gauge", "percent": g["percent"],
+                    "target": g.get("target"), "source": "prose_zh",
+                    **({"chance_pct": g["chance_pct"]} if g.get("chance_pct") else {})})
+    return out
+
+
 def _heal_key(e):
     """The identity of a heal for dedupe: what it pays, off what, to whom.
 
@@ -2487,6 +2586,8 @@ def compile_skill(rows, sid, swings_by_act):
     # trigger its own sentence states.
     spec["effects"] = dedupe_heals(spec["effects"])
     spec["effects"].extend(uncovered_heals(r, spec["effects"]))
+    spec["effects"].extend(uncovered_gauges(r, spec["effects"]))
+    spec["effects"].extend(uncovered_revives(r, spec["effects"]))
     if unknown:
         spec["unknown"] = unknown
     if typ == "passive":
