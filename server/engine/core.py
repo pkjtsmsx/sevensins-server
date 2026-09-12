@@ -661,6 +661,14 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
             pool = ([u for u in units if u.team == caster.team and not u.alive]
                     if who in ("allies", "caster") else
                     [t for t in targets if not t.alive])
+            # 復活我方被擊倒的隨機2人 -- the clause says HOW MANY, and this raised every
+            # fallen ally regardless. Michael's Blessing Anthem says 3 and brought back
+            # a party of 4 on a device. The compiler has emitted `count` for a while;
+            # nothing read it. Sampled from the seeded rng, like `resolve_targets`, so a
+            # save/restore replays the same revive, then ordered for a stable payload.
+            n = e.get("count")
+            if n and len(pool) > int(n):
+                pool = sorted(r.sample(pool, int(n)), key=lambda u: u.order)
             for tgt in pool:
                 hp = int(tgt.max_hp * (pct or 0) / 100.0) or 1
                 if apply_damage:

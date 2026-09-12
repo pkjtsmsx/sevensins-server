@@ -412,6 +412,55 @@ def check_prose_stack_caps():
           core._holds_status(c, "Wrath", None, 6) is False)
 
 
+def check_revive_count():
+    """復活我方被擊倒的隨機2人 -- the clause says how many, and the engine has to obey it.
+
+    It did not: it raised every fallen ally, so Michael's Blessing Anthem, which states
+    3, brought back a party of 4 on a device. The compiler had been emitting `count`
+    for months and nothing read it -- 143 of the 326 revive effects state one.
+
+    The count is a CEILING, not a promise: fewer fallen than the count raises all of
+    them, which is what 復活我方全體戰鬥不能者 (no count at all) does by default.
+    """
+    def fallen_party(n_dead):
+        caster = unit("101", core.TEAM_PLAYER)
+        mates = [unit(str(102 + i), core.TEAM_PLAYER) for i in range(4)]
+        for m in mates[:n_dead]:
+            m.hp = 0                              # `alive` is derived from hp
+        return caster, [caster] + mates + [unit("201", core.TEAM_ENEMY)]
+
+    spec = {"id": 0, "swings": 1,
+            "target": {"group": "enemy", "select": "count", "count": 1},
+            "effects": [{"op": "revive", "percent": 70.0, "target": "allies",
+                         "count": 3}]}
+    c, u = fallen_party(4)
+    out = core.execute(c, spec, u, random.Random(1))
+    check("a revive stating 3 raises 3 of 4 fallen allies, not all of them",
+          len(out.revives) == 3, str(out.revives))
+    check("  ...and each comes back on the stated share of MAX HP",
+          all(rv["hp"] == 35000 for rv in out.revives), str(out.revives))
+    c, u = fallen_party(2)
+    out = core.execute(c, spec, u, random.Random(1))
+    check("the count is a ceiling: 2 fallen and a count of 3 raises both",
+          len(out.revives) == 2, str(out.revives))
+    spec_all = dict(spec, effects=[{"op": "revive", "percent": 50.0,
+                                    "target": "allies"}])
+    c, u = fallen_party(4)
+    out = core.execute(c, spec_all, u, random.Random(1))
+    check("no count stated -- 復活我方全體戰鬥不能者 still raises everybody",
+          len(out.revives) == 4, str(out.revives))
+    # Same seed, same pick: a save/restore replays the fight and must not raise a
+    # different ally the second time round.
+    c, u = fallen_party(4)
+    again = core.execute(c, spec, u, random.Random(1))
+    c2, u2 = fallen_party(4)
+    once = core.execute(c2, spec, u2, random.Random(1))
+    check("the pick is seeded, so a replay revives the same allies",
+          [rv["target"] for rv in again.revives] == [rv["target"] for rv in once.revives],
+          f"{[rv['target'] for rv in again.revives]} vs "
+          f"{[rv['target'] for rv in once.revives]}")
+
+
 def check_hp_riders():
     """op 6: an amount sized off the CASTER's own HP pool, decoded 2026-08-29.
 
@@ -564,6 +613,7 @@ def main():
     check_prose_stack_caps()
 
     print("\nop 6 -- HP-pool riders:")
+    check_revive_count()
     check_hp_riders()
 
     print("\nconditional application:")
