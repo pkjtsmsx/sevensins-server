@@ -324,6 +324,14 @@ def _zh_governing_condition(rows, note, index):
             break
         seen += n
     for j in range(index, start - 1, -1):
+        # A fragment only GOVERNS if it is a condition -- it must carry 若/如果/當+state.
+        # `_zh_parse_condition` answers "what condition does this text describe" and is
+        # happy to find one in ordinary prose: 復活我方被擊倒的3人 ("revive the 3 DEFEATED
+        # allies") matches the kill regex on 擊倒 and came back as {killed: True}, so
+        # Michael's Blessing Anthem gated its own revive behind "if this attack killed"
+        # and revived nobody. Reported from a device within minutes of shipping it.
+        if not _ZH_CONDITIONAL.search(parts[j]):
+            continue
         got = _zh_parse_condition(rows, parts[j])
         if got:
             return got

@@ -1371,6 +1371,33 @@ def battle_replies(battle, cmd, intargs, strargs, state=None, uid=""):
         start_avg = battle.avg(battle.before_avgs, battle.wave + 1)
         log(f"    -> wave {battle.wave}/{battle.wave_max} result {result} "
             f"avg next={next_avg} end={end_avg} start={start_avg}")
+        # A LOST fight is settled HERE, because the client will never ask us to.
+        # Decompiled 2026-09-13: `GameLoseState.OnEnter` dispatches BattleEvent 4, plays
+        # a defeat voice line and calls `DoLoserShow`, which closes the menu, restores
+        # the timescale and switches on a defeat panel. `QuitBattle` then clears the
+        # battle cache and leaves the sub-scene. NOTHING on that path sends anything to
+        # the server -- `ServerRPCBattleEnd` is reached only from the WIN state.
+        #
+        # So `battle_end_reward` -- and with it `finish_challenge` -- ran on wins only,
+        # and the saved battle stayed on the account after the client had already
+        # abandoned it, leaving the next login to offer a rejoin into a finished fight.
+        #
+        # Nobody had seen this because nobody had ever lost: 82 wave results in the
+        # device's whole log history, every one of them `result 1`. The party was
+        # unkillable until the alive-count and sentence-scoped gates landed, and the
+        # first real defeat hung the game.
+        #
+        # The Guild Weekly is a DAMAGE RACE -- `battle_end_reward`'s own comment says a
+        # boss you cannot kill still scores -- so a wipe must bank its damage. No
+        # messages are sent: the client is not waiting for any.
+        if result == bt.WAVE_RESULT_LOSE and state is not None:
+            if ps.is_challenge_stage(battle.stage_id):
+                dmg, bonus, total, _payouts = ps.finish_challenge(
+                    state, battle.damage_sum)
+                log(f"    -> guild weekly settled on DEFEAT: "
+                    f"{dmg} + {bonus} bonus = {total}")
+            ps.clear_battle(state)
+            ps.save(state)
         return [battle_msg(bt.CMD_WAVE_END,
                            [result, battle.wave, next_avg, end_avg, start_avg],
                            # BtCollector -- the per-unit damage table behind the

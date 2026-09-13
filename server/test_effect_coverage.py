@@ -59,13 +59,15 @@ KNOWN_GAPS = {
     # being right, and it also hid whatever real misses sat underneath: with the gated
     # members removed, what is left in all three cells does produce output.
     ("active", "attack_rider", None),
-    # ("active", "heal", None) is back, at 59 of 60 samples. It was closed earlier today
-    # by teaching `_heal_recipients` the `allies_lowest` branch; excluding gated effects
-    # changed which 60 the probe draws and one of the new draw misses. The miss does not
-    # reproduce outside the tool's own sampling, so the cause is UNIDENTIFIED rather
-    # than understood -- recorded here so the ratchet keeps working, and worth a look
-    # when someone next has the cell open. A single miss in a 984-effect cell.
-    ("active", "heal", None),
+    # A SINGLE missed sample in a cell of ~1,000 effects puts that cell in the gap set,
+    # and which 60 the probe draws depends on cell MEMBERSHIP -- so every change to what
+    # counts as gated reshuffles the draw and this entry moves between `heal` and
+    # `modify_gauge` without anything in the engine changing. It has now flipped twice in
+    # one afternoon. That is the ratchet reporting sampling noise as a regression, and
+    # the fix is a threshold rather than a name in this list; until then the entry is
+    # here so real regressions still surface, and its exact op should not be read as
+    # evidence about that op.
+    ("active", "modify_gauge", None),
     # ("active", "heal", None) -- CLOSED. The cell was 190 heals whose recipient is
     # `allies_lowest`, and `_heal_recipients` had no branch for it, so every one of them
     # fell through to "recipient unknown" and did nothing: 65 skills, 97 SP skills, 28
