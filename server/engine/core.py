@@ -430,24 +430,70 @@ def _condition_met(requires, caster, target, snapshot=None, ctx=None):
     return (not held) if requires.get("negate") else held
 
 
+def _blocked(eff, caster, target, snapshot, ctx, rng,
+             honour_conditional=False, roll_against=None):
+    """Should this effect be refused? -> True to skip it.
+
+    ONE copy of the tri-state dance. It was written three times -- in `_status_event`,
+    in the `follow_up` branch and in `_rider` -- and gating the six remaining ops by
+    copy-paste would have made nine. The rule itself is subtle enough that three
+    independent transcriptions is a standing invitation to the kind of drift the
+    active/passive parity check exists to catch.
+
+    The rule: a gate that answers False refuses outright. A gate that cannot be answered
+    HERE -- a round condition with no battle behind the call, a status name the compiler
+    could not resolve -- is not the same as False, because answering False for an
+    unanswerable gate deletes the effect from the game, which is worse than the
+    unconditional firing the gate was added to stop. Those take CONDITIONAL_POLICY.
+
+    Two knobs, and both record a real difference between the callers rather than
+    smoothing one over:
+
+    `honour_conditional` -- the status path also applies the policy when the compiled
+    `conditional` flag is set and no gate could be expressed at all, as long as the
+    prose stated no odds of its own. `follow_up` and `_rider` never did, and unifying
+    that silently would change what fires in thousands of skills; it is a question worth
+    asking on its own evidence, not a side effect of moving code.
+
+    `roll_against` -- the status path rolls the policy against the TARGET, the other two
+    against the caster. `effect_lands` reads the attribute triangle off both parties, so
+    this is not cosmetic.
+    """
+    requires = eff.get("requires")
+    met = _condition_met(requires, caster, target, snapshot, ctx) if requires else None
+    if met is False:
+        return True
+    if met is not None:
+        return False
+    # WHICH fact makes an unanswerable gate take the policy -- and the two callers
+    # genuinely differ, which is why this selects rather than combines. The status path
+    # keys on the compiled `conditional` flag ALONE: a status carrying an unanswerable
+    # `requires` but marked not-conditional still fires. The other two key on the
+    # presence of a `requires`, and never look at the flag. Combining the two reads
+    # (the first cut of this refactor did) moves the fuzzer on a fixed seed -- 31,492
+    # attacks became 31,604 -- so it is a behaviour change wearing a refactor's clothes.
+    if honour_conditional:
+        unresolved = bool(eff.get("conditional")) and not eff.get("chance") \
+            and eff.get("chance_pct") is None
+    else:
+        unresolved = bool(requires)
+    if not unresolved:
+        return False
+    if CONDITIONAL_POLICY == "skip":
+        return True
+    if CONDITIONAL_POLICY == "roll":
+        other = roll_against if roll_against is not None else caster
+        return not formula.effect_lands(caster, other, CONDITIONAL_CHANCE, rng)
+    return False
+
+
 def _status_event(caster, target, eff, rng, snapshot=None, ctx=None):
     """-> a StatusEvent, or None when the application does not land."""
     st = eff.get("status") or {}
     numbers = eff.get("numbers") or {}
-    requires = eff.get("requires")
-    met = _condition_met(requires, caster, target, snapshot, ctx) if requires else None
-    if met is False:
+    if _blocked(eff, caster, target, snapshot, ctx, rng,
+                honour_conditional=True, roll_against=target):
         return None
-    # `met is None` -- either no condition was compiled, or one was and this engine
-    # cannot answer it here (a round gate with no battle behind the call). Both are
-    # "unevaluatable", and both take the policy below rather than firing.
-    if met is None and eff.get("conditional") and not eff.get("chance") \
-            and eff.get("chance_pct") is None:
-        if CONDITIONAL_POLICY == "skip":
-            return None
-        if CONDITIONAL_POLICY == "roll" and not formula.effect_lands(
-                caster, target, CONDITIONAL_CHANCE, rng):
-            return None
     stated = eff.get("chance_pct")
     if stated is not None:
         # The prose states the odds -- "30%固定機率附加暈眩" -- and they win outright over
@@ -609,7 +655,14 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
                         applied=False))
         elif op == "heal":
             pct = e.get("percent")
-            if pct is None:
+            if _blocked(e, caster, targets[0] if targets else None, held, ctx, r):
+                # 若敵方存活人數在2人以上…並回復自身體力40% -- the condition governs the
+                # whole sentence, and the heal was the half that escaped it. Michael
+                # healed 40% of his pool after every action in a one-enemy fight,
+                # out-healing the boss, which is why that fight could not end.
+                out.skipped.append({"op": op, "why": "condition not met",
+                                    "skill": skill_id})
+            elif pct is None:
                 out.skipped.append({"op": op, "why": "magnitude unknown",
                                     "skill": skill_id})
             else:
@@ -649,7 +702,10 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
                                       "basis": basis})
         elif op == "modify_gauge":
             pct = e.get("percent")
-            if pct is None:
+            if _blocked(e, caster, targets[0] if targets else None, held, ctx, r):
+                out.skipped.append({"op": op, "why": "condition not met",
+                                    "skill": skill_id})
+            elif pct is None:
                 out.skipped.append({"op": op, "why": "magnitude unknown",
                                     "skill": skill_id})
             elif e.get("chance_pct") is not None and not formula.effect_lands(
@@ -682,6 +738,10 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
                     recip = []
                 out.gauge.extend({"target": t.order, "percent": pct} for t in recip)
         elif op == "revive":
+            if _blocked(e, caster, targets[0] if targets else None, held, ctx, r):
+                out.skipped.append({"op": op, "why": "condition not met",
+                                    "skill": skill_id})
+                continue
             pct = e.get("percent")
             # A revive raises the CASTER's fallen allies, not the units it is aimed at.
             who = e.get("target") or "allies"
@@ -710,17 +770,8 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
             # was correct only while the function returned a plain bool -- once None
             # became "unevaluatable", it would have skipped every round-gated pursuit
             # outright instead of rolling for it.
-            gate = _condition_met(e["requires"], caster,
-                                  targets[0] if targets else None, held, ctx) \
-                if e.get("requires") else None
-            if gate is False:
-                out.skipped.append({"op": op, "why": "condition not met", "skill": e["skill"]})
-            elif gate is None and e.get("requires") and CONDITIONAL_POLICY == "skip":
-                out.skipped.append({"op": op, "why": "condition unevaluatable",
-                                    "skill": e["skill"]})
-            elif gate is None and e.get("requires") and CONDITIONAL_POLICY == "roll" \
-                    and not formula.effect_lands(caster, caster, CONDITIONAL_CHANCE, r):
-                out.skipped.append({"op": op, "why": "condition unevaluatable",
+            if _blocked(e, caster, targets[0] if targets else None, held, ctx, r):
+                out.skipped.append({"op": op, "why": "condition not met",
                                     "skill": e["skill"]})
             elif e.get("chance_pct") is not None and not formula.effect_lands(
                     caster, caster, float(e["chance_pct"]) / 100.0, r):
@@ -914,17 +965,11 @@ def _rider(caster, eff, targets, out, rng, apply_damage, skill_id, units=(),
         out.skipped.append({"op": "attack_rider", "why": "magnitude unknown",
                             "skill": skill_id})
         return
-    if eff.get("requires"):
-        # 攻擊時若自身擁有共享盛宴，額外對目標造成… -- most op-6 riders are gated. Tri-state
-        # like everything else; an unanswerable gate takes the conditional policy.
-        gate = _condition_met(eff["requires"], caster, targets[0] if targets else None,
-                              held, ctx)
-        if gate is False or (gate is None and CONDITIONAL_POLICY == "skip") or (
-                gate is None and CONDITIONAL_POLICY == "roll"
-                and not formula.effect_lands(caster, caster, CONDITIONAL_CHANCE, rng)):
-            out.skipped.append({"op": "attack_rider", "why": "condition not met",
-                                "skill": skill_id})
-            return
+    # 攻擊時若自身擁有共享盛宴，額外對目標造成… -- most op-6 riders are gated.
+    if _blocked(eff, caster, targets[0] if targets else None, held, ctx, rng):
+        out.skipped.append({"op": "attack_rider", "why": "condition not met",
+                            "skill": skill_id})
+        return
     basis = eff.get("basis") or "atk"
     if basis == "caster_current_hp":
         base = float(caster.hp)

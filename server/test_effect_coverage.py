@@ -51,10 +51,21 @@ KNOWN_GAPS = {
     # English reader). `core.execute` has nobody to move, and picking a side would be
     # the same invention refused for the damage effects below. Surfaced by this ratchet
     # when the cell grew, not introduced by that growth.
-    ("active", "modify_gauge", None),
-    ("active", "apply_status", None),
-    ("active", "follow_up", None),
+    # ("active", "modify_gauge", None), ("active", "apply_status", None) and
+    # ("active", "follow_up", None) -- CLOSED by excluding GATED effects from the probe,
+    # not by a code fix. Those cells were substantially made of effects carrying a
+    # `requires` the rigged field cannot satisfy, which produce nothing because the
+    # engine is obeying the prose. Counting them as engine gaps blamed the engine for
+    # being right, and it also hid whatever real misses sat underneath: with the gated
+    # members removed, what is left in all three cells does produce output.
     ("active", "attack_rider", None),
+    # ("active", "heal", None) is back, at 59 of 60 samples. It was closed earlier today
+    # by teaching `_heal_recipients` the `allies_lowest` branch; excluding gated effects
+    # changed which 60 the probe draws and one of the new draw misses. The miss does not
+    # reproduce outside the tool's own sampling, so the cause is UNIDENTIFIED rather
+    # than understood -- recorded here so the ratchet keeps working, and worth a look
+    # when someone next has the cell open. A single miss in a 984-effect cell.
+    ("active", "heal", None),
     # ("active", "heal", None) -- CLOSED. The cell was 190 heals whose recipient is
     # `allies_lowest`, and `_heal_recipients` had no branch for it, so every one of them
     # fell through to "recipient unknown" and did nothing: 65 skills, 97 SP skills, 28
@@ -92,7 +103,7 @@ def check(label, ok, detail=""):
 
 
 def main():
-    rows, gaps, starved, untargetable, total = ec.coverage()
+    rows, gaps, starved, untargetable, total, gated = ec.coverage()
     found = {(path, op, trigger) for path, op, trigger, _m, _n, _s in gaps}
     cost = sum(g[3] for g in gaps)
 
@@ -135,6 +146,13 @@ def main():
           sum(starved.values()) > 0, str(dict(starved)))
     check("  ...and so are specs the engine cannot target by design",
           sum(untargetable.values()) > 0, str(dict(untargetable)))
+    # A gated effect that the rigged field cannot satisfy is the engine OBEYING the
+    # prose, not failing to implement it. Before the sentence-scoped condition work
+    # almost no non-status effect carried a gate; ~1,450 now do, and probing them
+    # produced two brand-new "gaps" (active/heal/None, active/revive/None) that were
+    # the engine getting it right.
+    check("gated effects are excluded from the probe, not counted as engine gaps",
+          sum(gated.values()) > 500, str(dict(gated)))
 
     print("\ncheck_the_two_paths_agree_on_the_same_effect:")
     # PARITY, not coverage. A cell can read "yes / yes" -- both paths do SOMETHING with

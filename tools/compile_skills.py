@@ -291,6 +291,45 @@ def _count_clauses(r, claimed):
                 LEDGER[kind + ".claimed"] += 1
 
 
+_ZH_SENTENCE_END = re.compile(r"[。\n]")
+
+
+def _zh_governing_condition(rows, note, index):
+    """-> the `requires` governing the clause at `index`, or None.
+
+    A condition governs everything after it until the sentence ends. Michael's passive
+    is the case that forced this:
+
+        行動結束後，若敵方存活人數在2人以上，對自身附加全傷害激減，並回復自身體力40%
+                     ^^ the gate            ^^ the status      ^^ AND the heal
+
+    Own-fragment-plus-previous finds the gate for the status and misses it for the heal,
+    which is two fragments away -- so the damage reduction was correctly withheld in a
+    one-enemy fight while the 40% self-heal fired anyway, and a player watched Michael
+    heal back to full every turn he was hit. Walking back to the start of the SENTENCE
+    is the reading that covers both, and stopping at 。 is what keeps a later sentence's
+    condition from leaking onto an unrelated clause.
+    """
+    parts = [c for c in _ZH_SPLIT.split(note or "") if c.strip()]
+    if index >= len(parts):
+        return None
+    # How far back the sentence goes: the fragments are already split on 。 as well as
+    # ，, so walk the RAW text to find which fragment follows the last terminator.
+    raw, start = note or "", 0
+    seen = 0
+    for piece in _ZH_SENTENCE_END.split(raw):
+        n = len([c for c in _ZH_SPLIT.split(piece) if c.strip()])
+        if seen + n > index:
+            start = seen
+            break
+        seen += n
+    for j in range(index, start - 1, -1):
+        got = _zh_parse_condition(rows, parts[j])
+        if got:
+            return got
+    return None
+
+
 def _zh_clauses_with(note, word_re):
     """-> [(i, own, prev)] for the clauses of `note` that contain `word_re`.
 
@@ -371,6 +410,9 @@ def zh_heals(r):
         low = re.search(r"體力最低的?\s*(\d+)\s*[人名]", c)
         if low:
             entry["target"], entry["count"] = "allies_lowest", int(low.group(1))
+        gate = _zh_governing_condition(dd.rows("skill") or {}, r.get("_note1"), i)
+        if gate:
+            entry["requires"] = gate
         elif re.search(r"體力最低的?(?:目標|者|角色|單位|隊友|夥伴)", c) or (
                 re.search(r"體力最低", prev or "") and not re.search(r"我方|敵方", c)):
             # The same recipient with no NUMBER on it -- 回復我方體力最低者, 對我方體力
@@ -435,6 +477,9 @@ def zh_gauges(r):
                 continue
         entry = {"percent": pct, "target": _zh_side_of(c, prev, "caster"),
                  "source": "prose_zh"}
+        gate = _zh_governing_condition(dd.rows("skill") or {}, note, i)
+        if gate:
+            entry["requires"] = gate
         cm = _ZH_CHANCE.search(c)
         if cm:
             entry["chance_pct"] = float(cm.group(1))
@@ -1242,6 +1287,8 @@ def effects(rows, r, claimed=None):
                             entry["percent"], entry["source"] = zh["percent"], "prose_zh"
                         if zh.get("count"):
                             entry["count"] = zh["count"]
+                        if zh.get("requires"):
+                            entry["requires"] = zh["requires"]
                         entry["target"] = zh.get("target") or entry.get("target")
                 if name == "heal":
                     entry["basis"] = heal_basis(r)
@@ -1258,6 +1305,13 @@ def effects(rows, r, claimed=None):
                         claimed.add(("heal", ci))
                         _note_disagreement("heal", entry.get("percent"),
                                            zh.get("percent"))
+                        if zh.get("requires"):
+                            # The gate travels with the CLAUSE, so an opcode that
+                            # claimed one inherits it. Michael's 40% self-heal has a
+                            # heal opcode behind it, so it never went through the prose
+                            # pass and kept firing while the status beside it -- same
+                            # clause, same gate -- was correctly withheld.
+                            entry["requires"] = zh["requires"]
                         if zh.get("percent") is not None:
                             entry["percent"], entry["source"] = zh["percent"], "prose_zh"
                             entry["basis"] = zh["basis"]
@@ -2086,6 +2140,9 @@ def zh_revives(r):
         n = _ZH_REVIVE_N.search(c)
         if n:
             entry["count"] = int(n.group(1))
+        gate = _zh_governing_condition(dd.rows("skill") or {}, r.get("_note1"), i)
+        if gate:
+            entry["requires"] = gate
         out.append((i, entry))
     return out
 
@@ -2119,6 +2176,7 @@ def uncovered_revives(r, claimed):
         LEDGER["revive.unclaimed"] += 1
         out.append({"op": "revive", "percent": v["percent"],
                     "target": v.get("target"), "source": "prose_zh",
+                    **({"requires": v["requires"]} if v.get("requires") else {}),
                     **({"count": v["count"]} if v.get("count") else {})})
     return out
 
@@ -2189,6 +2247,7 @@ def uncovered_gauges(r, claimed):
         LEDGER["gauge.unclaimed"] += 1
         out.append({"op": "modify_gauge", "percent": g["percent"],
                     "target": g.get("target"), "source": "prose_zh",
+                    **({"requires": g["requires"]} if g.get("requires") else {}),
                     **({"chance_pct": g["chance_pct"]} if g.get("chance_pct") else {})})
     return out
 
@@ -2289,6 +2348,8 @@ def uncovered_heals(r, claimed):
         LEDGER["heal.unclaimed"] += 1
         entry = {"op": "heal", "percent": h["percent"], "basis": h["basis"],
                  "target": h["target"], "source": "prose_zh"}
+        if h.get("requires"):
+            entry["requires"] = h["requires"]
         if h.get("count"):
             entry["count"] = h["count"]
         out.append(entry)

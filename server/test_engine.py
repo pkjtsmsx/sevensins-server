@@ -849,6 +849,16 @@ def main():
                      apply_damage=False)
     check("an ally-targeted gauge goes to an ALLY, not the struck enemy",
           [g["target"] for g in o.gauge] == [mate.order], f"{o.gauge}")
+    # 若自身處於墮天狀態，行動結束後自身行動值+25% -- the gauge gain is GATED on the
+    # caster holding The Fallen. Ungated until the sentence-scoped condition work, so
+    # this check used to pass with a caster holding nothing. Both halves now, because a
+    # gate that only shuts is as wrong as one that only opens.
+    o = core.execute(caster, specs.skill(2080101), units, random.Random(1),
+                     apply_damage=False)
+    check("  ...and is withheld while the caster lacks The Fallen",
+          not o.gauge, f"{o.gauge}")
+    caster.statuses.append(status.Active(status_id=9011, name="The Fallen", kind=None,
+                                         category="buff", remaining=9, stacks=1))
     o = core.execute(caster, specs.skill(2080101), units, random.Random(1),
                      apply_damage=False)
     check("a caster-targeted gauge goes to the caster",

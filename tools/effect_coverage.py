@@ -237,6 +237,7 @@ def coverage():
     cells = collections.defaultdict(list)
     starved = collections.Counter()
     untargetable = collections.Counter()
+    gated = collections.Counter()
     for sid, spec, eff in effects:
         op = eff.get("op")
         if not REQUIRED.get(op, lambda _e: True)(eff):
@@ -249,6 +250,15 @@ def coverage():
         # misses into the gap list as engine faults when the engine was right.
         if (spec.get("target") or {}).get("select") in (None, "none", "unknown"):
             untargetable[op] += 1
+            continue
+        # GATED, and therefore not a coverage question. A `requires` this rigged field
+        # cannot satisfy -- "if the caster holds The Fallen", "if 2+ enemies are alive"
+        # -- correctly produces nothing, and counting that as an engine gap blames the
+        # engine for obeying the prose. Same treatment as an effect starved of its
+        # numbers. Before the sentence-scoped condition work almost no non-status effect
+        # carried a gate; this bucket now holds ~1,450 of them.
+        if eff.get("requires"):
+            gated[op] += 1
             continue
         cells[(op, eff.get("trigger"))].append((sid, spec, eff))
 
@@ -292,7 +302,7 @@ def coverage():
         _gap("passive", pas_ok)
         if trigger is None:
             _gap("active", act_ok)
-    return rows, gaps, starved, untargetable, len(effects)
+    return rows, gaps, starved, untargetable, len(effects), gated
 
 
 def main():
@@ -303,9 +313,10 @@ def main():
 
     effects = load_effects()
     disagreements = parity(effects)
-    rows, gaps, starved, untargetable, total = coverage()
+    rows, gaps, starved, untargetable, total, gated = coverage()
     print(f"{total} effects, {len(rows)} (op, trigger) cells, "
-          f"{sum(starved.values())} starved of the data they need\n")
+          f"{sum(starved.values())} starved of the data they need, "
+          f"{sum(gated.values())} gated\n")
 
     def mark(ok, n):
         if ok is None:
