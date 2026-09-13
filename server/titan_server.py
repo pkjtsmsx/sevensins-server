@@ -1072,7 +1072,7 @@ def build_sync_replies(st):
 BOSS_BOOK = 8
 
 
-def _boss_loss_result_msgs(battle):
+def _boss_loss_result_msgs(battle, state=None):
     """-> the EndReward a LOST boss fight needs, or [].
 
     Decompiled 2026-09-13, chasing a device report: the defeat showed the BATTLE ENDS
@@ -1090,16 +1090,27 @@ def _boss_loss_result_msgs(battle):
     fight cannot be left. The Result button still worked because the damage table rides
     on CMD_WAVE_END instead.
 
-    EMPTY on purpose. `battle_end_reward` gates bars, ratings and the granting loop on
-    the win, but still lists `drops` for display, and a defeat must not show prizes it
-    did not pay. `item_list` has to be PRESENT though -- `BattleReward..ctor` throws on
-    a null -- which is the whole reason this returns a payload rather than nothing.
+No drops and no ratings: `battle_end_reward` gates those on the win, and a defeat
+    must not show prizes it did not pay. `item_list` still has to be PRESENT --
+    `BattleReward..ctor` throws on a null.
+
+    `bar_list` IS populated, at zero XP. A first cut sent every list empty and the panel
+    opened with its Record numbers but a dead tap: `isSkipEnabled` is armed by the
+    tween-finished callbacks that `OnEnterResultState` hooks, and a page with no rows to
+    animate never runs one. The char-level page is the one that always has rows -- one
+    per party member -- so it is what gives the panel something to finish. Zero XP is
+    also the honest number: `grant_battle_xp(..., 0)` awards nothing and reports old ==
+    new, which is what a defeat earned.
     """
     if (battle.stage or {}).get("_book") != BOSS_BOOK:
         return []                      # an ordinary stage loses into GameLose and is fine
-    log("    -> boss-stage defeat: pushing an empty EndReward so the result panel "
-        "can arm its Tap to End (the client never asks after a loss)")
-    reward = {"item_list": [], "itembonus_list": [], "bar_list": [],
+    log("    -> boss-stage defeat: pushing an EndReward so the result panel can arm "
+        "its Tap to End (the client never asks for one after a loss)")
+    bars = []
+    if state is not None:
+        bars = ps.grant_battle_xp(
+            state, ps.battle_team(state, int(state.get("battle_team_index", 0))), 0)
+    reward = {"item_list": [], "itembonus_list": [], "bar_list": bars,
               "rating_list": [], "helper_uid": ""}
     return [uint64_msg(PLAYER_STAGE, STAGE_RPLY_END_REWARD, [],
                        [json.dumps(reward, separators=(",", ":"))])]
@@ -1433,7 +1444,7 @@ def battle_replies(battle, cmd, intargs, strargs, state=None, uid=""):
         # boss you cannot kill still scores -- so a wipe must bank its damage. No
         # messages are sent: the client is not waiting for any.
         if result == bt.WAVE_RESULT_LOSE and state is not None:
-            end_msgs = _boss_loss_result_msgs(battle)
+            end_msgs = _boss_loss_result_msgs(battle, state)
             if ps.is_challenge_stage(battle.stage_id):
                 dmg, bonus, total, payouts = ps.finish_challenge(
                     state, battle.damage_sum)
