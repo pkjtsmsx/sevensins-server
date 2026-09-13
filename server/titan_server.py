@@ -1064,6 +1064,47 @@ def build_sync_replies(st):
     }
 
 
+# `_book` 8 -- the 28 Guild Weekly stages, 7 bosses x 4 tiers. `PlayerBattle.IsBossStage`
+# (0x1688034) reads this very column, and `TurnEndState.OnWaveEnd` tests it BEFORE it
+# looks at the battle type: a boss stage loses into GameWinState, an ordinary one into
+# GameLoseState. That is why losing a story fight exits cleanly and losing a guild fight
+# does not.
+BOSS_BOOK = 8
+
+
+def _boss_loss_result_msgs(battle):
+    """-> the EndReward a LOST boss fight needs, or [].
+
+    Decompiled 2026-09-13, chasing a device report: the defeat showed the BATTLE ENDS
+    banner and then an empty panel with a flashing "Tap to End" that did nothing.
+
+    `GameWinState.OnEnter` routes a boss stage to `ShowBattleResult`, which calls
+    `ServerRPCBattleEnd` -- and that only actually SENDS when
+    `BattleType == 0 && BattleResultType == 1`, i.e. on a WIN. So the client never asks
+    us for anything after a defeat, by design. It then launches PanelBattleResult
+    anyway (`stageType != 2` -- stageType is `_book`, 8 here, so the branch is taken).
+
+    The panel populates from `PlayerBattle.RewardData`, which arrives as this EndReward.
+    Without it nothing arms `isSkipEnabled`, and `PanelBattleResult.OnClickNextStep`
+    wraps its ENTIRE body in `if (isSkipEnabled)` -- so every tap is a no-op and the
+    fight cannot be left. The Result button still worked because the damage table rides
+    on CMD_WAVE_END instead.
+
+    EMPTY on purpose. `battle_end_reward` gates bars, ratings and the granting loop on
+    the win, but still lists `drops` for display, and a defeat must not show prizes it
+    did not pay. `item_list` has to be PRESENT though -- `BattleReward..ctor` throws on
+    a null -- which is the whole reason this returns a payload rather than nothing.
+    """
+    if (battle.stage or {}).get("_book") != BOSS_BOOK:
+        return []                      # an ordinary stage loses into GameLose and is fine
+    log("    -> boss-stage defeat: pushing an empty EndReward so the result panel "
+        "can arm its Tap to End (the client never asks after a loss)")
+    reward = {"item_list": [], "itembonus_list": [], "bar_list": [],
+              "rating_list": [], "helper_uid": ""}
+    return [uint64_msg(PLAYER_STAGE, STAGE_RPLY_END_REWARD, [],
+                       [json.dumps(reward, separators=(",", ":"))])]
+
+
 def battle_end_reward(battle, state):
     """PlayerStage EndReward (cmd 23) -> HandleEndReward, which deserializes one
     string into a BattleReward and hands it to the results panel as
@@ -1366,6 +1407,7 @@ def battle_replies(battle, cmd, intargs, strargs, state=None, uid=""):
         result = bt.WAVE_RESULT_WIN if battle.wave_cleared() else bt.WAVE_RESULT_LOSE
         # AVG ids: [2] is played by RushState during the run to the next room,
         # [3] after the battle, [4] is the next wave's pre-fight scene.
+        end_msgs = []
         next_avg = battle.avg(battle.interlude_avgs)
         end_avg = battle.avg(battle.after_avgs)
         start_avg = battle.avg(battle.before_avgs, battle.wave + 1)
@@ -1398,6 +1440,7 @@ def battle_replies(battle, cmd, intargs, strargs, state=None, uid=""):
                     f"{dmg} + {bonus} bonus = {total}")
             ps.clear_battle(state)
             ps.save(state)
+            end_msgs = _boss_loss_result_msgs(battle)
         return [battle_msg(bt.CMD_WAVE_END,
                            [result, battle.wave, next_avg, end_avg, start_avg],
                            # BtCollector -- the per-unit damage table behind the
@@ -1405,7 +1448,7 @@ def battle_replies(battle, cmd, intargs, strargs, state=None, uid=""):
                            # wave cleanly but leaves AllDamageList empty, and
                            # PanelBattleRecord indexes it unguarded, so the button
                            # threw ArgumentOutOfRange and appeared dead.
-                           [battle.collector_json()])]
+                           [battle.collector_json()])] + end_msgs
     if cmd == bt.REQ_NEXT_WAVE:
         battle.advance_wave()
         log(f"    -> next wave {battle.wave}/{battle.wave_max}: "
