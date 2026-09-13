@@ -386,6 +386,21 @@ def _condition_met(requires, caster, target, snapshot=None, ctx=None):
         return {"==": now == n, "<=": now <= n, ">=": now >= n,
                 "<": now < n, ">": now > n}.get(cmp_, None)
 
+    alive = requires.get("alive")
+    if alive:
+        # 若敵方存活人數在2人以上 -- how many units are still standing, counted from the
+        # caster's point of view. Unevaluatable when the caller passed no field, which
+        # is the AI's dry runs and the fuzzer's bare probes; those take the conditional
+        # policy rather than guessing a party size.
+        units = (ctx or {}).get("units")
+        if not units:
+            return None
+        same = alive.get("side") == "ally"
+        n = sum(1 for u in units
+                if u.alive and ((u.team == caster.team) is same))
+        want = int(alive.get("n") or 0)
+        return n >= want if alive.get("cmp") == "gte" else n <= want
+
     hp = requires.get("hp")
     if hp:
         holder = caster if hp.get("on") == "caster" else target
@@ -539,7 +554,10 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
     # What this cast has already done, for the gates that ask about it: 若本次攻擊擊倒敵人
     # reads `targets` (HP is final by now -- the swing loop above mutated it), and
     # 若本次攻擊暴擊 reads `strikes`.
-    ctx = {"strikes": out.strikes, "targets": targets, "round": round_no}
+    # `units` rides along for the alive-count gate: 若敵方存活人數在2人以上 cannot be
+    # answered from the caster and target alone.
+    ctx = {"strikes": out.strikes, "targets": targets, "round": round_no,
+           "units": units}
 
     # --- everything else, once ------------------------------------------------------
     for e in effects:

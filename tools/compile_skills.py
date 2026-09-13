@@ -1647,6 +1647,12 @@ _ZH_COND_ROUND_N = re.compile(
     r"(?P<tail>\u4ee5\u5167|\u4ee5\u4e0a|\u4ee5\u4e0b)?")
 
 
+# 若我方存活人數在3人以下 / 若敵方存活人數在2人以上(包含2人). The parenthetical always
+# restates the bound inclusively, so 以上 is >= and 以下 is <=.
+_ZH_COND_ALIVE = re.compile(
+    r"(?P<side>我方|敵方)存活人數在?\s*(?P<n>\d+)\s*人?(?P<cmp>以上|以下)")
+
+
 def _zh_parse_condition(rows, frag):
     """-> a `requires` dict for one condition fragment, or None.
 
@@ -1664,6 +1670,16 @@ def _zh_parse_condition(rows, frag):
 
     # -- the round number. \u5947\u6578/\u5076\u6578 first: "\u7b2c1\u56de\u5408" is a different shape from
     # "\u5947\u6578\u56de\u5408" and only the latter is parity.
+    # -- how many units are still standing. Michael's Faith In Chaos grants himself
+    # 全傷害激減 -- incoming damage reduced to 1 -- gated on 若敵方存活人數在2人以上, and a
+    # guild boss fight has exactly ONE enemy. Ungated he simply cannot be killed, which
+    # is what a player reported: "Michael never dies and just keeps reviving everyone".
+    m = _ZH_COND_ALIVE.search(frag)
+    if m:
+        return {"alive": {"side": "ally" if m.group("side") == "我方" else "enemy",
+                          "cmp": "gte" if m.group("cmp") == "以上" else "lte",
+                          "n": int(m.group("n"))}}
+
     if _ZH_COND_ODD.search(frag):
         return {"round": {"parity": 1}}
     if _ZH_COND_EVEN.search(frag):

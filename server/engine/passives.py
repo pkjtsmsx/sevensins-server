@@ -104,6 +104,24 @@ def RANDOM_DEAD_ALLIES(n):
     return pick
 
 
+def ALIVE_COUNT(side, cmp_, n):
+    """`when` for 若敵方存活人數在N人以上 -- how many units are still standing.
+
+    Michael's Faith In Chaos grants HIMSELF 全傷害激減 (incoming damage becomes 1) gated
+    on 若敵方存活人數在2人以上. A guild boss fight has exactly one enemy, so the gate is
+    shut -- but this path could only express `holds`, so the rule fell to
+    CONDITIONAL_POLICY and landed on half his actions anyway. With damage reduced to 1
+    every other turn he cannot be killed, and a player reported precisely that: "Michael
+    never dies and just keeps reviving everyone over and over again".
+    """
+    want, same = int(n), side == "ally"
+    def gate(holder, units, ctx=None):
+        live = sum(1 for u in units
+                   if u.alive and ((u.team == holder.team) is same))
+        return live >= want if cmp_ == "gte" else live <= want
+    return gate
+
+
 def ATTACKER(holder, units, ctx=None):
     """Whoever just hit the holder -- only meaningful on ON_DAMAGE_TAKEN."""
     src = (ctx or {}).get("attacker")
@@ -700,10 +718,14 @@ def _compiled_rules(spec):
         # behind a condition fired on every trigger, unconditionally, which is the exact
         # failure `requires` exists to prevent. Treated as unevaluatable instead, so it
         # takes CONDITIONAL_POLICY below like any other condition we cannot answer.
-        unevaluatable = bool(requires) and not requires.get("status")
+        unevaluatable = bool(requires) and not (requires.get("status")
+                                                or requires.get("alive"))
         if requires.get("status"):
             when = holds(requires["status"],
                          on="holder" if requires.get("on") == "caster" else "other")
+        elif requires.get("alive"):
+            a = requires["alive"]
+            when = ALIVE_COUNT(a.get("side"), a.get("cmp"), a.get("n") or 0)
         # Imported here, not at module scope: core imports THIS module, so reading the
         # policy at call time is what keeps the two from importing each other.
         from . import core as _core

@@ -412,6 +412,53 @@ def check_prose_stack_caps():
           core._holds_status(c, "Wrath", None, 6) is False)
 
 
+def check_alive_count_gate():
+    """若敵方存活人數在2人以上 -- a gate counting who is still standing.
+
+    Michael's Faith In Chaos grants HIMSELF 全傷害激減, which reduces incoming damage to
+    1, gated behind 2+ living enemies. A guild boss fight has exactly one, so the gate
+    is shut -- but nothing could express it, so the rule took CONDITIONAL_POLICY and
+    landed on half his actions. At damage 1 every other turn he cannot be killed, and a
+    player reported exactly that: the fight would not end because Michael never died and
+    kept reviving the party. 50 effects carry this gate.
+
+    Both directions, because a gate that can only shut is as wrong as one that can only
+    open -- the same point `check_condition_shapes` makes for every other shape.
+    """
+    from engine import passives as P
+
+    def field(n_enemy):
+        mic = unit("102", core.TEAM_PLAYER)
+        return mic, ([mic] + [unit(str(103 + i), core.TEAM_PLAYER) for i in range(3)]
+                     + [unit(str(200 + i), core.TEAM_ENEMY) for i in range(n_enemy)])
+
+    gate = {"alive": {"side": "enemy", "cmp": "gte", "n": 2}}
+    mic, units = field(1)
+    check("an enemy-count gate of 2 is SHUT against a single boss",
+          core._condition_met(gate, mic, None, None, {"units": units}) is False)
+    mic, units = field(5)
+    check("  ...and OPEN against a full enemy team",
+          core._condition_met(gate, mic, None, None, {"units": units}) is True)
+    mic, units = field(1)
+    check("  ...and unevaluatable when the caller passed no field",
+          core._condition_met(gate, mic, None, None, {}) is None)
+    ally = {"alive": {"side": "ally", "cmp": "lte", "n": 3}}
+    mic, units = field(1)
+    check("an ALLY-side gate counts the caster's own team, not the enemy",
+          core._condition_met(ally, mic, None, None, {"units": units}) is False,
+          "4 allies alive, gate wants <= 3")
+    # ...and the passive path expresses it too, which is where Michael's actually lives.
+    mic, units = field(1)
+    fired = P.fire("after_action", mic, 2010136, units, ctx={"rng": random.Random(1)})
+    names = [getattr(r[1], "name", None) for r in fired if len(r) == 2]
+    check("Michael's damage reduction does NOT land with one enemy on the field",
+          "All DMG Reduction" not in names, str(names))
+    mic, units = field(5)
+    fired = P.fire("after_action", mic, 2010136, units, ctx={"rng": random.Random(1)})
+    names = [getattr(r[1], "name", None) for r in fired if len(r) == 2]
+    check("  ...and does land with five", "All DMG Reduction" in names, str(names))
+
+
 def check_revive_count():
     """復活我方被擊倒的隨機2人 -- the clause says how many, and the engine has to obey it.
 
@@ -613,6 +660,7 @@ def main():
     check_prose_stack_caps()
 
     print("\nop 6 -- HP-pool riders:")
+    check_alive_count_gate()
     check_revive_count()
     check_hp_riders()
 
