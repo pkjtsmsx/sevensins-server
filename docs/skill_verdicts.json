@@ -22,30 +22,171 @@
     },
     "reviewed_by": "read from the Chinese prose against the compiled effects via tools/skill_review.py"
   },
-
   "verdicts": {
-    "112111": {"status": "ok", "classes": [], "cast": "RAVINIA", "reason": "damage, chance-rolled Slow and the bonus-damage rider all match"},
-    "112112": {"status": "ok", "classes": [], "cast": "RAVINIA", "reason": "revive count and percentage both match"},
-    "110312": {"status": "ok", "classes": [], "cast": "PUNICA", "reason": "damage and the cooldown delay on the target both match"},
-    "104010": {"status": "ok", "classes": [], "cast": "ESMIRA", "reason": "DEF-based damage, both statuses and the follow-up all match"},
-
-    "201011": {"status": "partial", "classes": ["missing_gate"], "cast": "MICHAEL", "reason": "the odd-round Charm is correctly gated; the even-round self gauge gain is not"},
-    "201012": {"status": "partial", "classes": ["missing_gate"], "cast": "MICHAEL", "reason": "revive count is right; the ally-count gate on the damage reduction and the attribute gate on the bonus damage are both absent"},
-    "200712": {"status": "partial", "classes": ["missing_gate"], "cast": "BELIAL", "reason": "both stated pursuits and their gauge drains are present; the second pursuit's did-not-die gate is absent"},
-    "104011": {"status": "partial", "classes": ["wrong_recipient"], "cast": "ESMIRA", "reason": "the cleanses are right; the pierce and the cooldown delay should land on the lowest-HP enemies rather than the skill's targets"},
-
-    "201010": {"status": "broken", "classes": ["missing_gate", "duplicate_effect"], "cast": "MICHAEL", "reason": "all three round-parity gates are absent, and the buff cleanse compiles twice from one clause"},
-    "201013": {"status": "broken", "classes": ["missing_gate", "wrong_recipient", "lost_clause"], "cast": "MICHAEL", "reason": "three gates absent; the gauge gain should exclude the caster and does not; the pursuit's own status is never applied"},
-    "112110": {"status": "broken", "classes": ["duplicate_effect", "lost_stacks"], "cast": "RAVINIA", "reason": "the bonus-damage rider and the status both compile twice from one clause, and the stated stack count is lost"},
-    "112113": {"status": "broken", "classes": ["wrong_recipient"], "cast": "RAVINIA", "reason": "the heal names the caster and one ally; it compiles onto the whole party"},
-    "200710": {"status": "broken", "classes": ["wrong_recipient", "missing_gate"], "cast": "BELIAL", "reason": "the cooldown refresh is stated on the caster and compiles onto the targets, and its did-I-kill gate is absent"},
-    "200713": {"status": "broken", "classes": ["glossary_leak", "unresolved_category", "missing_gate"], "cast": "BELIAL", "reason": "the stacking status's damage REDUCTION compiles as a heal of the same percentage; the control-status cleanse carries an unmatchable category; the round-number gate is absent"},
-    "110310": {"status": "broken", "classes": ["missing_gate"], "cast": "PUNICA", "reason": "the cooldown refresh is gated on the target being confused and compiles ungated"},
-    "110311": {"status": "broken", "classes": ["wrong_language", "missing_gate"], "cast": "PUNICA", "reason": "the coefficient is taken from a stale English line (250%) where the Chinese states 290%; both cooldown changes are gated on the target being confused and compile ungated"},
-    "110313": {"status": "broken", "classes": ["missing_chance", "missing_gate", "duplicate_effect"], "cast": "PUNICA", "reason": "the cooldown refresh drops its stated odds and its once-per-battle cap; the weakness rider's attribute gate is absent; a spurious damage effect duplicates the rider"},
-    "104012": {"status": "broken", "classes": ["lost_clause", "missing_gate", "duplicate_effect"], "cast": "ESMIRA", "reason": "the damage is stated as ATK plus DEF and only the ATK half compiles; both HP-threshold gates are absent; the buff cleanse compiles twice"},
-    "104013": {"status": "broken", "classes": ["missing_gate", "glossary_leak"], "cast": "ESMIRA", "reason": "the pursuit's HP-threshold gate and the on-kill trigger are both absent, and the regeneration status's own recovery compiles as a direct heal"},
-
-    "200711": {"status": "suspect", "classes": ["glossary_leak"], "cast": "BELIAL", "reason": "the granted status describes a heal on taking damage; a direct heal of the same size appears on the skill and may be that description leaking"}
+    "112111": {
+      "status": "ok",
+      "classes": [],
+      "cast": "RAVINIA",
+      "reason": "damage, chance-rolled Slow and the bonus-damage rider all match"
+    },
+    "112112": {
+      "status": "ok",
+      "classes": [],
+      "cast": "RAVINIA",
+      "reason": "revive count and percentage both match"
+    },
+    "110312": {
+      "status": "ok",
+      "classes": [],
+      "cast": "PUNICA",
+      "reason": "damage and the cooldown delay on the target both match"
+    },
+    "104010": {
+      "status": "ok",
+      "classes": [],
+      "cast": "ESMIRA",
+      "reason": "DEF-based damage, both statuses and the follow-up all match"
+    },
+    "201011": {
+      "status": "partial",
+      "classes": [
+        "missing_gate"
+      ],
+      "cast": "MICHAEL",
+      "reason": "the odd-round Charm is correctly gated; the even-round self gauge gain is not"
+    },
+    "201012": {
+      "status": "partial",
+      "classes": [
+        "missing_gate"
+      ],
+      "cast": "MICHAEL",
+      "reason": "revive count is right; the ally-count gate on the damage reduction and the attribute gate on the bonus damage are both absent"
+    },
+    "200712": {
+      "status": "partial",
+      "classes": [
+        "missing_gate"
+      ],
+      "cast": "BELIAL",
+      "reason": "both stated pursuits and their gauge drains are present; the second pursuit's did-not-die gate is absent"
+    },
+    "104011": {
+      "status": "partial",
+      "classes": [
+        "wrong_recipient"
+      ],
+      "cast": "ESMIRA",
+      "reason": "the cleanses are right; the pierce and the cooldown delay should land on the lowest-HP enemies rather than the skill's targets"
+    },
+    "201010": {
+      "status": "partial",
+      "classes": [
+        "missing_gate"
+      ],
+      "cast": "MICHAEL",
+      "reason": "all three round-parity gates are absent",
+      "corrected": "the two buff cleanses are two OPERANDS (stackable and non-stackable blocks), not one clause read twice"
+    },
+    "201013": {
+      "status": "broken",
+      "classes": [
+        "missing_gate",
+        "wrong_recipient",
+        "lost_clause"
+      ],
+      "cast": "MICHAEL",
+      "reason": "three gates absent; the gauge gain should exclude the caster and does not; the pursuit's own status is never applied"
+    },
+    "112110": {
+      "status": "broken",
+      "classes": [
+        "duplicate_effect",
+        "lost_stacks"
+      ],
+      "cast": "RAVINIA",
+      "reason": "the bonus-damage rider and the status both compile twice from one clause, and the stated stack count is lost"
+    },
+    "112113": {
+      "status": "broken",
+      "classes": [
+        "wrong_recipient"
+      ],
+      "cast": "RAVINIA",
+      "reason": "the heal names the caster and one ally; it compiles onto the whole party"
+    },
+    "200710": {
+      "status": "broken",
+      "classes": [
+        "wrong_recipient",
+        "missing_gate"
+      ],
+      "cast": "BELIAL",
+      "reason": "the cooldown refresh is stated on the caster and compiles onto the targets, and its did-I-kill gate is absent"
+    },
+    "200713": {
+      "status": "broken",
+      "classes": [
+        "glossary_leak",
+        "unresolved_category",
+        "missing_gate"
+      ],
+      "cast": "BELIAL",
+      "reason": "the stacking status's damage REDUCTION compiles as a heal of the same percentage; the control-status cleanse carries an unmatchable category; the round-number gate is absent"
+    },
+    "110310": {
+      "status": "broken",
+      "classes": [
+        "missing_gate"
+      ],
+      "cast": "PUNICA",
+      "reason": "the cooldown refresh is gated on the target being confused and compiles ungated"
+    },
+    "110311": {
+      "status": "broken",
+      "classes": [
+        "wrong_language",
+        "missing_gate"
+      ],
+      "cast": "PUNICA",
+      "reason": "the coefficient is taken from a stale English line (250%) where the Chinese states 290%; both cooldown changes are gated on the target being confused and compile ungated"
+    },
+    "110313": {
+      "status": "broken",
+      "classes": [
+        "missing_chance",
+        "missing_gate",
+        "duplicate_effect"
+      ],
+      "cast": "PUNICA",
+      "reason": "the cooldown refresh drops its stated odds and its once-per-battle cap; the weakness rider's attribute gate is absent; a spurious damage effect duplicates the rider"
+    },
+    "104012": {
+      "status": "broken",
+      "classes": [
+        "lost_clause",
+        "missing_gate"
+      ],
+      "cast": "ESMIRA",
+      "reason": "the damage is stated as ATK plus DEF and only the ATK half compiles; both HP-threshold gates are absent",
+      "corrected": "the two buff cleanses are two OPERANDS, not one clause read twice"
+    },
+    "104013": {
+      "status": "broken",
+      "classes": [
+        "missing_gate",
+        "glossary_leak"
+      ],
+      "cast": "ESMIRA",
+      "reason": "the pursuit's HP-threshold gate and the on-kill trigger are both absent, and the regeneration status's own recovery compiles as a direct heal"
+    },
+    "200711": {
+      "status": "suspect",
+      "classes": [
+        "glossary_leak"
+      ],
+      "cast": "BELIAL",
+      "reason": "the granted status describes a heal on taking damage; a direct heal of the same size appears on the skill and may be that description leaking"
+    }
   }
 }
