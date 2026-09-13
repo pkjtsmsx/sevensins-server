@@ -180,6 +180,11 @@ _POSSESSIVE_SOURCE = re.compile(
 # these are real and there were 20 known ones in a corpus sweep, so a count that grows
 # silently is exactly what we do not want.
 _WHO_DISAGREEMENTS = []
+# (skill id, status, zh verdict, en verdict) where the two languages disagree about
+# whether an application is CONDITIONAL. Printed rather than accumulated quietly, for the
+# reason the recipient list is: the Chinese wins, and how often it has to is a number
+# somebody should watch. See `is_conditional`.
+_COND_DISAGREEMENTS = []
 
 _MINUS_PCT = re.compile(r"-\s*\d+(?:\.\d+)?\s*%")
 # "increases the Move Gauge of all allies (EXCLUDING THE CASTER) by 10%" -- the excluded
@@ -1140,7 +1145,8 @@ def effects(rows, r, claimed=None):
                         # the prose states probabilities there too.
                         **status_chance(r, (rows.get(aid) or {}).get("_name"),
                                         meta.get("name")),
-                        "conditional": is_conditional(r, meta.get("name")),
+                        "conditional": is_conditional(
+                            r, meta.get("name"), (rows.get(aid) or {}).get("_name")),
                         "requires": (condition_requires(r, meta.get("name"))
                                      or zh_condition_for(rows, r, (rows.get(aid) or {}).get("_name"))),
                         # The status row's `_name` is the ORIGINAL-language name, which
@@ -1889,12 +1895,59 @@ def condition_requires(r, status_name):
             "on": "caster" if who in _SELF_WORDS else "target"}
 
 
-def is_conditional(r, status_name):
-    """Is this status applied only under a condition the opcodes do not encode?"""
+# A Chinese clause that states a CONDITION. 若 and 如果 are unambiguous; 當 only counts
+# when a state test follows it. That last restriction is load-bearing: 當回合開始時 is a
+# TIMING, not a condition, and the compiler already learned once (see the `conditional =
+# False` note in annotate_passive) that conflating the two makes every derived rule roll
+# at CONDITIONAL_CHANCE -- a boss's permanent trait becomes a coin flip.
+_ZH_CONDITIONAL = re.compile(
+    r"若|如果|當[^，。]{0,12}(以上|以下|低於|高於|超過|大於|小於|擁有|處於|存活)")
+
+
+def _zh_is_conditional(note, zh_name):
+    """-> whether the fragment granting `zh_name` sits under a condition, or None.
+
+    OWN FRAGMENT PLUS THE ONE BEFORE IT, which is the whole difficulty. 若目標擁有暈眩，
+    則附加惡化 splits on the comma, so the fragment naming the status states no condition
+    and the one before it states nothing else. Reading only the own fragment answers
+    "not conditional" for the commonest shape in the corpus; reading the whole line
+    answers "conditional" for every status in any note containing a 若 anywhere, which is
+    the `_clause_for` trap `status_target` documents. Narrowing to own+prev is the same
+    rule `zh_heals` and `_zh_side_of` settled on.
+    """
+    if not zh_name or zh_name not in (note or ""):
+        return None
+    parts = [p for p in _ZH_SPLIT.split(note) if p.strip()]
+    for i, part in enumerate(parts):
+        if zh_name in part:
+            prev = parts[i - 1] if i else ""
+            return bool(_ZH_CONDITIONAL.search(part)
+                        or _ZH_CONDITIONAL.search(prev))
+    return None
+
+
+def is_conditional(r, status_name, zh_name=None):
+    """Is this status applied only under a condition the opcodes do not encode?
+
+    **The Chinese decides** (section 3). This read `_note1_en` alone, and both failure
+    modes are live at scale across 17,746 application sites:
+
+      * 6,915 sites (39%) have NO English clause at all -- the untranslated mob and boss
+        rows -- so conditionality was `null` and nothing was ever gated on them.
+      * of the 10,500 where both languages answer, they disagree on 23%. 2,258 are
+        conditional in English and unconditional in the original, and each of those
+        takes CONDITIONAL_POLICY at runtime: a status the prose says ALWAYS lands was
+        firing on a 50% roll.
+
+    English is kept as the fallback for the rows the Chinese cannot answer, and every
+    disagreement is recorded rather than quietly resolved.
+    """
+    zh = _zh_is_conditional(r.get("_note1"), zh_name)
     clause = _clause_for(r.get("_note1_en") or "", status_name)
-    if clause is None:
-        return None                      # not mentioned -- cannot tell either way
-    return bool(_CONDITIONAL.search(clause))
+    en = None if clause is None else bool(_CONDITIONAL.search(clause))
+    if zh is not None and en is not None and zh != en:
+        _COND_DISAGREEMENTS.append((r.get("_id"), status_name, zh, en))
+    return zh if zh is not None else en
 
 
 # A percentage that belongs to a HEAL is not the skill's damage coefficient, however
@@ -2919,6 +2972,13 @@ def main():
         print(f"  recipient prose disagreements: {len(_WHO_DISAGREEMENTS)} "
               f"(Chinese used; sample below)")
         for sid, name, zh, en in _WHO_DISAGREEMENTS[:5]:
+            print(f"    skill {sid} / {name}: zh={zh} en={en}")
+    if _COND_DISAGREEMENTS:
+        on = sum(1 for _s, _n, zh, _e in _COND_DISAGREEMENTS if zh)
+        print(f"  conditional prose disagreements: {len(_COND_DISAGREEMENTS)} "
+              f"(Chinese used; {on} gained a condition, "
+              f"{len(_COND_DISAGREEMENTS) - on} lost one)")
+        for sid, name, zh, en in _COND_DISAGREEMENTS[:5]:
             print(f"    skill {sid} / {name}: zh={zh} en={en}")
 
     # The clause ledger. One line, always: see LEDGER. `cd` has no `uncovered_cd`, so
