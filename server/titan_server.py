@@ -1090,27 +1090,21 @@ def _boss_loss_result_msgs(battle, state=None):
     fight cannot be left. The Result button still worked because the damage table rides
     on CMD_WAVE_END instead.
 
-No drops and no ratings: `battle_end_reward` gates those on the win, and a defeat
-    must not show prizes it did not pay. `item_list` still has to be PRESENT --
-    `BattleReward..ctor` throws on a null.
+EVERY list empty. `battle_end_reward` gates drops and ratings on the win, and a
+    defeat must not show prizes it did not pay; `item_list` still has to be PRESENT,
+    because `BattleReward..ctor` throws on a null. `bar_list` stays empty too -- live
+    footage of the retail guild result screen shows the Record page and NO experience
+    bar, so filling it would invent a page the real game does not show. (An attempt to
+    populate it was reverted: it neither matched retail nor fixed the tap.)
 
-    `bar_list` IS populated, at zero XP. A first cut sent every list empty and the panel
-    opened with its Record numbers but a dead tap: `isSkipEnabled` is armed by the
-    tween-finished callbacks that `OnEnterResultState` hooks, and a page with no rows to
-    animate never runs one. The char-level page is the one that always has rows -- one
-    per party member -- so it is what gives the panel something to finish. Zero XP is
-    also the honest number: `grant_battle_xp(..., 0)` awards nothing and reports old ==
-    new, which is what a defeat earned.
+    **Sent DEFERRED, not with the wave end.** See `_flush_pending` -- the ordering is
+    the whole bug.
     """
     if (battle.stage or {}).get("_book") != BOSS_BOOK:
         return []                      # an ordinary stage loses into GameLose and is fine
     log("    -> boss-stage defeat: pushing an EndReward so the result panel can arm "
         "its Tap to End (the client never asks for one after a loss)")
-    bars = []
-    if state is not None:
-        bars = ps.grant_battle_xp(
-            state, ps.battle_team(state, int(state.get("battle_team_index", 0))), 0)
-    reward = {"item_list": [], "itembonus_list": [], "bar_list": bars,
+    reward = {"item_list": [], "itembonus_list": [], "bar_list": [],
               "rating_list": [], "helper_uid": ""}
     return [uint64_msg(PLAYER_STAGE, STAGE_RPLY_END_REWARD, [],
                        [json.dumps(reward, separators=(",", ":"))])]
@@ -1444,7 +1438,23 @@ def battle_replies(battle, cmd, intargs, strargs, state=None, uid=""):
         # boss you cannot kill still scores -- so a wipe must bank its damage. No
         # messages are sent: the client is not waiting for any.
         if result == bt.WAVE_RESULT_LOSE and state is not None:
-            end_msgs = _boss_loss_result_msgs(battle, state)
+            end_msgs = []
+            # DEFERRED to the next request the client makes. Sending these alongside
+            # CMD_WAVE_END loses a race: the client handles our EndReward first and
+            # `HandleEndReward` marks the battle end ready, THEN processes the wave end,
+            # enters `GameWinState.ShowBattleResult`, and `ServerRPCBattleEnd` clears
+            # that flag again (`if (!runeSel) IsBattleEndReady = 0`).
+            #
+            # `ShowResultPageInAnimation`'s coroutine tests the flag before it plays the
+            # `_ResultTween`, parks when it is false, and only the tween's finished
+            # callback (`PtRewardCb` and friends) ever sets `isSkipEnabled = 1`. With the
+            # flag cleared after the fact the coroutine waits forever: the panel has its
+            # data -- the Record numbers appeared -- and the tap stays dead, which is
+            # exactly what was reported twice.
+            #
+            # One request later the client has already entered the state and cleared the
+            # flag, so our reply sets it and the animation runs.
+            battle.pending_end_msgs = _boss_loss_result_msgs(battle, state)
             if ps.is_challenge_stage(battle.stage_id):
                 dmg, bonus, total, payouts = ps.finish_challenge(
                     state, battle.damage_sum)
@@ -3928,6 +3938,19 @@ def handle(conn, addr):
                     last_rpc = (index, cmd, intargs, strargs)
                     log(f"    RPC index={index:#010x} cmd={cmd} id={rid} "
                         f"int={intargs} str={strargs}")
+                    # A boss defeat's result payload rides out on the request AFTER
+                    # the wave end -- see `_boss_loss_result_msgs`. It has to be any
+                    # request, not a battle-channel one: once the fight is over the
+                    # client sends nothing on that channel at all, only heartbeats and
+                    # chat polls, so a battle-only flush would never fire.
+                    pending = getattr(cx.battle, "pending_end_msgs", None) \
+                        if cx.battle else None
+                    if pending:
+                        cx.battle.pending_end_msgs = []
+                        log(f"    -> flushing {len(pending)} deferred battle-end "
+                            f"message(s) behind cmd {cmd}")
+                        for body in pending:
+                            send(MSG_RPC, body)
                     handler = HANDLERS.get((index, cmd))
                     if handler is not None:
                         # Registered subsystems answer from the table (see HANDLERS);
