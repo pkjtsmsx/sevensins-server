@@ -1433,14 +1433,25 @@ def battle_replies(battle, cmd, intargs, strargs, state=None, uid=""):
         # boss you cannot kill still scores -- so a wipe must bank its damage. No
         # messages are sent: the client is not waiting for any.
         if result == bt.WAVE_RESULT_LOSE and state is not None:
+            end_msgs = _boss_loss_result_msgs(battle)
             if ps.is_challenge_stage(battle.stage_id):
-                dmg, bonus, total, _payouts = ps.finish_challenge(
+                dmg, bonus, total, payouts = ps.finish_challenge(
                     state, battle.damage_sum)
                 log(f"    -> guild weekly settled on DEFEAT: "
                     f"{dmg} + {bonus} bonus = {total}")
+                # The Guild page of the result panel -- "Total Damage / Bonus / Total
+                # Score". EXACTLY three ints: ChallengeBattleRewardReply tests
+                # intargs.Count == 3 and drops the whole reply otherwise. The win path
+                # has always sent this; the defeat path settled the score and then never
+                # told the client, so the page had nothing to draw. A guild attempt is
+                # supposed to show this screen whether it was won or lost.
+                end_msgs.append(sint_msg(CHALLENGE_CLIENT, CHALLENGE_RPLY_BATTLE_END,
+                                         [dmg, bonus, total], []))
+                if payouts:
+                    end_msgs.append(sint_msg(0xBC8FDA7C, 512, [],
+                                             [ps.currency_json(state)]))
             ps.clear_battle(state)
             ps.save(state)
-            end_msgs = _boss_loss_result_msgs(battle)
         return [battle_msg(bt.CMD_WAVE_END,
                            [result, battle.wave, next_avg, end_avg, start_avg],
                            # BtCollector -- the per-unit damage table behind the
