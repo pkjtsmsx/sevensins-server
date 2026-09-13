@@ -301,6 +301,8 @@ def main():
                     help="name a sample skill id for every cell")
     args = ap.parse_args()
 
+    effects = load_effects()
+    disagreements = parity(effects)
     rows, gaps, starved, untargetable, total = coverage()
     print(f"{total} effects, {len(rows)} (op, trigger) cells, "
           f"{sum(starved.values())} starved of the data they need\n")
@@ -321,6 +323,20 @@ def main():
         if args.verbose:
             line += f"  {sid}"
         print(line)
+
+    print()
+    # Parity: the two paths on the SAME effect. A coverage row can read `yes / yes`
+    # while the two produce different numbers -- see the note above PARITY_TARGETS.
+    print(f"PARITY -- {len(disagreements)} effect(s) where the active and passive paths "
+          f"disagree on amount or recipient")
+    for sid, eff, act, pas in disagreements[:10]:
+        print(f"  skill {sid} {eff.get('op')} "
+              f"target={eff.get('target')} basis={eff.get('basis')} "
+              f"count={eff.get('count')}")
+        print(f"      active  {act}")
+        print(f"      passive {pas}")
+    if len(disagreements) > 10:
+        print(f"  ... and {len(disagreements) - 10} more")
 
     print()
     if gaps:
@@ -352,3 +368,87 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+# --- parity: the two paths agree on the SAME effect --------------------------------
+#
+# Coverage asks "does this path do anything with the effect". Parity asks the harder
+# question -- "do the two paths do the SAME thing" -- and it is the one that catches the
+# bug class coverage cannot see: a field that travels on the effect, is honoured by one
+# consumer, and is silently dropped by the other. Three of those shipped:
+#
+#   revive `count`   -- core raised EVERY fallen ally, passives raised exactly one.
+#                       Same field, same artifact, two implementations, two directions.
+#   heal `basis`     -- passives forced `self_max_hp`, so a heal stated as 100% of ATK
+#                       paid 100% of the holder's MAX HP. Punica's Guard Breath healed
+#                       ~19x what the prose says, every turn, on a live party.
+#   heal `count`     -- `allies_lowest` became "the whole party".
+#
+# None of them raised, none of them failed a suite, and the artifact was RIGHT the whole
+# time. A human found the first on a phone; this is what finds the next one.
+#
+# Only effects whose recipient vocabulary BOTH paths understand are compared -- caster,
+# allies, allies_lowest. A skill aimed at enemies and a passive held by a unit genuinely
+# select differently, and reporting that as disagreement would bury the real rows.
+PARITY_TARGETS = ("caster", "allies", "allies_lowest")
+PARITY_OPS = ("heal", "revive")
+
+
+def _core_amounts(spec, eff):
+    """-> {order: amount} the ACTIVE path produces for one effect."""
+    caster, units = _field()
+    out = _EXECUTE(caster, _probe_spec(spec, [eff]), units,
+                   rng=random.Random(0), round_no=1, chosen="4")
+    rows = out.heals if eff["op"] == "heal" else out.revives
+    key = "amount" if eff["op"] == "heal" else "hp"
+    return {r["target"]: r[key] for r in rows}
+
+
+# An id no real skill uses, so the probe's rules can be seeded into the derived-rule
+# cache and fired through the REAL `fire`. Calling `fire` with the effect's own skill id
+# would run that skill's WHOLE rule list, not the one effect under test -- which is how
+# the first run of this reported five revive disagreements that were the harness
+# comparing a single probed effect against a passive's full behaviour.
+_PROBE_ID = -424242
+
+
+def _passive_amounts(spec, eff):
+    """-> {order: amount} the PASSIVE path produces for the same effect."""
+    caster, units = _field()
+    probe = _probe_spec(spec, [dict(eff, trigger="turn_start")])
+    probe["type"] = "passive"
+    rules = _PASSIVE_RULES(probe)
+    if not rules:
+        return {}
+    passives._COMPILED[_PROBE_ID] = rules
+    try:
+        fired = passives.fire("turn_start", caster, _PROBE_ID, units,
+                              ctx={"rng": random.Random(0)}) or []
+    finally:
+        passives._COMPILED.pop(_PROBE_ID, None)
+    out = {}
+    for row in fired:
+        if len(row) == 3 and row[1] in ("heal", "revive"):
+            out[row[0].order] = row[2]
+    return out
+
+
+def parity(effects):
+    """Compare the two paths on every effect both can express. -> [(sid, eff, a, b)]."""
+    bad = []
+    for sid, spec, eff in effects:
+        if eff.get("op") not in PARITY_OPS:
+            continue
+        if eff.get("target") not in PARITY_TARGETS:
+            continue
+        if not REQUIRED[eff["op"]](eff):
+            continue
+        try:
+            a, b = _core_amounts(spec, eff), _passive_amounts(spec, eff)
+        except Exception:                                       # noqa: BLE001
+            continue
+        if not b:                       # the passive path declined it -- a COVERAGE gap
+            continue
+        if a != b:
+            bad.append((sid, eff, a, b))
+    return bad

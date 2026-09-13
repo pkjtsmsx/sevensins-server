@@ -55,7 +55,12 @@ KNOWN_GAPS = {
     ("active", "apply_status", None),
     ("active", "follow_up", None),
     ("active", "attack_rider", None),
-    ("active", "heal", None),
+    # ("active", "heal", None) -- CLOSED. The cell was 190 heals whose recipient is
+    # `allies_lowest`, and `_heal_recipients` had no branch for it, so every one of them
+    # fell through to "recipient unknown" and did nothing: 65 skills, 97 SP skills, 28
+    # basic attacks. The passive path had the same vocabulary and got it wrong the other
+    # way (the whole party), and `_rider` had it right -- three implementations, one
+    # correct. Found by the parity check at the bottom of this file, not by this cell.
     ("passive", "apply_status", "battle_start"),
     ("passive", "apply_status", "turn_start"),
     ("passive", "damage", "battle_start"),
@@ -130,6 +135,26 @@ def main():
           sum(starved.values()) > 0, str(dict(starved)))
     check("  ...and so are specs the engine cannot target by design",
           sum(untargetable.values()) > 0, str(dict(untargetable)))
+
+    print("\ncheck_the_two_paths_agree_on_the_same_effect:")
+    # PARITY, not coverage. A cell can read "yes / yes" -- both paths do SOMETHING with
+    # the op -- while the two produce different numbers, and that is the bug class the
+    # matrix above cannot see. Three of them shipped, all invisible to every other test
+    # here because the compiled artifact was RIGHT and a consumer dropped a field:
+    #
+    #   revive `count`  -- active raised EVERY fallen ally, passive raised exactly one.
+    #   heal `basis`    -- passive forced the holder's max HP, so a heal stated as 100%
+    #                      of ATK paid ~19x on Punica's Guard Breath, every turn.
+    #   heal `count`    -- `allies_lowest` meant "the whole party" on the passive path
+    #                      and NOTHING at all on the active one, where the recipient
+    #                      branch did not exist (190 player-cast heals).
+    #
+    # A human found the first of those on a phone. This is what finds the next.
+    disagreements = ec.parity(ec.load_effects())
+    check("the active and passive paths agree on every shared effect",
+          not disagreements,
+          "; ".join(f"skill {sid} {eff.get('op')} active={act} passive={pas}"
+                    for sid, eff, act, pas in disagreements[:3]))
 
     print(f"\n{_fail} failure(s)")
     return 1 if _fail else 0

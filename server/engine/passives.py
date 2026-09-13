@@ -78,6 +78,32 @@ def RANDOM_DEAD_ALLY(holder, units, ctx=None):
     return [rng.choice(pool) if rng is not None else pool[0]]
 
 
+def ALLIES_LOWEST(n):
+    """The `n` living allies with the least HP -- the compiled `allies_lowest` target.
+
+    Punica's Guard Breath states 對我方體力最低的目標 and the rule healed the holder
+    instead, because the translation had no way to say "lowest" and fell back to SELF.
+    """
+    return lambda h, u, c=None: sorted(ALLIES(h, u), key=lambda x: x.hp)[:max(1, int(n))]
+
+
+def RANDOM_DEAD_ALLIES(n):
+    """`n` fallen allies, sampled -- the revive `count` the prose states.
+
+    `RANDOM_DEAD_ALLY` raised exactly one; a rule with no count still means one, but
+    復活我方被擊倒的3人 means three and 51 of the 134 passive revives state a number.
+    """
+    def pick(holder, units, ctx=None):
+        pool = DEAD_ALLIES(holder, units, ctx)
+        rng = (ctx or {}).get("rng")
+        k = max(1, int(n))
+        if len(pool) <= k:
+            return pool
+        chosen = rng.sample(pool, k) if rng is not None else pool[:k]
+        return sorted(chosen, key=lambda u: u.order)
+    return pick
+
+
 def ATTACKER(holder, units, ctx=None):
     """Whoever just hit the holder -- only meaningful on ON_DAMAGE_TAKEN."""
     src = (ctx or {}).get("attacker")
@@ -211,6 +237,11 @@ OF_OTHER_ATK = "other_atk"          # the other party to the event (attacker or 
 # compiled counter effects in the pack, 19 are ATK-based and 19 are DEF-based, so
 # assuming ATK would have paid the wall casts a fraction of their real counter.
 OF_SELF_DEF = "self_def"
+# `self_max_hp` is the HOLDER's pool. A compiled heal whose basis is "max_hp" scales off
+# whoever is BEING HEALED -- core.execute's heal branch says so in as many words ("only
+# the last one scales per recipient") -- and collapsing the two heals a 5,000-HP ally off
+# a 50,000-HP holder's pool. Distinct constant so the two cannot be confused again.
+OF_TARGET_MAX_HP = "target_max_hp"
 
 
 @dataclasses.dataclass
@@ -552,6 +583,17 @@ def _stated_selector(eff):
     return None
 
 
+def _heal_to(eff):
+    """Who a compiled heal lands on. Mirrors `core._heal_recipients`'s vocabulary.
+
+    `allies_lowest` carries a `count`; anything else is the caster or the whole party.
+    """
+    target = eff.get("target")
+    if target == "allies_lowest":
+        return ALLIES_LOWEST(eff.get("count") or 1)
+    return SELF if target == "caster" else ALLIES
+
+
 def _removal_selector(category):
     """-> who a triggered `remove_status` cleanses. See the note above."""
     return ENEMIES if (category or "").lower() in _REMOVE_FROM_ENEMY else SELF
@@ -698,12 +740,28 @@ def _compiled_rules(spec):
                               when=when, chance=chance,
                               magnitude=float(eff["percent"]), note="compiled"))
         elif op == "heal" and eff.get("percent") is not None:
+            # The BASIS travelled on the effect and was thrown away: every passive heal
+            # was read as a share of the holder's MAX HP. `core.execute` fixed exactly
+            # this on the skill path and its comment records the damage ("a guaranteed
+            # full-party heal every turn"); the passive path never got the fix. Punica's
+            # Guard Breath states 以自身攻擊力的100%恢復體力 and healed 100% of her max
+            # HP instead -- ~19x, every turn, on a cast that is in a live party.
+            # 36 passive heals state `atk` and 59 more state a recipient count.
+            hbasis = (eff.get("basis") or "max_hp").lower()
             rules.append(Rule(trigger, effect=HEAL,
-                              to=SELF if eff.get("target") == "caster" else ALLIES,
-                              when=when, chance=chance, basis=OF_SELF_MAX_HP,
+                              to=_heal_to(eff),
+                              when=when, chance=chance,
+                              basis=(OF_SELF_ATK if hbasis == "atk"
+                                     else OF_SELF_MAX_HP if hbasis == "caster_max_hp"
+                                     else OF_TARGET_MAX_HP),
                               magnitude=float(eff["percent"]), note="compiled"))
         elif op == "revive" and eff.get("percent") is not None:
-            rules.append(Rule(trigger, effect=REVIVE, to=RANDOM_DEAD_ALLY,
+            # `count` was dropped, so every passive revive raised ONE ally whatever the
+            # prose said -- the mirror of the bug `core.execute` had, which raised ALL
+            # of them. Same field, same artifact, two implementations, two directions.
+            n = eff.get("count")
+            rules.append(Rule(trigger, effect=REVIVE,
+                              to=RANDOM_DEAD_ALLIES(n) if n else RANDOM_DEAD_ALLY,
                               when=when, chance=chance,
                               magnitude=float(eff["percent"]), note="compiled"))
         elif op == "remove_status":
@@ -825,6 +883,8 @@ def _amount(rule, holder, target, ctx):
     # Raphael is precisely that cast. 待客之道 gives him DEF +75% for three turns and
     # 防壁反射 counters for 140% of DEF, so the buff and the counter are one kit -- and
     # the counter was paying off his unbuffed defence.
+    if rule.basis == OF_TARGET_MAX_HP:
+        return int(target.max_hp * mag / 100.0)
     if rule.basis == OF_SELF_MAX_HP:
         base = holder.max_hp
     elif rule.basis == OF_SELF_DEF:

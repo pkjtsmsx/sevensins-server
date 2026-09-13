@@ -254,12 +254,21 @@ def _status_recipients(who, caster, targets, units):
     return targets
 
 
-def _heal_recipients(who, caster, targets, units, out, op, skill_id):
+def _heal_recipients(who, caster, targets, units, out, op, skill_id, count=None):
     """-> who a heal actually restores, or [] when the prose does not say."""
     if who == "caster":
         return [caster]
     if who == "allies":
         return [u for u in units if u.team == caster.team and u.alive]
+    if who == "allies_lowest":
+        # 回復我方體力最低的2人 -- the N most wounded living allies. This branch did not
+        # exist, so the recipient fell through to "unknown" and 190 heals on skills the
+        # player casts did NOTHING: 65 skills, 97 SP skills, 28 basic attacks. `_rider`
+        # had the branch and the passive path grew one, which is how the same vocabulary
+        # came to be written three times with only one of them right.
+        mates = sorted((u for u in units if u.team == caster.team and u.alive),
+                       key=lambda u: u.hp)
+        return mates[:max(1, int(count or 1))]
     if who == "targets":
         return targets
     out.skipped.append({"op": op, "why": "heal recipient unknown", "skill": skill_id})
@@ -591,7 +600,7 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
                 # its targets healed the raid boss -- five casts using it made the fight
                 # unendable. Unknown recipient is skipped, not guessed.
                 recip = _heal_recipients(e.get("target"), caster, targets, units, out,
-                                         op, skill_id)
+                                         op, skill_id, e.get("count"))
                 # WHAT the percentage is a percentage OF. The pack writes heals both
                 # ways -- "recovers the caster's Max HP by 15%" and "restores HP of all
                 # allies by 250% ATK" -- and the two differ by an order of magnitude.

@@ -366,6 +366,19 @@ def zh_heals(r):
         low = re.search(r"體力最低的?\s*(\d+)\s*[人名]", c)
         if low:
             entry["target"], entry["count"] = "allies_lowest", int(low.group(1))
+        elif re.search(r"體力最低的?(?:目標|者|角色|單位|隊友|夥伴)", c) or (
+                re.search(r"體力最低", prev or "") and not re.search(r"我方|敵方", c)):
+            # The same recipient with no NUMBER on it -- 回復我方體力最低者, 對我方體力
+            # 最低的目標. 95 clauses, all compiled as "the whole party" because the
+            # pattern above needs a digit. Punica's Guard Breath is one of them, and it
+            # is a passive, so the party got a free heal every turn from a clause that
+            # names a single ally. Unstated count is one.
+            #
+            # The recipient can also sit in the PREVIOUS fragment -- 對我方體力最低的
+            # 目標，以自身攻擊力的100%恢復體力 splits on the comma, so the heal verb's own
+            # clause names nobody and `_zh_side_of` read the 自身 out of 自身攻擊力, which
+            # is the BASIS. That made Punica heal herself. 10 clauses, all hers.
+            entry["target"], entry["count"] = "allies_lowest", 1
         out.append((i, entry))
     return out
 
