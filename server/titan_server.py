@@ -1066,48 +1066,10 @@ def build_sync_replies(st):
 
 # `_book` 8 -- the 28 Guild Weekly stages, 7 bosses x 4 tiers. `PlayerBattle.IsBossStage`
 # (0x1688034) reads this very column, and `TurnEndState.OnWaveEnd` tests it BEFORE it
-# looks at the battle type: a boss stage loses into GameWinState, an ordinary one into
+# looks at the battle type: a boss stage ends in GameWinState, an ordinary one in
 # GameLoseState. That is why losing a story fight exits cleanly and losing a guild fight
-# does not.
+# did not.
 BOSS_BOOK = 8
-
-
-def _boss_loss_result_msgs(battle, state=None):
-    """-> the EndReward a LOST boss fight needs, or [].
-
-    Decompiled 2026-09-13, chasing a device report: the defeat showed the BATTLE ENDS
-    banner and then an empty panel with a flashing "Tap to End" that did nothing.
-
-    `GameWinState.OnEnter` routes a boss stage to `ShowBattleResult`, which calls
-    `ServerRPCBattleEnd` -- and that only actually SENDS when
-    `BattleType == 0 && BattleResultType == 1`, i.e. on a WIN. So the client never asks
-    us for anything after a defeat, by design. It then launches PanelBattleResult
-    anyway (`stageType != 2` -- stageType is `_book`, 8 here, so the branch is taken).
-
-    The panel populates from `PlayerBattle.RewardData`, which arrives as this EndReward.
-    Without it nothing arms `isSkipEnabled`, and `PanelBattleResult.OnClickNextStep`
-    wraps its ENTIRE body in `if (isSkipEnabled)` -- so every tap is a no-op and the
-    fight cannot be left. The Result button still worked because the damage table rides
-    on CMD_WAVE_END instead.
-
-EVERY list empty. `battle_end_reward` gates drops and ratings on the win, and a
-    defeat must not show prizes it did not pay; `item_list` still has to be PRESENT,
-    because `BattleReward..ctor` throws on a null. `bar_list` stays empty too -- live
-    footage of the retail guild result screen shows the Record page and NO experience
-    bar, so filling it would invent a page the real game does not show. (An attempt to
-    populate it was reverted: it neither matched retail nor fixed the tap.)
-
-    **Sent DEFERRED, not with the wave end.** See `_flush_pending` -- the ordering is
-    the whole bug.
-    """
-    if (battle.stage or {}).get("_book") != BOSS_BOOK:
-        return []                      # an ordinary stage loses into GameLose and is fine
-    log("    -> boss-stage defeat: pushing an EndReward so the result panel can arm "
-        "its Tap to End (the client never asks for one after a loss)")
-    reward = {"item_list": [], "itembonus_list": [], "bar_list": [],
-              "rating_list": [], "helper_uid": ""}
-    return [uint64_msg(PLAYER_STAGE, STAGE_RPLY_END_REWARD, [],
-                       [json.dumps(reward, separators=(",", ":"))])]
 
 
 def battle_end_reward(battle, state):
@@ -1410,69 +1372,48 @@ def battle_replies(battle, cmd, intargs, strargs, state=None, uid=""):
         # it itself in DoNextState, which either runs to the next wave (state 11,
         # which asks us for cmd 502) or finishes in GameWin.
         result = bt.WAVE_RESULT_WIN if battle.wave_cleared() else bt.WAVE_RESULT_LOSE
+        # A WIPED party on a BOSS stage is reported as a WIN. Read that carefully: the
+        # server still knows it lost -- `battle.wave_cleared()` is False, so
+        # `battle_end_reward` pays no xp, no drops and no ratings -- this changes only
+        # the number in the WaveEnd the CLIENT is told, because that number is what
+        # decides whether the client finishes the fight or hangs.
+        #
+        # Decompiled, in order:
+        #   `TurnEndState.OnWaveEnd` tests `IsBossStage()` -- the stage row's `_book`,
+        #     8 on all 28 Guild Weekly stages -- BEFORE the battle type, and a boss
+        #     stage routes to GameWinState either way, while a story stage routes to
+        #     GameLoseState (which works: verified on the device).
+        #   `GameWinState.ShowBattleResult` calls `ServerRPCBattleEnd`, which CLEARS
+        #     `PlayerBattle+0xA0` (`CBNZ W20; STRB WZR,[X19,#0xA0]`) and only actually
+        #     sends 505 when `BattleType == 0 && BattleResultType == 1`, i.e. on a win.
+        #   `PanelBattleResult`'s `ShowResultPageInAnimation` coroutine parks on that
+        #     same byte (`LDRB W8,[X0,#0xA0]; CBZ W8`) and never plays `_ResultTween`,
+        #     so `PtRewardCb` never runs, so `isSkipEnabled` stays 0, and
+        #     `OnClickNextStep` -- whose whole body is inside `if (isSkipEnabled)` --
+        #     does nothing. The panel shows, the Record numbers fill in, and the tap is
+        #     dead. Reported from a device three times.
+        #
+        # Nothing the server sends can restore that byte: `HandleEndReward` writes only
+        # `+0x68`/`+0x70`, and `HandleWaveEnd` only `BattleResultType` at `+0xA8`. The
+        # single lever we have is `BattleResultType`, and setting it to 1 makes the
+        # client run its own 505 round-trip -- the path logged working on guild stages
+        # 1000025 and 1000027 -- which settles, animates and releases the tap.
+        #
+        # The banner does not lie either way: "BATTLE ENDS!" is what a guild VICTORY
+        # shows too, confirmed from the player's own footage. There is no victory
+        # screen being faked here.
+        if (result == bt.WAVE_RESULT_LOSE
+                and (battle.stage or {}).get("_book") == BOSS_BOOK):
+            log("    -> boss-stage wipe reported as WAVE_RESULT_WIN so the client "
+                "runs its own battle-end; the server still scores it as a loss")
+            result = bt.WAVE_RESULT_WIN
         # AVG ids: [2] is played by RushState during the run to the next room,
         # [3] after the battle, [4] is the next wave's pre-fight scene.
-        end_msgs = []
         next_avg = battle.avg(battle.interlude_avgs)
         end_avg = battle.avg(battle.after_avgs)
         start_avg = battle.avg(battle.before_avgs, battle.wave + 1)
         log(f"    -> wave {battle.wave}/{battle.wave_max} result {result} "
             f"avg next={next_avg} end={end_avg} start={start_avg}")
-        # A LOST fight is settled HERE, because the client will never ask us to.
-        # Decompiled 2026-09-13: `GameLoseState.OnEnter` dispatches BattleEvent 4, plays
-        # a defeat voice line and calls `DoLoserShow`, which closes the menu, restores
-        # the timescale and switches on a defeat panel. `QuitBattle` then clears the
-        # battle cache and leaves the sub-scene. NOTHING on that path sends anything to
-        # the server -- `ServerRPCBattleEnd` is reached only from the WIN state.
-        #
-        # So `battle_end_reward` -- and with it `finish_challenge` -- ran on wins only,
-        # and the saved battle stayed on the account after the client had already
-        # abandoned it, leaving the next login to offer a rejoin into a finished fight.
-        #
-        # Nobody had seen this because nobody had ever lost: 82 wave results in the
-        # device's whole log history, every one of them `result 1`. The party was
-        # unkillable until the alive-count and sentence-scoped gates landed, and the
-        # first real defeat hung the game.
-        #
-        # The Guild Weekly is a DAMAGE RACE -- `battle_end_reward`'s own comment says a
-        # boss you cannot kill still scores -- so a wipe must bank its damage. No
-        # messages are sent: the client is not waiting for any.
-        if result == bt.WAVE_RESULT_LOSE and state is not None:
-            end_msgs = []
-            # DEFERRED to the next request the client makes. Sending these alongside
-            # CMD_WAVE_END loses a race: the client handles our EndReward first and
-            # `HandleEndReward` marks the battle end ready, THEN processes the wave end,
-            # enters `GameWinState.ShowBattleResult`, and `ServerRPCBattleEnd` clears
-            # that flag again (`if (!runeSel) IsBattleEndReady = 0`).
-            #
-            # `ShowResultPageInAnimation`'s coroutine tests the flag before it plays the
-            # `_ResultTween`, parks when it is false, and only the tween's finished
-            # callback (`PtRewardCb` and friends) ever sets `isSkipEnabled = 1`. With the
-            # flag cleared after the fact the coroutine waits forever: the panel has its
-            # data -- the Record numbers appeared -- and the tap stays dead, which is
-            # exactly what was reported twice.
-            #
-            # One request later the client has already entered the state and cleared the
-            # flag, so our reply sets it and the animation runs.
-            battle.pending_end_msgs = _boss_loss_result_msgs(battle, state)
-            if ps.is_challenge_stage(battle.stage_id):
-                dmg, bonus, total, payouts = ps.finish_challenge(
-                    state, battle.damage_sum)
-                log(f"    -> guild weekly settled on DEFEAT: "
-                    f"{dmg} + {bonus} bonus = {total}")
-                # The Guild page of the result panel -- "Total Damage / Bonus / Total
-                # Score". EXACTLY three ints: ChallengeBattleRewardReply tests
-                # intargs.Count == 3 and drops the whole reply otherwise. The win path
-                # has always sent this; the defeat path settled the score and then never
-                # told the client, so the page had nothing to draw. A guild attempt is
-                # supposed to show this screen whether it was won or lost.
-                end_msgs.append(sint_msg(CHALLENGE_CLIENT, CHALLENGE_RPLY_BATTLE_END,
-                                         [dmg, bonus, total], []))
-                if payouts:
-                    end_msgs.append(sint_msg(0xBC8FDA7C, 512, [],
-                                             [ps.currency_json(state)]))
-            ps.clear_battle(state)
-            ps.save(state)
         return [battle_msg(bt.CMD_WAVE_END,
                            [result, battle.wave, next_avg, end_avg, start_avg],
                            # BtCollector -- the per-unit damage table behind the
@@ -1480,7 +1421,7 @@ def battle_replies(battle, cmd, intargs, strargs, state=None, uid=""):
                            # wave cleanly but leaves AllDamageList empty, and
                            # PanelBattleRecord indexes it unguarded, so the button
                            # threw ArgumentOutOfRange and appeared dead.
-                           [battle.collector_json()])] + end_msgs
+                           [battle.collector_json()])]
     if cmd == bt.REQ_NEXT_WAVE:
         battle.advance_wave()
         log(f"    -> next wave {battle.wave}/{battle.wave_max}: "
@@ -3938,19 +3879,6 @@ def handle(conn, addr):
                     last_rpc = (index, cmd, intargs, strargs)
                     log(f"    RPC index={index:#010x} cmd={cmd} id={rid} "
                         f"int={intargs} str={strargs}")
-                    # A boss defeat's result payload rides out on the request AFTER
-                    # the wave end -- see `_boss_loss_result_msgs`. It has to be any
-                    # request, not a battle-channel one: once the fight is over the
-                    # client sends nothing on that channel at all, only heartbeats and
-                    # chat polls, so a battle-only flush would never fire.
-                    pending = getattr(cx.battle, "pending_end_msgs", None) \
-                        if cx.battle else None
-                    if pending:
-                        cx.battle.pending_end_msgs = []
-                        log(f"    -> flushing {len(pending)} deferred battle-end "
-                            f"message(s) behind cmd {cmd}")
-                        for body in pending:
-                            send(MSG_RPC, body)
                     handler = HANDLERS.get((index, cmd))
                     if handler is not None:
                         # Registered subsystems answer from the table (see HANDLERS);
