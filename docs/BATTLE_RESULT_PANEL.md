@@ -156,22 +156,49 @@ Since every step of section 1 should then fire, the break is at step 1's bail:
 If `DeserializeObject<BattleReward>` yields null, no StageEvent is dispatched, the flag
 is never set, and both coroutines park. That is server-side and testable.
 
-**The leading hypothesis** is therefore the payload, but not in the way three earlier
-attempts assumed: not a missing field, but a payload the deserialiser rejects or that
-produces an object the client then cannot use. The loss reply differs from a working win
-reply in exactly one respect -- `item_list`, `bar_list` and `rating_list` are all empty,
-because a defeat earns nothing.
+### The payload is NOT the problem -- settled 2026-09-19
 
-Next steps, in order:
+The obvious suspicion was the payload, since the loss reply differs from a working win
+reply in exactly three fields, all empty-versus-populated:
 
-1. Capture the exact cmd 23 payload bytes of a guild WIN (works) and a guild LOSS
-   (hangs) and diff them. The win payload is in the device logs already.
-2. If the only difference is empty lists, test a loss reply carrying a minimal non-empty
-   `item_list`. Note this must not GRANT anything -- display only, and a defeat showing
-   phantom prizes is its own bug, so prefer whatever the smallest accepted shape is.
-3. Only if that fails, look at whether `GameWinState.OnBattleEnd` is subscribed on this
-   path. `GameWinState` has no registration method of its own; the subscription lives in
-   `StateBase` or the state machine.
+    WIN   item_list=[[1,101,2]]  bar_list=5 rows  rating_list=[0,0,0,0]
+    LOSS  item_list=[]           bar_list=0 rows  rating_list=[]
+
+`BattleReward` is `[JsonObject]` with ONE constructor and no default:
+
+    public BattleReward(List<List<int>> item_list, params int[] caseParamsToOverride)
+
+and `items` carries NO `[JsonProperty]`, so it cannot come from JSON -- it can only be
+built inside that constructor. So "what does the ctor do with an empty item_list" was
+the precise question. Decompiled (`BattleReward$$.ctor`, 0x1685f3c), it is fully
+defensive:
+
+    itembonusList = new List<int>()          all four allocated unconditionally,
+    barValues     = new List<BarData>()      BEFORE item_list is even looked at
+    ratingList    = new List<int>()
+    items         = new List<RewardData>()
+    if (!item_list) goto end                 a NULL item_list is safe
+    if (size >= 1) { ...loop... }            an EMPTY one just skips the loop
+
+So an all-empty payload deserialises fine, `obj` is non-null, `HandleEndReward` reaches
+its dispatch, and the flag should be set. **Empty lists are exonerated.** Do not spend
+another device run on them.
+
+### What is left
+
+Everything the server sends is now accounted for and correct, so the break is in
+whether the client-side plumbing is live on this path:
+
+1. **Is `GameWinState.OnBattleEnd` subscribed?** It has no registration method of its
+   own and `OnEnter` does not register it, so the subscription is in `StateBase` or the
+   state machine. Note there are FOUR identical 0x5c `OnBattleEnd` variants on
+   GameWinState (0x1969cf0, _26647884, _26647976, _26648068), which suggests several
+   dispatchers or generic instantiations -- possibly only one of which is wired up.
+2. **Is `coInitResultData` ever started?** `SetResultData` is only reached from that
+   coroutine. Something must `RunCoroutine` it; if that call sits on a branch we do not
+   reach, the poll never runs at all and no payload could help.
+
+Both are answerable from the binary, offline, without spending a Guild Weekly pass.
 
 ### Four wrong fixes, and why each was wrong
 
