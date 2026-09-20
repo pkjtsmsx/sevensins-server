@@ -1069,6 +1069,37 @@ def grant_goods(state, item_id, amount, rng=None):
     return [], item_id, amount
 
 
+def goods_resolvable(state, item_id):
+    """-> True when grant_goods would route this id somewhere REAL rather than the bag.
+
+    The rescue sweep in core.load asks this before re-granting a bagged row: calling
+    grant_goods on something that falls through to grant_item would put the row
+    straight back in the bag and the sweep would rewrite the save on every load.
+    """
+    item_id = int(item_id)
+    row = bt.dd.row("item", item_id) or {}
+    action = row.get("_action")
+    from .quests import char_reward_of          # local: quests imports core, not us
+    if action == 1:
+        return bool(char_reward_of(item_id))
+    if action == SELECTOR_ACTION:
+        return bool(selector_pool(item_id))
+    if action == 2:
+        from .core import soulmirror_box_items  # local: core imports shop lazily
+        return bool(BUNDLE_PAYOUT.get(item_id)
+                    or (item_id in RUNE_BUNDLES
+                        and rune_bundle_pool(*RUNE_BUNDLES[item_id]))
+                    or (item_id in CHAR_ORB_BUNDLES
+                        and awaker_pool(*CHAR_ORB_BUNDLES[item_id]))
+                    or (random_rune_box(item_id)
+                        and rune_star_suit_pool(*random_rune_box(item_id)))
+                    or (starshard_any_suit_box(item_id)
+                        and rune_any_suit_pool(*starshard_any_suit_box(item_id)))
+                    or soulmirror_box_items(item_id)
+                    or char_reward_of(item_id))
+    return False
+
+
 def goods_reward(state, goods_id, count):
     """-> (item id, total count) for reply 513's intargs[2:4], the "you received" popup.
 

@@ -397,6 +397,31 @@ def _refill_passes(state):
     return True
 
 
+def _rescue_bagged_rewards(st):
+    """Re-route bag rows the client can never see. -> True if anything moved.
+
+    Before grant_reward learned to route casts, Bunrei, skill books, Grimoires and
+    the Set/Selector/orb boxes, every path except the storefront filed them into
+    Normal storage -- where `GetItemSpace` cannot place them, so they persist in the
+    save and never render in-game ("anything that isn't a material is lost", as the
+    save-editor report put it; the Grimoire report is the same rows). The routing fix
+    only helps NEW grants; this sweep repairs what old grants and old save edits
+    already banked, at load, through the same `shop.grant_goods` path the storefront
+    uses. `goods_resolvable` gates it so an id grant_goods would bounce back to the
+    bag is left alone rather than rewriting the save on every load.
+    """
+    bag = (st.get("backpack") or {}).get(str(BP_STORAGE_NORMAL)) or {}
+    from . import shop                          # local: shop imports core
+    stuck = [(slot, rec) for slot, rec in bag.items()
+             if shop.goods_resolvable(st, rec.get("iid") or 0)]
+    for slot, rec in stuck:
+        # Delete FIRST: grant_goods can legitimately bag a sub-line (a selector line
+        # that is a plain item), and that new row must survive the sweep.
+        del bag[slot]
+        shop.grant_goods(st, int(rec["iid"]), max(1, int(rec.get("amount") or 1)))
+    return bool(stuck)
+
+
 def load(player_id):
     os.makedirs(STATE_DIR, exist_ok=True)
     p = path_for(player_id)
@@ -409,7 +434,7 @@ def load(player_id):
                 for k, v in _default(player_id).items():
                     st.setdefault(k, v)
                 if (_seed_roster(st) | _clamp_roster_stars(st) | _refill_passes(st)
-                        | _purge_orphan_sp_quests(st)):
+                        | _purge_orphan_sp_quests(st) | _rescue_bagged_rewards(st)):
                     _save_locked(st)
                 return st
             except Exception:

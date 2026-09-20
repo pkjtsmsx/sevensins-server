@@ -68,6 +68,21 @@ Three user reports, all real, all fixed — thank you:
   rows that look shard-shaped to a filter; they were in the any-element bag's pool
   and are now excluded.
 
+## Lost rewards come back (second hotfix)
+
+Two more reports, one cause. Grimoires of Sin/Virtue/Rider (and ★N Awaker/Minion
+Grimoires) never showed up anywhere, and nothing added through the save editor except
+plain materials ever appeared in-game. Both were rows the game's bag literally cannot
+display — casts, Bunrei, skill books, Grimoires and reward boxes filed as bag items.
+
+- **Everything of that kind you were ever granted is recovered automatically** the
+  next time the server loads your save: Grimoires and cast items move to your Cast
+  List (Grimoires are skill-up material "casts" — that is where the skill-up screen
+  reads them from), starshard bags roll into real shards, Soulmirror Sets open into
+  mirrors. Nothing was ever deleted; it was parked where you could not see it.
+- The **save editor** now grants these through the game's own reward path instead of
+  the bag, so future edits arrive properly too.
+
 ## Rewards go where you can see them
 
 - Casts, Bunrei and skill books from **mail, roulette, guild payouts and event

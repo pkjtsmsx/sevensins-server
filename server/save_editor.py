@@ -503,11 +503,16 @@ def _instance_storage(iid):
     encodes the same rule for deciding which sync to push, so ask it rather than
     re-deriving the action ranges here.
     """
-    if ps.item_bucket(iid) != "equipment":
-        return None
     action = (dd.row("item", iid) or {}).get("_action")
-    return (str(ps.BP_STORAGE_SOULFRAG)
-            if action in ps.SOULFRAG_SLOT_INDEX else str(ps.BP_STORAGE_EQUIPMENT))
+    # By ACTION, not by item_bucket: a Set/Selector BOX also buckets as "equipment"
+    # now that grant_reward can open one, but a box is not an instance -- it rolls
+    # real pieces through the game's own path and is exactly what the refusal below
+    # tells players to use. Only the instance rows themselves are refused.
+    if action in ps.SOULFRAG_SLOT_INDEX:
+        return str(ps.BP_STORAGE_SOULFRAG)
+    if action in ps.RUNE_ACTION_RANGE:
+        return str(ps.BP_STORAGE_EQUIPMENT)
+    return None
 
 
 def _set_instances(state, iid, want):
@@ -545,11 +550,30 @@ def _set_item(state, row):
     by item id.
 
     Starshards and Soulmirrors are the exception and are handled as instances.
+
+    **Anything the BAG cannot hold is granted through the game's own path instead.**
+    Filing a cast item, a Bunrei, a skill book, a luckybag, a Set/Selector or an
+    Awaker orb into a backpack slot writes a row `GetItemSpace` cannot place: it
+    persists in the save and never appears in-game -- "anything that isn't a material
+    is lost", as the report put it. `shop.grant_goods` is the routing the storefront
+    already uses (casts to the roster, boxes rolled into real shards or mirrors, orbs
+    into casts), and rolling through it is also what the instance-refusal below tells
+    the player to do. Semantics shift with it, deliberately: for these rows `amount`
+    means "grant this many NOW", not "set the stack to N", because a roster or an
+    instance storage is not a stack -- and 0 is a no-op, since a grant cannot be
+    taken back here.
     """
     iid = int(row["iid"])
     if _instance_storage(iid):
         # Refuses. Reached only if a caller hand-posts an id the search hides.
         return _set_instances(state, iid, row.get("amount", 0))
+    action = (dd.row("item", iid) or {}).get("_action")
+    if action in (1, 2, 7) or ps.item_bucket(iid) != "backpack":
+        n = _clamp(int(row.get("amount", 0)), 0, 100)
+        if n:
+            from player_state import shop as _shop
+            _shop.grant_goods(state, iid, n)
+        return
     amount = _clamp(int(row.get("amount", 0)), 0, 999_999)
     storage = str(row.get("storage") or "1")
     bp = state.setdefault("backpack", {}).setdefault(storage, {})
