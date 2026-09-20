@@ -118,9 +118,11 @@ def char_reward_of(item_id):
         return None
     m = _STAR_PREFIX.match(name)
     if not m:
-        # 10 of the 710 carry no ★N; fall back to the cast's own rarity rather than
-        # dropping the reward on the floor.
-        star = int((bt.dd.row("char", char_id) or {}).get("_rarity") or 1)
+        # 10 of the 710 carry no ★N; fall back to the star the cast enters play at
+        # rather than dropping the reward on the floor. Through CharRareMinStar, NOT
+        # the raw `_rarity`: the rarity number is a tier, not a rung, and using it
+        # directly handed out a *4 copy of a cast the gacha grants at *5.
+        star = bt._default_star(bt.dd.row("char", char_id) or {})
     else:
         star = int(m.group(1))
     return int(char_id), star, int(item_id)

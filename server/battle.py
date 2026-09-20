@@ -1608,6 +1608,24 @@ def soulbook_bonus(book_rank):
             "hp": row.get("_hp", 0)}
 
 
+# The client's own rarity -> minimum star table: Game.Player.Char.CharRareMinStar,
+# N = 1, R = 3, SR = 4, SSR = 5, LE = 5 (verified in the 2.2.7 dump). `_rarity` is the
+# tier number, 1 = N up to 5 = LE, which is how gacha.py already buckets its pools.
+#
+# THIS USED TO BE `star <= rarity` -- the rarity number reused as a rung index -- and
+# that is one rung LOW for the two tiers where the table is not the identity: an SSR
+# Awaker entered play at *4 instead of *5, an SR cast at *3 instead of *4. A whole
+# growth rung of HP/ATK/DEF/SPD missing, and it disagreed with the gacha, which grants
+# by bucket: the same Awaker was *5 from a pull and *4 from a shard exchange or a quest
+# reward. (Contributed fix, UserContrib rarity-star-mapping.)
+RARITY_MIN_STAR = {1: 1, 2: 3, 3: 4, 4: 5, 5: 5}
+
+
+def rarity_min_star(char_row):
+    """-> the star a cast of this rarity enters play at (CharRareMinStar)."""
+    return RARITY_MIN_STAR.get(int(char_row.get("_rarity") or 1), 1)
+
+
 def _default_star(char_row):
     """Characters enter play at the star tier matching their rarity -- the star
     ladder is steep (1* Leviathan is 194 HP / 52 ATK, 5* is 795 / 215), so building
@@ -1620,8 +1638,7 @@ def _default_star(char_row):
     valid = [i + 1 for i, g in enumerate(raw) if g]
     if not valid:
         return 1
-    rarity = char_row.get("_rarity") or 1
-    allowed = [s for s in valid if s <= rarity]
+    allowed = [s for s in valid if s <= rarity_min_star(char_row)]
     return max(allowed) if allowed else min(valid)
 
 
