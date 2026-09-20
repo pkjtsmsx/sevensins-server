@@ -353,7 +353,16 @@ def give_gifts(state, char_id, pairs):
     One feed can cross SEVERAL Karma ranks at once, and every rank crossed pays -- see
     core.karma_rank_rewards, which collects the whole open range rather than just the
     rank landed on."""
-    wanted = [(int(i), int(n)) for i, n in pairs if n > 0]
+    # MERGE DUPLICATE ITEM IDS FIRST. The panel can send the same gift on two lines of
+    # one RequestGift, and each line was then checked against the FULL held amount on
+    # its own: holding 150 of a gift, lines of 100 and 100 both passed `has_item`, the
+    # first spend took 100 and the second silently failed. Karma paid for 200, 100
+    # eaten. (Contributed fix.)
+    merged = {}
+    for i, n in pairs:
+        if int(n) > 0:
+            merged[int(i)] = merged.get(int(i), 0) + int(n)
+    wanted = sorted(merged.items())
     if not wanted:
         return False, 0, [], []
     if len(wanted) > MAX_RECIEVE_GIFT_TYPE_NUM:
@@ -366,8 +375,11 @@ def give_gifts(state, char_id, pairs):
     total = sum(gift_karma_xp(char_id, i, n) for i, n in wanted)
     if total <= 0:
         return False, 0, [], []
+    # Consume BEFORE paying out, and bail if a deduction fails rather than handing out
+    # karma for gifts still in the bag. The return value used to be dropped.
     for item_id, n in wanted:
-        spend_item(state, item_id, n)
+        if not spend_item(state, item_id, n):
+            return False, 0, [], []
     # A gift can cross a Karma rank, and those ranks PAY (see core.karma_rank_rewards).
     # The paid lines ride back so the caller can push the syncs they landed in.
     karma = grant_karma(state, char_id, total)

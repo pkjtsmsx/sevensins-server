@@ -455,8 +455,27 @@ def check_decision_grades():
     check("the knob defaults to retail amounts", karma.karma_reward(21601, 0)[1] == 15)
 
 
+def check_split_stacks_spend_whole():
+    """A split stack must spend across slots -- the single-slot bug gave items free."""
+    st = ps.load(1000031)
+    bag = st["backpack"].setdefault(str(ps.BP_STORAGE_NORMAL), {})
+    bag.clear()
+    # the split only ever comes from an outside writer, so build it by hand
+    bag["7"] = {"iid": 424242, "amount": 100}
+    bag["9"] = {"iid": 424242, "amount": 50}
+    check("has_item sees the split total", ps.has_item(st, 424242, 150))
+    check("spend refuses more than the total", not ps.spend_item(st, 424242, 151))
+    check("  ...and deducts nothing on refusal",
+          ps.item_count(st, 424242) == 150, str(ps.item_count(st, 424242)))
+    check("spend drains across the slots", ps.spend_item(st, 424242, 120))
+    check("  ...leaving the remainder", ps.item_count(st, 424242) == 30,
+          str(ps.item_count(st, 424242)))
+    check("  ...and empties drained slots", "7" not in bag, str(sorted(bag)))
+
+
 def main():
-    for fn in (check_table_matches_the_screenshot, check_a_single_rank_up_pays_once,
+    for fn in (check_split_stacks_spend_whole,
+               check_table_matches_the_screenshot, check_a_single_rank_up_pays_once,
                check_multi_rank_pays_every_rank_crossed, check_no_rank_up_pays_nothing,
                check_the_payout_is_pushed, check_gifts_report_the_bonus,
                check_the_rank_up_splash_is_triggered,

@@ -1795,14 +1795,37 @@ def spend_cost(state, item_id, amount):
 
 
 def spend_item(state, item_id, amount, cbp_type=BP_STORAGE_NORMAL):
-    """Deduct items; returns True if the player had enough."""
+    """Deduct items; returns True if the player had enough.
+
+    DRAINS ACROSS EVERY SLOT holding the item, which is what `item_count` (and so
+    `has_item`) has always counted. This used to read the FIRST matching slot only and
+    give up if that one stack was short -- so with the same item split over two slots,
+    the has_item check passed on the total and the deduction then did nothing,
+    silently. Most callers ignore the return value, so the item stayed in the bag and
+    the player got the purchase for free: karma gifts fed but not eaten, rank-up gems,
+    gear materials, challenge passes. (Contributed fix; verified against this tree.)
+
+    `grant_item` merges into one slot, so a split only happens on a save written by
+    something else -- the editor, an older format, a hand-edited file -- but that is
+    exactly the state a preservation server keeps meeting.
+
+    Nothing is deducted unless the whole amount is available: a partial spend is worse
+    than a refusal.
+    """
+    amount = int(amount)
+    if amount <= 0:
+        return True
     bag = state["backpack"].get(str(cbp_type), {})
-    for slot, entry in list(bag.items()):
-        if entry.get("iid") == item_id:
-            if entry.get("amount", 0) < amount:
-                return False
-            entry["amount"] -= amount
-            if entry["amount"] <= 0:
-                del bag[slot]
-            return True
-    return False
+    slots = [(slot, e) for slot, e in bag.items() if e.get("iid") == item_id]
+    if sum(int(e.get("amount", 0)) for _s, e in slots) < amount:
+        return False
+    left = amount
+    for slot, entry in slots:
+        take = min(int(entry.get("amount", 0)), left)
+        entry["amount"] = int(entry.get("amount", 0)) - take
+        left -= take
+        if entry["amount"] <= 0:
+            del bag[slot]
+        if left <= 0:
+            break
+    return True
