@@ -79,13 +79,15 @@ server/battle_data/statuses.json
 
 # Generated artifacts that quote the game's own text verbatim -- skill_effects.json keeps
 # unmatched clauses in `unparsed`, status_catalog.json keeps each status's description in
-# `raw`, and avg_decisions.json holds scene dialogue. Nothing in server/ reads any of them
-# at runtime; regenerate with tools/parse_skills.py, tools/extract_status_catalog.py and
-# tools/avg_decisions.py --json. Their durable conclusions are already baked into code
+# `raw`, and avg_decisions.json / avg_text.json hold scene dialogue (the latter is the
+# whole script, 47k lines). Nothing in server/ reads any of them at runtime; regenerate
+# with tools/parse_skills.py, tools/extract_status_catalog.py, tools/avg_decisions.py
+# --json and tools/avg_text.py. Their durable conclusions are already baked into code
 # (karma.py's KARMA_DECISION_TIER, for one).
 server/battle_data/skill_effects.json
 server/battle_data/status_catalog.json
 docs/avg_decisions.json
+docs/avg_text.json
 
 # The legacy proxy leaf cert is a symlink into the ignored certs/ dir and its target
 # carries a PRIVATE KEY (load_cert_chain needs one). Generate it locally; never commit it.
