@@ -259,3 +259,39 @@ The compile line reports these every run; they are not fixed, they are now count
 - **788 value conflicts** (heal 252, gauge 416, cd 120, revive 25) where an opcode and
   the clause it claimed state different numbers. The opcode wins, per CLAUDE.md §1.
   Nobody has read a sample of these.
+
+
+## Settled 2026-09-20: status magnitudes are PER-APPLYING-SKILL, not per-status
+
+Raised by the guardsurge contribution (per-status constants for 37 statuses) and
+settled from the pack's own structure -- the binary holds nothing: a status row
+(e.g. 8087 防禦高揚II) has `_action`/`_actID` all zero, no numeric field, and the
+applying skill's whole effect is `_action:[112,...] _actID:[8087,...]` -- opcode plus
+terminal id. There is no magnitude parameter anywhere in the client data. The prose is
+the only surviving value store, and there are TWO prose sources that disagree on 18 of
+the 77 Surge-linking skills (23%):
+
+  * the TERMINAL row's self-description  ("防禦高揚II：常時防禦+20%")
+  * the PARENT skill's own family line   ("防禦高揚：常時防禦+10%")
+
+Three structural facts pick the parent:
+
+  1. Prefect Team I/II/III all link the SAME terminal (速度高揚I, 4%) while their own
+     prose ladders 20/30/40%. A per-status constant makes the rank ladder meaningless.
+  2. The bloodpact variant 153005631 has `_actID` IDENTICAL to plain Lazy Ode I
+     (1003131) -- the rows differ in nothing but id, group and prose -- yet states +30%
+     where plain states +10%. Per-status semantics would make the enhanced variant
+     functionally identical to the plain skill.
+  3. The newer 152/153-series keep getting fresh prose ladders while the terminal tier
+     rows were never extended past IV: design attention lives in the parent lines.
+
+So: the terminal row is IDENTITY (name, icon, unremovability); the parent's prose line
+naming that family is the VALUE, per skill, per rank. Where no parent line exists
+(8 of the 77), the terminal's self-description is the only statement left and is the
+correct fallback -- that narrow slice is where the contribution's table is right.
+
+**The general gap is 757 apply_status effects** whose compiled magnitude is null while
+the parent prose states a family-named % line (measured across every compiled skill).
+The fix belongs in `tools/compile_skills.py` -- extract the parent's family line the
+same way ※-footnotes already are (`source: skill_zh`) -- NOT in a per-status lookup.
+Blast radius is every fight; fuzz + A/B per section 7 of CLAUDE.md before shipping.
