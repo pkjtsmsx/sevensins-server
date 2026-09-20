@@ -883,6 +883,15 @@ def gauge_effect(r):
 _PCT_ANY = re.compile(r"(\d+(?:\.\d+)?)\s*%")
 
 _COEF = re.compile(r"(\d+(?:\.\d+)?)\s*[%％]\s*(?:of\s+)?(ATK|DEF|Max HP|HP)", re.I)
+# The canonical attack sentence ("Deals 350% ATK as damage ...").
+_COEF_DEAL = re.compile(
+    r"deals?\s+(\d+(?:\.\d+)?)\s*[%％]\s*(?:of\s+)?(ATK|DEF|Max HP|HP)\b[^.;\n]*?damage",
+    re.I)
+# Counters ("strike back by 80% ATK", "strikes back by 130% of the caster's DEF").
+_COEF_COUNTER = re.compile(
+    r"strikes?\s+back\s+(?:by|with)\s+(\d+(?:\.\d+)?)\s*[%％]\s*"
+    r"(?:of\s+)?(?:the\s+caster's\s+)?(ATK|DEF|Max HP|HP)",
+    re.I)
 # Chinese writes it either way round: `攻擊力95%` or `95%攻擊力`.
 # `％` (full-width) as well as `%`: "360％防禦力的傷害" is how every rank of Sweets
 # Sweet Heart is written, and with `%` alone the whole family compiled to a damage
@@ -1086,6 +1095,17 @@ def zh_inline_shield(r):
     return None
 
 
+def _strip_zh_tier(key):
+    """Drop a trailing roman-numeral tier from a normalized ZH status name.
+
+    防禦高揚II -> 防禦高揚; returns None when nothing was stripped (so callers can
+    tell "already tierless" from "tier removed" and avoid pointless retries)."""
+    if not key:
+        return None
+    out = re.sub(r"[IVXⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+$", "", key)
+    return out if out and out != key else key
+
+
 def status_numbers(rows, skill_row, status_id):
     """-> the duration/magnitude for THIS skill applying THIS status, with provenance.
 
@@ -1111,6 +1131,26 @@ def status_numbers(rows, skill_row, status_id):
             got = sp.parse_zh(zh_lines[zh_key])
             got["source"] = "skill_zh"
             return got
+        # TIER-STRIPPED retry. The magnitude is PER-APPLYING-SKILL, not per-status:
+        # Lazy Ode I..VI write "防禦高揚：常時防禦+10/12/15/20/30/30%" while linking
+        # terminal rows II/III/III/III/IV/IV, and the bloodpact variant is row-identical
+        # to the plain skill except for stating +30% -- so the parent's own family line
+        # is the value and the terminal's tier is identity (docs/SKILLS_ROADMAP.md,
+        # "Settled 2026-09-20"). The line is usually written TIERLESS (or with its own
+        # rank's tier), so the exact join above misses it. Strip trailing roman-numeral
+        # tiers from both sides; on a stripped-key collision inside one note, refuse to
+        # guess rather than pick a line.
+        stripped = _strip_zh_tier(zh_key)
+        if stripped:
+            cands = {}
+            for k, v in zh_lines.items():
+                sk_ = _strip_zh_tier(k) or k
+                cands.setdefault(sk_, []).append(v)
+            bodies = cands.get(stripped)
+            if bodies and len(bodies) == 1:
+                got = sp.parse_zh(bodies[0])
+                got["source"] = "skill_zh_family"
+                return got
         own_zh = cast_glossary_zh(rows).get(skill_row.get("_id") or 0, {})
         if zh_key in own_zh:
             got = sp.parse_zh(own_zh[zh_key])
@@ -2388,7 +2428,20 @@ def damage(r, targets_enemy):
                 The engine must apply a default and know that it did.
     """
     note_en = r.get("_note1_en") or ""
-    m = _COEF.search(note_en)
+    # ANCHORED patterns first, bare first-percentage LAST. The first `N% STAT` in the
+    # note is not always the damage: Eternal Dream IV's note opens with "restore 50% HP
+    # to the caster" and its counter ("strike back by 80% ATK") comes third, so the
+    # counter compiled as 50% of HP -- wrong number, wrong stat, the real 80% ATK
+    # dropped. Found by checking a contributed counter table against the compiled
+    # specs: 9 of its 80 rows disagreed, and all 9 were this shape.
+    #
+    # NOT fixed by heal-stripping the note (the ZH branch's trick): "Deals 360% ATK as
+    # damage and restores the caster's Max HP by 30%" has no comma, so the strip eats
+    # the real coefficient with the heal and the match slides to a rider's 200% -- an
+    # A/B over all 14,410 skills showed 97 rows moving, most of them wrong. Anchoring
+    # on the verb changes exactly the counter-shaped rows and nothing else.
+    m = (_COEF_DEAL.search(note_en) or _COEF_COUNTER.search(note_en)
+         or _COEF.search(note_en))
     basis, coef, source = None, None, None
     if m:
         basis = m.group(2).upper().replace(" ", "_")
@@ -2675,7 +2728,13 @@ def _passive_clauses(note):
 # suppressed the implicit-trait default for the two traits that boss does carry.
 _PASSIVE_EFFECT_WORD = dict(EFFECT_WORD)
 _PASSIVE_EFFECT_WORD["remove_status"] = re.compile(r"\bremoves?\b|移除|解除", re.I)
-_PASSIVE_EFFECT_WORD["damage"] = re.compile(r"\bdeals?\b[^,.;]{0,20}damage|造成.{0,6}傷害", re.I)
+# "strike back"/回擊/反擊 belong here too: a counter clause names its damage with the
+# counter verb, never with "deals ... damage", so every counter whose EN was phrased
+# that way ("Counter Strike III: When taking damage, strike back by 80% ATK") had its
+# damage effect deferred as unnamed -- no clause, no trigger, no rule. That includes
+# Belphegor's Deflection: the engine's on_damage_taken branch never saw it.
+_PASSIVE_EFFECT_WORD["damage"] = re.compile(
+    r"\bdeals?\b[^,.;]{0,20}damage|造成.{0,6}傷害|strikes?\s+back|回擊|反擊", re.I)
 _PASSIVE_EFFECT_WORD["modify_cd"] = re.compile(r"cooldown|冷卻", re.I)
 
 

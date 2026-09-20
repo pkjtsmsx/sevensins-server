@@ -217,18 +217,24 @@ def glossary_lines_zh(note):
     out = {}
     if not note:
         return out
+    # PLAIN `名稱：body` LINES FIRST, ※ entries second so a ※ line wins its key. A note
+    # that has ※ footnotes can still carry passive family lines above them ("防禦高揚：
+    # 常時防禦+20%" and then ※ definitions of something else), and the early return
+    # that used to sit on the ※ branch made every such line invisible -- a passive's
+    # granted stat mod compiled with no magnitude purely because an unrelated footnote
+    # existed in the same note.
+    body = note.split("※", 1)[0] if "※" in note else note
+    for line in body.split("\n"):
+        flat = " ".join(line.split())
+        m = re.match(r"^(.{1,20}?)\s*[：:]\s*(.+)$", flat)
+        if m and not re.search(r"\d+\s*[%％]", m.group(1)):
+            out[m.group(1).strip()] = m.group(2).strip()
     if "※" in note:
         for part in re.split(r"※\s*", note)[1:]:
             flat = " ".join(part.split())
             m = re.match(r"^(.{1,40}?)\s*[：:]\s*(.+)$", flat)
             if m:
                 out[m.group(1).strip()] = m.group(2).strip()
-        return out
-    for line in note.split("\n"):
-        flat = " ".join(line.split())
-        m = re.match(r"^(.{1,20}?)\s*[：:]\s*(.+)$", flat)
-        if m and not re.search(r"\d+\s*[%％]", m.group(1)):
-            out[m.group(1).strip()] = m.group(2).strip()
     return out
 
 

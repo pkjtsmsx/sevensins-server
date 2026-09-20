@@ -294,4 +294,28 @@ correct fallback -- that narrow slice is where the contribution's table is right
 the parent prose states a family-named % line (measured across every compiled skill).
 The fix belongs in `tools/compile_skills.py` -- extract the parent's family line the
 same way ※-footnotes already are (`source: skill_zh`) -- NOT in a per-status lookup.
-Blast radius is every fight; fuzz + A/B per section 7 of CLAUDE.md before shipping.
+
+**Built 2026-09-20**, three compiler changes, each A/B'd over all 14,410 skills:
+
+  1. `damage()` tries ANCHORED patterns first (`Deals N% STAT ... damage`, then
+     `strike back by N% [of the caster's] STAT`) before the old first-percentage
+     fallback. Changes exactly 9 rows -- the Eternal Dream/Freeze counters, whose
+     notes open with "restore 50% HP" -- to the values their own counter lines state.
+     (A heal-stripping variant was tried first and REJECTED: it moved 97 rows and
+     broke the no-comma overlap class, "Deals 360% ATK as damage and restores...".)
+  2. `_PASSIVE_EFFECT_WORD["damage"]` also matches strike back/回擊/反擊, so counter
+     clauses claim their damage effect and get a trigger: 42 effects gained
+     `on_damage_taken`, 0 lost, 0 changed. Engine-side counter rules went 38 -> 80
+     across 8 casts -- the contributed counter_table.json's exact numbers, now derived
+     from prose, making that table redundant as its own Note suspected.
+  3. `status_numbers` retries the ZH join with TIER-STRIPPED keys (Lazy Ode's
+     tierless 防禦高揚 line vs terminal 防禦高揚II), refusing multi-candidate
+     collisions; and `glossary_lines_zh` no longer hides a ※-note's plain family
+     lines. Together: 424 apply_status magnitudes gained (254 family, 163 exact,
+     7 cast), 13 changed -- each verified against its own line -- 0 lost. Lazy Ode I
+     compiles to 10% and its bloodpact twin to 30%, the settled per-parent semantics.
+
+516 null-magnitude applications with a family-named % line remain, DELIBERATELY: they
+are behavioural statuses (炎煌 carries 150%/30%/30% meaning three different things) and
+a single extracted number would be the right-effect-wrong-quantity class. They belong
+to status-behaviour modelling, not this extraction.
