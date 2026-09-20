@@ -284,18 +284,25 @@ def starshard_set_items(element, star):
 # only from alignments 103 and 104. Including the ★5 casts made the ★5 orb a Lucifer
 # machine, which is not what the card sells.
 #
-# The star on the item is the star the cast is granted AT, so a ★5 Awaker orb yields a
-# rarity-3/4 awaker raised to ★5 -- which is why these pools look "too low rarity" at
-# first glance and are nonetheless right.
-AWAKER_ALIGNMENTS = (103, 104)
+# **The orb's star is a GRADE, not a granted star.** The card says "Summon a random
+# awaker of ★5 rarity or better", and rarity maps to star through the client's own
+# CharRareMinStar: SSR (rarity 4, alignment 103 -- all 68 of them) IS ★5, SR (rarity 3,
+# alignment 104, the 16 beginner casts) is ★4. Drawing both orbs from both alignments --
+# on the earlier reading that the ★5 on the item was only the star the cast arrives
+# at -- put the 16 SR casts into the ★5 pool, so the ★5 Awaker Orb sold for Mana
+# Crystal and Arena medals paid out a ★4-grade cast that then sits in the Cast List as
+# the 4-star unit it is. Owner-reported; alignment/rarity split verified in char.json.
+AWAKER_ALIGNMENTS = (103, 104)       # both, for anything that wants every awaker
+AWAKER_ALIGNMENTS_5 = (103,)         # SSR -- the ★5 orb
+AWAKER_ALIGNMENTS_4 = (104,)         # SR  -- the ★4 orb
 # **A "Minion" orb summons MINIONS, not casts.** Every ★3 character item belongs to
 # alignment 9001 (mobs) or 905, so pooling the minion orb over the playable alignments
 # found nothing at all -- it would have sold a card that grants silently nothing.
 MINION_ALIGNMENTS = (9001,)
 # item id -> (star to summon at, which alignments it draws from)
 CHAR_ORB_BUNDLES = {
-    212: (5, AWAKER_ALIGNMENTS),
-    211: (4, AWAKER_ALIGNMENTS),
+    212: (5, AWAKER_ALIGNMENTS_5),
+    211: (4, AWAKER_ALIGNMENTS_4),
     210: (3, MINION_ALIGNMENTS),
 }
 
