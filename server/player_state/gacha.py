@@ -14,6 +14,7 @@ from .core import (
     _daily_period,
     add_char,
     bump_quest_counter,
+    grant_reward,
     grant_soulmirror,
     spend_cost,
 )
@@ -505,8 +506,20 @@ def gacha_commit(state):
         if row[0] == GACHA_OBJ_ITEM:
             # Soulmirrors are equipment, not stackable items: one storage-3 entry per
             # copy, rolled with the same attr scheme make_soulmirror uses.
+            #
+            # ONLY A REAL INSTANCE. `grant_soulmirror` files whatever id it is handed
+            # into storage 3, so an Item row that is a Set, a Selector or an ordinary
+            # item became a storage-3 entry the Soulmirror panel cannot draw -- the
+            # pull showed the prize and the inventory never gained it. Anything else
+            # goes through grant_reward, which routes a box to its real mirrors and
+            # an item to the bag.
+            row_def = bt.dd.row("item", int(row[1])) or {}
+            is_instance = row_def.get("_action") in SOULFRAG_ACTION_RANGE
             for _ in range(max(1, int(row[2]))):
-                grant_soulmirror(state, row[1])
+                if is_instance:
+                    grant_soulmirror(state, row[1])
+                else:
+                    grant_reward(state, int(row[1]), 1)
         else:
             add_char(state, row[1], star=row[3])
     state["gacha_count"] = state.get("gacha_count", 0) + 1

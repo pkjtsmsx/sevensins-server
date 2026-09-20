@@ -1103,6 +1103,69 @@ ITEM_ACTION_CURRENCY = 5
 ITEM_ACTION_ENERGY = 6
 
 
+# ---- Soulmirror Sets and Selectors -----------------------------------------------
+# A mirror INSTANCE is `_class 3` with `_action` 101..109; `_param2` is its rank
+# (1 N .. 5 LR), `_param3` the cast it belongs to. A Set or a Selector is a BOX
+# (`_action` 2 / 7) that the bag cannot hold -- `GetItemSpace` files no box -- so
+# granting one showed the reward popup and put a row in Normal storage the player
+# never saw. Owner-reported for an LR Greed (Mammon) mirror. (UserContrib
+# cast-reward-routing, arithmetic re-verified against item.json before taking.)
+#
+# The FIRST series is laid out arithmetically -- each suit owns 15 consecutive
+# instance ids (3 slots x 5 ranks), base mirrors from 400001 and `+` mirrors from
+# 450001; the box's `_param1` is 1004nnn base Set / 1006nnn + Set / 3000nnn base
+# Selector / 3002nnn + Selector with nnn the suit ordinal. Every decoded id is
+# verified against its design row (class, slot action, rank) and the whole box is
+# refused on any mismatch, which is what keeps the arithmetic honest: 256 of the 504
+# boxes in the pack resolve cleanly and grant the right mirrors. The other 248 are
+# the BREAK-SKIN series (instances from 420001/470001, `_param3` pointing at the skin
+# char row) whose suit ordinals do not line up arithmetically -- those fall through
+# to the bag exactly as before, a known limit, not a regression.
+#
+# Owner ruling: a SET pays every slot in its band (I, II, III); a SELECTOR pays one --
+# randomly, the same honest limit shop.grant_goods already takes, because the client
+# has no panel that offers the choice.
+SOULMIRROR_BOX_FAMILIES = {
+    1004: (400001, (101, 102, 103), "set"),
+    1006: (450001, (104, 105, 106), "set"),
+    3000: (400001, (101, 102, 103), "selector"),
+    3002: (450001, (104, 105, 106), "selector"),
+}
+SOULMIRROR_IDS_PER_SUIT = 15          # 3 slots x 5 ranks
+SOULMIRROR_RANKS_PER_SLOT = 5
+SOULMIRROR_BOX_RANK = 5               # every regular Set/Selector in the pack is LR
+SOULMIRROR_SELECTOR_ACTION = 7
+
+
+def soulmirror_box_items(item_id):
+    """-> ([instance item id, ...], "set"|"selector") for a mirror box, else None.
+
+    Every id is verified against the design row it resolves to -- right class, right
+    slot action, right rank -- so an id that does not line up returns nothing rather
+    than granting the wrong mirror."""
+    row = bt.dd.row("item", int(item_id)) or {}
+    if row.get("_action") not in (2, SOULMIRROR_SELECTOR_ACTION):
+        return None
+    p1 = int(row.get("_param1") or 0)
+    fam = SOULMIRROR_BOX_FAMILIES.get(p1 // 1000)
+    if not fam:
+        return None
+    first, actions, kind = fam
+    suit = p1 % 1000
+    if suit < 1:
+        return None
+    base = first + (suit - 1) * SOULMIRROR_IDS_PER_SUIT
+    out = []
+    for slot, action in enumerate(actions):
+        iid = base + slot * SOULMIRROR_RANKS_PER_SLOT + (SOULMIRROR_BOX_RANK - 1)
+        r = bt.dd.row("item", iid) or {}
+        if (r.get("_class") != 3 or r.get("_action") != action
+                or int(r.get("_param2") or 0) != SOULMIRROR_BOX_RANK):
+            return None
+        out.append(iid)
+    return out, kind
+
+
 def grant_reward(state, item_id, amount):
     """Give `amount` of `item_id`, routed the way its design row says. Returns the
     bucket it landed in so the caller knows which sync to push."""
@@ -1131,6 +1194,31 @@ def grant_reward(state, item_id, amount):
         slot = state["energy"].setdefault(str(param), {"energy": 0, "cap": 0})
         slot["energy"] = capped_balance(slot.get("energy", 0) + amount)
         return "energy"
+    # A mirror Set/Selector BOX -- resolve to real instances; see soulmirror_box_items.
+    box = soulmirror_box_items(item_id)
+    if box:
+        from .gear import grant_soulmirror        # local: gear imports core, not us
+        import random as _r
+        ids, kind = box
+        for _ in range(max(1, int(amount))):
+            for iid in (ids if kind == "set" else [_r.choice(ids)]):
+                grant_soulmirror(state, iid)
+        return "equipment"
+    # A CAST, A BUNREI OR A SKILL BOOK -- anything the Cast List holds rather than the
+    # bag. `_action 1` items point at a char row through `_param1`: a playable cast, a
+    # Bunrei, or a Grimoire whose char row is one of the material CharTypes. Bagging
+    # one files a stackable row that `GetItemSpace` cannot place, so the reward popup
+    # played and nothing arrived -- reported for skill books and Sin/Virtue Bunrei
+    # from the exchange shops. `shop.grant_goods` already routed these correctly,
+    # which is why the same item worked from a storefront card and vanished from a
+    # mail, a roulette, a guild payout or an event exchange -- all of which call here.
+    from .quests import char_reward_of            # local: quests imports core, not us
+    char = char_reward_of(item_id)
+    if char:
+        char_id, star, _display = char
+        for _ in range(max(1, int(amount))):
+            add_char(state, char_id, star=star)
+        return "char"
     grant_item(state, item_id, amount)
     return "backpack"
 

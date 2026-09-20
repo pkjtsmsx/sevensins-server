@@ -572,6 +572,14 @@ def item_bucket(item_id):
         return "currency"
     if action == ITEM_ACTION_ENERGY and param:
         return "energy"
+    # The two routes grant_reward gained with the box/cast work: a mirror Set or
+    # Selector that decodes cleanly is equipment; an `_action 1` cast item (a cast, a
+    # Bunrei, a skill book) is a roster row and needs the charDic push, not the bag.
+    from .core import soulmirror_box_items        # local: core imports quests lazily
+    if soulmirror_box_items(item_id):
+        return "equipment"
+    if char_reward_of(item_id):
+        return "char"
     return "backpack"
 
 

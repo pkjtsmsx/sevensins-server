@@ -442,6 +442,11 @@ def autorun_payout(state, stage_id, count):
     log(f"    -> auto play paid {count}x stage {stage_id} -> "
         f"{totals or 'starshards'}")
     msgs = []
+    if "char" in buckets:
+        # A cast, a Bunrei or a skill book lands in the ROSTER now (grant_reward
+        # routes `_action 1` there); the Cast List only refetches on login, so
+        # without this push the reward popup plays and nothing appears.
+        msgs.append(uint_msg(0x771EA36E, 528, [1, 1], [ps.char_json(state)]))
     if "backpack" in buckets:
         msgs.append(backpack_msg(84, [1],
                                  [ps.backpack_json(state, ps.BP_STORAGE_NORMAL)]))
@@ -752,6 +757,11 @@ def karma_reward_msgs(state, karma):
         buckets = {ps.item_bucket(iid) for iid, cnt in paid if iid and cnt}
         if "currency" in buckets:
             out.append(sint_msg(0xBC8FDA7C, 512, [], [ps.currency_json(state)]))
+        if "char" in buckets:
+            # A cast, a Bunrei or a skill book lands in the ROSTER now (grant_reward
+            # routes `_action 1` there); the Cast List only refetches on login, so
+            # without this push the reward popup plays and nothing appears.
+            out.append(uint_msg(0x771EA36E, 528, [1, 1], [ps.char_json(state)]))
         if "backpack" in buckets:
             out.append(backpack_msg(84, [1],
                                     [ps.backpack_json(state, ps.BP_STORAGE_NORMAL)]))
@@ -1165,6 +1175,11 @@ def battle_end_reward(battle, state):
         # from the login sync and nothing on the results panel updates them.
         if "currency" in buckets:
             msgs.append(sint_msg(0xBC8FDA7C, 512, [], [ps.currency_json(state)]))
+        if "char" in buckets:
+            # A cast, a Bunrei or a skill book lands in the ROSTER now (grant_reward
+            # routes `_action 1` there); the Cast List only refetches on login, so
+            # without this push the reward popup plays and nothing appears.
+            msgs.append(uint_msg(0x771EA36E, 528, [1, 1], [ps.char_json(state)]))
         if "backpack" in buckets:
             msgs.append(backpack_msg(84, [1],
                                      [ps.backpack_json(state, ps.BP_STORAGE_NORMAL)]))
@@ -1730,6 +1745,11 @@ def mail_receive(r):
     r.send(MSG_RPC, uint64_msg(PLAYER_MAIL, MAIL_RPLY_RECEIVE, [0],
                                [json.dumps(claimed, separators=(",", ":"))], req_id=r.rid))
     # the popup is display only -- push whatever the grant touched
+    if "char" in buckets:
+        # A cast, a Bunrei or a skill book lands in the ROSTER now (grant_reward
+        # routes `_action 1` there); the Cast List only refetches on login, so
+        # without this push the reward popup plays and nothing appears.
+        r.send(MSG_RPC, uint_msg(0x771EA36E, 528, [1, 1], [ps.char_json(r.state)]))
     if "backpack" in buckets:
         r.send(MSG_RPC, backpack_msg(84, [1],
                                      [ps.backpack_json(r.state, ps.BP_STORAGE_NORMAL)]))
@@ -3270,6 +3290,12 @@ def gacha_draw_roulette(r):
         if "currency" in buckets:
             r.send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
                                      [ps.currency_json(r.state)]))
+        if "char" in buckets:
+            # A cast, a Bunrei or a skill book lands in the ROSTER now (grant_reward
+            # routes `_action 1` there); the Cast List only refetches on login, so
+            # without this push the reward popup plays and nothing appears.
+            r.send(MSG_RPC, uint_msg(0x771EA36E, 528, [1, 1],
+                                     [ps.char_json(r.state)]))
         if "backpack" in buckets:
             r.send(MSG_RPC, backpack_msg(
                 84, [1],
@@ -3616,6 +3642,11 @@ def quest_completed(r):
         paid += ps.goods_payout_lines(
             r.state, (bt.dd.row("quest", _q) or {}).get("_item_id"))
     buckets = {ps.item_bucket(iid) for iid, cnt in paid if iid and cnt}
+    if "char" in buckets:
+        # A cast, a Bunrei or a skill book lands in the ROSTER now (grant_reward
+        # routes `_action 1` there); the Cast List only refetches on login, so
+        # without this push the reward popup plays and nothing appears.
+        r.send(MSG_RPC, uint_msg(0x771EA36E, 528, [1, 1], [ps.char_json(r.state)]))
     if "backpack" in buckets:
         r.send(MSG_RPC, backpack_msg(
             84, [1],
