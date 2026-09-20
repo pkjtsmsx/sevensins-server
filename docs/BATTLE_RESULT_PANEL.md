@@ -215,8 +215,42 @@ whether the client-side plumbing is live on this path:
    and `InitUIResult` (0x16b4870) immediately does `BL coInitResultData`. So the panel
    enters `Init`, starts the coroutine, and polls `IsBattleEndReady` exactly as designed.
 
-So the whole pipeline is confirmed live except one link: whether the listener that sets
-the flag is subscribed. That is the only thing left, and it is answerable offline.
+3. **Is `GameWinState.OnBattleEnd` subscribed?** Traced as far as it can be offline:
+
+       BattleStateMachine.AddListener()        (0x17f74e4, called from Init)
+       BattleStateMachine.OnBattleEnd(evt)     (0x17f8acc + 3 more, one per event type)
+         _stateDic[9]  -- StateKey 9 IS GameWinState, type-checked
+         -> GameWinState.OnBattleEnd(evt)      -> IsBattleEndReady = 1
+
+   and there are FOUR overloads on each side, one per event type: `StageEvent`,
+   `ArenaEvent`, `ChallengeEvent`, `BattleEvent`. Note `ChallengeEvent` -- reply 786
+   dispatches one of those and we KNOW it lands, because it is what fills the Record
+   labels via `UpdateGuildRewardData`. So on a guild defeat the flag has two
+   independent routes to being set, and neither appears to fire.
+
+4. **Ruled out:** `GameWinState.OnEnter`'s early exit. It reads
+
+       if (BattleType == 4 /* FreePK */ || PlayerBattle+0xB0 /* ReplayMode */)
+             OnResultEnd()      // skips the result panel entirely
+
+   We send `BattleType` 0 and never set `ReplayMode`, so the panel path is taken --
+   which matches the observed behaviour (the panel does appear).
+
+### The state as of 2026-09-19
+
+Every link is confirmed present and correct: the panel opens, enters `Init`, starts
+`coInitResultData`, and polls. The server sends a well-formed EndReward (the ctor
+tolerates our empty lists) and a 786 that demonstrably reaches ChallengeEvent listeners.
+The forwarding path from either event to `IsBattleEndReady = 1` is wired. And the tap is
+still dead.
+
+**The surviving hypothesis is the one thing that is structurally different about a wipe
+and cannot be changed from the wire: every party member is at 0 HP.** `SetResultData`
+and the result pages build per-member UI and a character portrait; `GameLoseState` picks
+its voice line via `GetRandomPlayerMember`. If any of that dereferences a living member
+that does not exist, the coroutine dies before `_ResultTween` plays, and no amount of
+correct payload helps. That is the next thing to read, and it is the last untested idea
+that fits every observation.
 
 ### Four wrong fixes, and why each was wrong
 
