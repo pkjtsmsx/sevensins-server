@@ -660,6 +660,26 @@ def _gauge_to(eff):
     return ALLIES if float(eff.get("percent") or 0) > 0 else ENEMIES
 
 
+# Statuses that are a UNIT'S IDENTITY rather than something that happens to it: held
+# from the moment the fight starts, forever, by whoever the passive belongs to. Only a
+# status that is (a) hidden, (b) carries no numbers of its own and (c) is read as a
+# gate by other skills belongs here -- see _identity_marker's caller.
+IDENTITY_MARKERS = {"Elite"}
+
+
+def _identity_marker(eff):
+    """-> True if `eff` is a bare identity flag on the passive's own holder."""
+    if eff.get("op") != "apply_status":
+        return False
+    if ((eff.get("status") or {}).get("name")) not in IDENTITY_MARKERS:
+        return False
+    nums = eff.get("numbers") or {}
+    return (eff.get("recipient") in (None, "") and not eff.get("requires")
+            and not eff.get("chance") and nums.get("duration") is None
+            and nums.get("magnitude") is None and nums.get("stat") is None
+            and not _denies_turns(eff))
+
+
 def _compiled_rules(spec):
     """-> rules derived from the compiled spec, for a passive with no hand-written entry.
 
@@ -692,6 +712,25 @@ def _compiled_rules(spec):
 
     for eff in (spec or {}).get("effects") or []:
         trigger = eff.get("trigger")
+        if trigger is None and _identity_marker(eff):
+            # AN IDENTITY MARKER, not a timed effect. `Elite` is what a daily boss and
+            # a raid boss ARE, and the compiler files it as a bare status slot: no
+            # trigger, no recipient, no duration, no magnitude. Its clause is usually
+            # UNCLAIMED prose (the boss note describes other things), so annotate
+            # defers it -- not even implicit_trait reaches it -- and it was dropped
+            # here: NOTHING held Elite except the one hand-written boss, while 277
+            # compiled effects gate on the target holding it. Every Elite-killer kit
+            # in the game read a flag that was never set. Verified on this tree:
+            # 81 granting passive groups, 0 of which produced a rule.
+            #
+            # Scope is deliberately ONE status, not "trigger-less markers" in
+            # general: the pack holds hundreds of bare markers and most are debuffs
+            # meant for someone else; defaulting them to a permanent self-buff would
+            # invent effects. Elite is the only HIDDEN, misc-category marker other
+            # skills gate on, which is exactly what makes it identity, not effect.
+            rules.append(Rule(BATTLE_START, (eff.get("status") or {})["name"], SELF,
+                              permanent=True))
+            continue
         if trigger not in ALL_TRIGGERS:
             continue
         if (eff.get("status") or {}).get("id") in nested:

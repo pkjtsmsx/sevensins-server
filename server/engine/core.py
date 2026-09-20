@@ -431,7 +431,7 @@ def _condition_met(requires, caster, target, snapshot=None, ctx=None):
 
 
 def _blocked(eff, caster, target, snapshot, ctx, rng,
-             honour_conditional=False, roll_against=None):
+             honour_conditional=False, roll_against=None, gate_on=None):
     """Should this effect be refused? -> True to skip it.
 
     ONE copy of the tri-state dance. It was written three times -- in `_status_event`,
@@ -460,7 +460,14 @@ def _blocked(eff, caster, target, snapshot, ctx, rng,
     this is not cosmetic.
     """
     requires = eff.get("requires")
-    met = _condition_met(requires, caster, target, snapshot, ctx) if requires else None
+    # `gate_on` is the unit an `{"on": "target"}` condition asks about when that is not
+    # the unit receiving the effect. "If the target is Elite, grant ALLIES Crit
+    # DMG+75%" reads the enemy and writes to the team, and evaluating the gate against
+    # each ally asked whether a party member is an elite boss -- always no, so 157
+    # ally-buff and 76 self-buff effects gated on the target could never fire.
+    # (UserContrib elite-marker; counts re-verified on this tree's compile.)
+    asked = gate_on if gate_on is not None else target
+    met = _condition_met(requires, caster, asked, snapshot, ctx) if requires else None
     if met is False:
         return True
     if met is not None:
@@ -487,12 +494,15 @@ def _blocked(eff, caster, target, snapshot, ctx, rng,
     return False
 
 
-def _status_event(caster, target, eff, rng, snapshot=None, ctx=None):
-    """-> a StatusEvent, or None when the application does not land."""
+def _status_event(caster, target, eff, rng, snapshot=None, ctx=None, gate_on=None):
+    """-> a StatusEvent, or None when the application does not land.
+
+    `gate_on`: see _blocked -- the unit a target-shaped condition asks about when the
+    status lands on someone else (an ally buff gated on the enemy hit)."""
     st = eff.get("status") or {}
     numbers = eff.get("numbers") or {}
     if _blocked(eff, caster, target, snapshot, ctx, rng,
-                honour_conditional=True, roll_against=target):
+                honour_conditional=True, roll_against=target, gate_on=gate_on):
         return None
     stated = eff.get("chance_pct")
     if stated is not None:
@@ -614,8 +624,14 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
             # The recipient is not always the skill's target -- an attack routinely
             # buffs its own side. `None` means the prose did not say, which is the
             # ordinary "inflicts X on the target" case.
+            # A gate that asks about "the target" means the unit the SKILL hit, which
+            # is only the recipient when the status lands on the target itself. For an
+            # ally buff or a self buff it is targets[0] -- the same choice the
+            # follow_up branch already makes.
+            gate_on = (targets[0] if targets else None) \
+                if e.get("recipient") in ("allies", "caster") else None
             for tgt in _status_recipients(e.get("recipient"), caster, targets, units):
-                ev = _status_event(caster, tgt, e, r, held, ctx)
+                ev = _status_event(caster, tgt, e, r, held, ctx, gate_on=gate_on)
                 if ev is None:
                     continue
                 # Land it on the unit as STATE, not just on the wire. The unit is shared

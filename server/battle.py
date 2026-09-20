@@ -55,6 +55,37 @@ BATTLE_TYPE_STAGE = 0
 BATTLE_CLIENT_INDEX = 0xFBC2FA08
 BATTLE_SERVER_INDEX = 0xFA6D759E
 
+# The [Elite] marker: status row 140, hidden, no numbers of its own. 277 compiled
+# effects gate on the target holding it -- every Elite-killer kit in the game -- and
+# outside this rule it only ever reaches the mobs whose own passive grants it (81
+# passive groups, wired through engine/passives._identity_marker). Set False to field
+# bosses unmarked. (UserContrib elite-marker; ranges below are an owner-set design
+# choice, not pack data -- the pack has no boss flag: `LastWaveBoss` is 0 on all 6,628
+# stage rows and `_mobSkill` is empty everywhere, so retail must have marked Elite
+# from live-ops data this snapshot does not include.)
+ELITE_ON_BOSS_WAVE = True
+ELITE_STATUS_ID, ELITE_STATUS_NAME = 140, "Elite"
+_STORY_FINALS = None
+
+
+def _story_finals():
+    """-> the set of stage ids that END a story map: the highest `_sort` in each.
+
+    Built once; the stage table is 6,628 rows and every wave would otherwise rescan
+    it."""
+    global _STORY_FINALS
+    if _STORY_FINALS is None:
+        best = {}
+        for sid, row in dd.rows("stage").items():
+            dmap = row.get("_dmap_id") or 0
+            if dmap <= 0 or dmap >= 1000:
+                continue
+            key = (row.get("_sort") or 0, int(sid))
+            if key > best.get(dmap, (-1, 0)):
+                best[dmap] = key
+        _STORY_FINALS = {sid for _, sid in best.values()}
+    return _STORY_FINALS
+
 CMD_WAVE_BEGIN, CMD_START_TURN = 1100, 1101
 CMD_JUDGE, CMD_ATTACK = 1200, 1201
 CMD_RETREAT, CMD_AUTO_SET, CMD_NEXT_WAVE = 1500, 1501, 1503
@@ -2328,6 +2359,58 @@ class Battle:
             order = str(self.enemy_order_base + slot)
             index = ENEMY_SLOTS[slot] if slot < len(ENEMY_SLOTS) else slot
             self.units[order] = Unit(order, int(part), TEAM_ENEMY, index, lv=level)
+        self._mark_elite()
+
+    # Stage sets whose LAST wave is a boss fight, by `_dmap_id`. OWNER-SET (see the
+    # note at ELITE_ON_BOSS_WAVE): chosen to match what the game showed -- the daily
+    # cast dungeons, the farm dungeons, the towers, and the final stage of a story
+    # map. It lives here, named, where it can be read and argued with.
+    ELITE_DMAP_RANGES = (
+        (20000, 22999),       # daily cast dungeons
+        (220000, 229999),     # their alt-outfit counterparts
+        (30002, 30004),       # Evolution Abyss, Treasure Raiders, Trainers Gym
+        (30009, 30009),       # Material Dungeons
+        (30014, 30014),       # Transcend Corridor
+        (31002, 31014),       # the [Double] reruns
+        (40002, 40023),       # Hell Express lines, Starshard Temple
+        (41000, 43999),       # tower floors
+        (50010, 50010),       # Endless Nightmare
+        (99990, 99999),       # World Ender, Budokai
+    )
+
+    def _elite_stage(self):
+        """-> True if this stage's last wave should field [Elite] enemies.
+
+        A story map qualifies on its FINAL stage only -- the episode boss, the
+        highest `_sort` in its own map. Everything in ELITE_DMAP_RANGES qualifies
+        outright, because every one of those stages ends on a boss."""
+        row = dd.row("stage", self.stage_id) or {}
+        dmap = row.get("_dmap_id") or 0
+        if any(lo <= dmap <= hi for lo, hi in self.ELITE_DMAP_RANGES):
+            return True
+        if dmap <= 0 or dmap >= 1000:            # not a story map
+            return False
+        return self.stage_id in _story_finals()
+
+    def _mark_elite(self):
+        """Put the [Elite] marker on this wave's enemies, if it is the boss wave.
+
+        Applied as STATE, permanently: it is what the unit IS for the fight, not
+        something that happens to it. Mobs whose own passive grants it are skipped
+        so the marker is not doubled."""
+        if not ELITE_ON_BOSS_WAVE or self.wave < self.wave_max:
+            return
+        if not self._elite_stage():
+            return
+        for unit in self.units.values():
+            if unit.team != TEAM_ENEMY or not unit.alive:
+                continue
+            if any(getattr(a, "name", None) == ELITE_STATUS_NAME
+                   for a in _engine_status._actives(unit)):
+                continue
+            _engine_status.apply_event(unit, _engine_core.StatusEvent(
+                target=unit.order, status_id=ELITE_STATUS_ID,
+                name=ELITE_STATUS_NAME, applied=True, permanent=True))
 
     def _collect_all_waves(self):
         """Every mob and skill the whole stage can field, for BattleDatas'
