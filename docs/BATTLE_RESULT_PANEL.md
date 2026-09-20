@@ -124,14 +124,23 @@ and it is where `eResultState` and `BattleType` (`Stage=0 Arena=1 Challenge=2 Ra
 FreePK=4 ArenaSP=5 ArenaTeam=6 Campaign=7 Village=8 GMTest=100 None=255`) come from.
 Those decode branches that otherwise read as magic numbers.
 
-**Not safe:** it is a DIFFERENT BUILD. Its `PanelBattleResult` has `ShowBattleWin`,
-`ShowEvaResult`, `ShowRewardResult`, `ShowFinalResult`, `ShowKizunaLevelUp`,
-`InitUIResult`, `UIResultDirty` and `SkipResult`; ours has none of them (our 44 methods
-are the full set). Its RVAs do not rebase linearly onto ours -- two samples give
-0x4C4810 and 0x4C4678. Design-row layouts differ outright (section 2).
+**Its method lists ARE accurate** -- this doc originally said otherwise and was wrong.
+`ShowBattleWin`, `ShowEvaResult`, `ShowRewardResult`, `ShowCharLevelResult`,
+`ShowKizunaLevelUp`, `ShowFinalResult` and `InitUIResult` all exist in our binary. They
+do not appear in IDA's function list because **IDA folded them into `CheckAppsFlyer`**
+(0x16b4054, size 0xed4, which spans 0x16b4054-0x16b4f28); they are named branch targets
+inside it. `list_funcs` returning 44 methods was an artefact of that, not evidence about
+the build. If a method the dump names seems missing, disassemble the neighbourhood
+before concluding it is absent.
 
-Rule of thumb: **trust it for runtime-class offsets and enums, verify anything
-design-row shaped against the pack, never trust its method lists or control flow.**
+**Not safe:** design-row layouts. The dump calls stage-row offset 0xB8 `_ap_v1`; in our
+pack `_ap_v1` is 0 on every guild stage and nothing anywhere has `_ap_v1 == 8`, while
+`_book == 8` picks out exactly the 28 guild stages and matches observed client behaviour
+(section 2). Verified against the pack, so this one is solid.
+
+Rule of thumb: **trust it for runtime-class offsets, enums and method names; verify
+anything design-row shaped against the pack; it has no method bodies, so control flow
+always comes from the binary.**
 
 It is ~15 MB of extracted game material and belongs with the IDA databases and
 `patch_root` -- useful locally, never committed.
@@ -194,11 +203,20 @@ whether the client-side plumbing is live on this path:
    state machine. Note there are FOUR identical 0x5c `OnBattleEnd` variants on
    GameWinState (0x1969cf0, _26647884, _26647976, _26648068), which suggests several
    dispatchers or generic instantiations -- possibly only one of which is wired up.
-2. **Is `coInitResultData` ever started?** `SetResultData` is only reached from that
-   coroutine. Something must `RunCoroutine` it; if that call sits on a branch we do not
-   reach, the poll never runs at all and no payload could help.
+2. ~~Is `coInitResultData` ever started?~~ **Answered: yes.** `OnEnterResultState` does
+   not end where Hex-Rays shows it -- it tail-jumps to a switch on `_curResultState`
+   (jump table at 0x16B484C) that calls a handler per state:
 
-Both are answerable from the binary, offline, without spending a Guild Weekly pass.
+       Init 0 -> InitUIResult      Evaluation 1 -> ShowEvaResult
+       Reward 2 -> ShowRewardResult   CharLevel 3 -> ShowCharLevelResult
+       KizunaLevelUp 4 -> ShowKizunaLevelUp   WaitClose 5 -> ShowFinalResult
+       BattleWin 6 -> ShowBattleWin
+
+   and `InitUIResult` (0x16b4870) immediately does `BL coInitResultData`. So the panel
+   enters `Init`, starts the coroutine, and polls `IsBattleEndReady` exactly as designed.
+
+So the whole pipeline is confirmed live except one link: whether the listener that sets
+the flag is subscribed. That is the only thing left, and it is answerable offline.
 
 ### Four wrong fixes, and why each was wrong
 
