@@ -2554,6 +2554,15 @@ class Battle:
         # The engine's passives are a declarative rule table (engine/passives.py).
         if not hasattr(self, "_passives_fired"):
             self._passives_fired = set()
+        # THE SET HAS TO REACH THE UNITS. `core._damage_hooks` fires on_damage_dealt /
+        # on_damage_taken / on_death with `fired=getattr(caster, "_passives_fired")`,
+        # and the set lived only on the Battle -- so that getattr returned None on
+        # every hit and `once=True` meant nothing on the damage triggers: a "can only
+        # trigger 1 time" life steal healed 15 times in 40 attacks in the contributed
+        # harness. One object, referenced from both places, keeps "once per battle"
+        # true whichever path fires the rule. (UserContrib passive-wiring.)
+        for u in field:
+            u._passives_fired = self._passives_fired
         for u in units:
             for sid in (u.skills or []):
                 spec = _engine_specs.skill(sid) if sid else None
@@ -2630,11 +2639,74 @@ class Battle:
         (unit, status) matters -- the rows carry absolute state, not a delta.
         """
         for ch in changes or []:
+            # STAMPED WITH THE WAVE. Enemy orders are RECYCLED -- `_spawn_wave` builds
+            # each wave's mobs at `enemy_order_base + slot`, so wave 2's front-row
+            # enemy is order "201" exactly like wave 1's was. A row queued on the turn
+            # that cleared a wave is drained onto the FIRST attack of the next one,
+            # where it lands on whichever fresh unit inherited that order. Same stamp
+            # as `_pending_dot_deaths`, where it was doing real damage.
+            ch = dict(ch, wave=self.wave)
             key = (ch.get("target"), ch.get("status_id"))
             self._pending_status_rows = [
                 q for q in self._pending_status_rows
                 if (q.get("target"), q.get("status_id")) != key]
             self._pending_status_rows.append(ch)
+
+    def _absorb_passive(self, applied, hp_before=None):
+        """Put what a turn-start / after-action / DoT-death passive did on the WIRE.
+
+        These call sites discarded `fire_all`'s return value -- the same mistake
+        `core._report` exists to fix on the skill path -- except here there is no
+        Outcome to report into, because no skill is running. So each row goes to the
+        channel that already carries its kind of change out of band:
+
+          * a status, or a triggered cleanse, to `_queue_status_rows`, which rides
+            the next attack's lead DamageInfo -- otherwise the icon is missing until
+            the client is next told everything, and a turn-start buff is invisible
+            for the whole fight it was granted in;
+          * a KILL to `_pending_dot_deaths`, which already sends the death-shaped
+            1201. After-action damage rules can finish a unit off, and without a
+            `die` row the client keeps it in ActionOrderList and waits for a turn
+            that never comes -- the DoT soft-lock, reached through a passive.
+
+        HEAL and GAUGE are deliberately NOT sent: HP and Scv both travel in `sync` on
+        the very next BattleCmd, and a heal has no out-of-band row to ride. The cost
+        is a missing pop-up, not a wrong state.
+
+        REVIVE has no out-of-band channel at all and is left alone here -- the
+        in-skill path reports it through `core._report`, but a passive that raises an
+        ally at turn start still cannot be announced. Noted rather than hidden.
+        (UserContrib passive-wiring.)"""
+        rows = []
+        for row in applied or []:
+            if len(row) == 2:
+                target, active = row
+                if getattr(active, "status_id", None) is None:
+                    continue
+                rows.append({"target": target.order, "status_id": active.status_id,
+                             "applied": True, "duration": active.remaining})
+                continue
+            target, effect, amount = row
+            if effect == _engine_passives.REMOVE:
+                # `amount` is the Active that was removed, as in core._report: the
+                # client learns of a removal from a row with that id and round 0.
+                if getattr(amount, "status_id", None) is not None:
+                    rows.append({"target": target.order,
+                                 "status_id": amount.status_id, "applied": False})
+            elif effect == _engine_passives.DAMAGE and amount and not target.alive:
+                # The death row's dmg is WHAT WAS REMOVED, same convention as a DoT
+                # tick (test_pursuit_dot asserts it): a 1,695 hit on a 239-HP unit
+                # removes 239. Counters keep the raw number -- core._report emits
+                # Strike rows, and strikes show full damage on a kill like any
+                # attack -- so the clamp lives here, off the caller's snapshot,
+                # not in passives.fire.
+                dealt = int(amount)
+                if hp_before is not None:
+                    dealt = min(dealt, int(hp_before.get(target.order, dealt)))
+                self._pending_dot_deaths.append({"order": target.order,
+                                                 "dmg": dealt,
+                                                 "wave": self.wave})
+        self._queue_status_rows(rows)
 
     def _drain_pending_status(self, combo):
         """Attach queued out-of-band status changes to an outgoing attack."""
@@ -2646,6 +2718,8 @@ class Battle:
             return
         lead = groups[0][0]
         for ch in rows:
+            if ch.get("wave") is not None and ch["wave"] != self.wave:
+                continue                  # belongs to a wave that is over; see above
             sid = _engine_status.wire_status_id(ch.get("status_id"))
             if sid is None:
                 continue
@@ -2725,6 +2799,13 @@ class Battle:
         deaths, self._pending_dot_deaths = self._pending_dot_deaths, []
         out = []
         for d in deaths:
+            if d.get("wave") is not None and d["wave"] != self.wave:
+                # A DEATH FROM THE PREVIOUS WAVE. The order it names now belongs to a
+                # freshly spawned, living enemy, and this message carries `die: 1` --
+                # the client would kill a unit the server has standing, and the next
+                # skill aimed at the queue the two no longer agree on hangs the fight.
+                # Reported from a device as a soft-lock on clearing wave 1.
+                continue
             unit = self.units.get(d["order"])
             if unit is None:
                 continue
@@ -2940,9 +3021,11 @@ class Battle:
                 acted.pending_scv = 0.0
             # After-action passives fire before the duration tick, so an effect the
             # actor's own turn produces is not immediately aged by it.
-            _engine_passives.fire_all(
+            _hp_before = {u.order: u.hp for u in self.units.values()}
+            self._absorb_passive(_engine_passives.fire_all(
                 _engine_passives.AFTER_ACTION, [acted], list(self.units.values()),
-                fired=getattr(self, "_passives_fired", None))
+                fired=getattr(self, "_passives_fired", None)),
+                hp_before=_hp_before)
             # A resolved turn spends a turn of the actor's own statuses. NO removal
             # row for these, on purpose: the client decrements the ACTOR's statuses
             # itself in TurnEndState.OnEnter (BattleUnit.UpdateStatusRound on
@@ -3019,16 +3102,30 @@ class Battle:
             # played the tick on the dying unit's own turn: damage number, pain sound,
             # death, and only then the next character. Queue it so the reply that
             # follows this turn carries that beat; see dot_death_cmds_json.
-            self._pending_dot_deaths.append({"order": unit.order, "dmg": dealt})
+            self._pending_dot_deaths.append({"order": unit.order, "dmg": dealt,
+                                             "wave": self.wave})
+            # A DoT death is still a death: on_death passives fired only for units
+            # killed by a skill's own hit, so poison finishing someone off skipped
+            # them entirely -- no revive, no death-triggered cleanse. Absorbed like
+            # any other out-of-band passive result.
+            _hp_before = {u.order: u.hp for u in self.units.values()}
+            self._absorb_passive(_engine_passives.fire_all(
+                _engine_passives.ON_DEATH, list(self.units.values()),
+                list(self.units.values()),
+                ctx={"victim": unit, "rng": random.Random()},
+                fired=getattr(self, "_passives_fired", None)),
+                hp_before=_hp_before)
             self._roll_turn_order()
             self._start_of_turn(_depth + 1)
             return
         # Turn-start passives fire BEFORE the can-it-act decision: "at the start of
         # the turn, if you have a Commendation, you gain CC Immunity" has to be able
         # to stop the very stun being checked for.
-        _engine_passives.fire_all(
+        _hp_before = {u.order: u.hp for u in self.units.values()}
+        self._absorb_passive(_engine_passives.fire_all(
             _engine_passives.TURN_START, [unit], list(self.units.values()),
-            fired=getattr(self, "_passives_fired", None))
+            fired=getattr(self, "_passives_fired", None)),
+            hp_before=_hp_before)
         # A status can be a trigger marker that grants further statuses while held --
         # see engine/status.py. Runs after the passives so a marker applied THIS turn
         # start does not also fire in the same tick; it fires next turn, once the
@@ -3226,6 +3323,12 @@ class Battle:
         """Bring in the next wave's mob group. TurnEndState.DoNextState has already
         incremented the client's own BattleData.Wave by the time it asks for this."""
         self.wave += 1
+        # Anything still queued belongs to units that have just left the field, and
+        # their orders are about to be handed to the new wave's mobs. The wave stamp
+        # already refuses them at the drain; dropping them here as well keeps the
+        # queues from growing across a long stage.
+        self._pending_status_rows = []
+        self._pending_dot_deaths = []
         self._spawn_wave()
         # New wave's enemies get their battle-start passives now that they are on the
         # field; the party's already fired at battle open and does not re-trigger.

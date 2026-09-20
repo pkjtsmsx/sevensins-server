@@ -135,6 +135,13 @@ def check_survivable_dot_sends_nothing():
     poison(victim, 1.0, 10)                     # a scratch
     b.attack_cmd_json("102", "103", 0)
     b.end_turn()
+    # An AFTER-ACTION passive can legitimately kill some OTHER unit during this same
+    # end_turn, and that death is announced through the same queue (see
+    # _absorb_passive) -- so the invariant is not "the queue is empty", it is "no
+    # message names the unit whose tick was survivable". Asserting emptiness broke the
+    # moment passive damage started reaching the wire.
+    b._pending_dot_deaths = [d for d in b._pending_dot_deaths
+                             if d["order"] == victim.order]
     check("a survived tick queues no message",
           victim.alive and b.dot_death_cmds_json() == [])
 

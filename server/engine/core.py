@@ -566,6 +566,10 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
     targets = resolve_targets(caster, spec, units, r, chosen)
     out.targets = [u.order for u in targets]
 
+    # Who was standing before this skill ran. Read by `_damage_hooks` to fire on_death
+    # for EVERY unit this skill killed rather than only the ones it aimed at.
+    alive_before = {u.order for u in units if u.alive}
+
     effects = spec.get("effects") or []
     dmg = [e for e in effects if e["op"] == "damage"]
 
@@ -833,7 +837,7 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
         # Damage-triggered passives and status behaviours, once per SKILL rather than
         # per swing: "triggers once while dealing multiple attacks" is how the prose
         # words it, and a 4-hit skill paying four reflects would be wrong.
-        _damage_hooks(caster, targets, out, units, r)
+        _damage_hooks(caster, targets, out, units, r, alive_before)
 
     # AFTER the riders and follow-ups: those deal damage too, so flagging deaths any
     # earlier would miss a kill that a rider landed.
@@ -895,10 +899,37 @@ def _report(out, applied):
         elif effect == _passives.HEAL:
             out.heals.append({"target": target.order, "amount": int(amount),
                               "basis": "passive"})
+        elif effect == _passives.REVIVE:
+            # A REVIVE had no branch here, so every revive rule changed the server and
+            # nothing else: `fire` sets the unit's HP, the client is never told, and a
+            # unit the client still holds as dead sits in its own ActionOrderList
+            # waiting for a turn it will never be given. Same soft-lock shape as the
+            # DoT death, same fix -- say it on the wire. wire.py already emits mode-2
+            # rows from `revives`; the row carries the HP the unit came back at, which
+            # is what doRebornUnit draws.
+            #
+            # NOT FOR A UNIT THAT DIED IN THIS SAME SKILL. wire puts a revive row in
+            # GROUP 0 while the killing blow sits in a later swing's group, so the
+            # client would play the resurrection first and the death after it -- and
+            # the two cannot swap places: one row per unit per group is a wire
+            # invariant and the group count is pinned to the cinematic's swings. That
+            # is Metatron's own case (her pool of dead allies includes the ally who
+            # just fell), so it is left VISIBLY skipped rather than sent wrong; it
+            # needs its own follow-up message, the way dot_death_cmds_json carries a
+            # DoT death. (UserContrib passive-wiring.)
+            if any(st.target == target.order for st in out.strikes):
+                out.skipped.append({"op": "revive", "why": "died in this skill; needs "
+                                    "its own message after the death row",
+                                    "target": target.order})
+            else:
+                out.revives.append({"target": target.order, "hp": int(target.hp)})
 
 
-def _damage_hooks(caster, targets, out, units, rng):
-    """Reflects and on-hit passives, after all of a skill's damage has landed."""
+def _damage_hooks(caster, targets, out, units, rng, alive_before=()):
+    """Reflects and on-hit passives, after all of a skill's damage has landed.
+
+    `alive_before` is who was standing when the skill began, so the on-death sweep can
+    tell a death this skill caused from a body that was already on the floor."""
     struck = {s.target for s in out.strikes}
     if not struck:
         return
@@ -930,12 +961,20 @@ def _damage_hooks(caster, targets, out, units, rng):
 
     # Deaths this skill caused. Fired for every unit's passive, not just the killer's:
     # Metatron revives on an ALLY's death, and she may not be the one who acted.
-    for tgt in targets:
-        if not tgt.alive:
-            _report(out, _passives.fire_all(
-                _passives.ON_DEATH, list(units), units,
-                ctx={"victim": tgt, "attacker": caster, "rng": rng},
-                fired=getattr(caster, "_passives_fired", None)))
+    # THE VICTIMS ARE EVERY UNIT THAT DIED, not just the ones the skill aimed at --
+    # the same correction _flag_deaths already carries, and for the same reason. A
+    # counter kills the ATTACKER, who is never in `targets`; the on-hit extra and the
+    # riders can finish someone else off. Those deaths fired no on_death passive at
+    # all, so a revive or a death-triggered cleanse simply did not happen for them.
+    # `alive_before` is taken at the top of `execute`, so a unit already dead when the
+    # skill started does not re-trigger anyone's passive. (UserContrib passive-wiring.)
+    for victim in units:
+        if victim.alive or victim.order not in alive_before:
+            continue
+        _report(out, _passives.fire_all(
+            _passives.ON_DEATH, list(units), units,
+            ctx={"victim": victim, "attacker": caster, "rng": rng},
+            fired=getattr(caster, "_passives_fired", None)))
 
 
 def _flag_deaths(out, targets, units=()):
