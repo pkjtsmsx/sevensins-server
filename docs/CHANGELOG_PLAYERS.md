@@ -1,3 +1,114 @@
+# Server Update — 12 September
+
+**How to update:** open the app, tap **Check for updates**, then restart the app when it
+asks. Your account is not touched by an update.
+
+This one is almost entirely battle. A lot of what a skill's description promises was
+being read out of the game's data and then quietly dropped on the way to the fight — so
+the tooltip said one thing and the numbers did another. Roughly 1,600 skill clauses that
+did nothing now do something.
+
+---
+
+## Bosses fight back
+
+**Raid bosses were hitting for about a third of their real damage.** 150 skills in the
+game deal "a percentage of the target's max HP" on top of their normal hit, and that
+half of the attack was missing entirely. The Guild Weekly boss's big move is the clearest
+case: it now does roughly **10,600** to a 35,000 HP cast where it used to do about 3,800.
+
+If the weekly raid felt like an unkillable punching bag that could not hurt you back —
+that was this. It is a real fight now.
+
+Your own "% of max HP" skills still will not melt a raid boss: the game marks those
+enemies **Elite**, and the skill text has always said the effect does not trigger on
+them. That exemption is now honoured, so the rule works in both directions.
+
+## Counterattacks exist
+
+**Eight casts counter when they are struck, and not one of them ever did.** Leviathan,
+Raphael, Belphegor, Asmodeus, Caillen, Leon, Zoe and the Vengeance set bonus.
+
+- **Leviathan** (Jealousy Vortex) counters for a share of her **ATK** — 225% at rank 2.
+- **Raphael** (Serene Way of Harmony) counters for a share of his **DEF** — and his own
+  battle-start DEF buff now feeds it, so his counter is noticeably harder in the opening
+  turns.
+
+A counter fires once per enemy skill, not once per hit, so a three-target sweep gets one
+counter and not three.
+
+## Defensive buffs actually defend
+
+Statuses that change how much damage you take — **Fortitude, Fragile, Wide Defense,
+Kitty Bell, Legion Aegis, Death Beacon** and 140 others — were being applied to the
+wrong side of the exchange, and often with the sign inverted. A defensive buff could end
+up making you **hit harder** instead of take less. Tanks should feel like tanks now, and
+Fragile should hurt.
+
+## Healing and cleansing
+
+- **Around 190 heal clauses did nothing at all.** Any skill whose healing rides on its
+  attack, and most passives that heal, simply never paid out.
+- **Michael's Gate of Judgement** healed only himself with the party's share. It heals
+  the whole party now — and its attack animation no longer plays on the allies it is
+  healing.
+- **Triggered cleanses work.** "At the start of the turn, clear your own damage-over-
+  time", "when you attack, strip the target's buffs" — none of these fired. Mammon
+  shrugging off his own poison, Beelzebub stripping Harden off what she hits.
+- **Revives and move-gauge clauses** stated in a skill's text but with nothing behind
+  them now run, including Metatron's raise-a-fallen-ally and the gauge swings on
+  Ocean Strike (which was applying its enemy debuff twice and skipping its own buff).
+
+## Your casts got stronger (again)
+
+Two more sources of power that the panels promised and nothing paid:
+
+- **Skill Up stat rewards.** Every cast has a ladder of flat HP/ATK/DEF/SPD bonuses that
+  unlock with Skill Up rank — the panel lists them beside each rank. The rank itself
+  always worked; the stats never did. 291 casts carry one.
+- **Starshard and Soulmirror crit sub-stats.** CRI, CRIT DMG, Effect Hit and Effect RES
+  rolled on your gear showed in the cast menu and did nothing in battle. They count now.
+  (Very old shards carrying an impossible CRI roll are capped rather than honoured.)
+- **Crit statuses work.** Critical Surge, Execute Critical and Critical Injection were
+  inert in both directions.
+- **Skill ranks stopped sharing numbers.** A passive's rank I through VI could all end up
+  using whichever rank the server happened to look at first — so a maxed passive might
+  quietly pay rank I's figure. Each rank uses its own numbers now.
+
+## Enemies got their kit back
+
+- **68 mob heal passives and 28 life-steal attacks** were doing nothing. Ordinary trash
+  can now heal itself and drain a share of the damage it deals, so some fights run a
+  little longer.
+
+## Guild Weekly is playable again
+
+**The three daily challenge passes never came back.** Once you spent them the mode was
+finished permanently — and because the game has no "you are out of attempts" message,
+the Challenge button simply did nothing when you pressed it. Passes now refill each day
+at the usual 4AM reset, and the counter on the panel tells the truth.
+
+## Smaller things
+
+- **Roulette wins appear immediately.** Stamina prizes were credited to your account but
+  not shown until you relogged.
+- **A unit killed by a counterattack is properly reported** — previously the fight could
+  sit waiting for a turn from someone who was already dead.
+
+---
+
+## Known issues
+
+- The Guild Raid boss's info panel shows a placeholder line instead of its weekday /
+  advantage / tips text. The text for it is not present in the game's data files, so
+  there is nothing to display; the fight itself is unaffected.
+- The raid member leaderboard fills in when you switch to the **Guild** tab and back to
+  **Member**. (The original game behaved the same way.)
+- Ultimate cut-in animations do not play during raid battles. This matches the original
+  game.
+
+---
+
 # Server Update — 26 August
 
 **How to update:** open the app, tap **Check for updates**, then restart the app when it
