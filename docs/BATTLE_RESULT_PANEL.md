@@ -244,13 +244,159 @@ tolerates our empty lists) and a 786 that demonstrably reaches ChallengeEvent li
 The forwarding path from either event to `IsBattleEndReady = 1` is wired. And the tap is
 still dead.
 
-**The surviving hypothesis is the one thing that is structurally different about a wipe
-and cannot be changed from the wire: every party member is at 0 HP.** `SetResultData`
-and the result pages build per-member UI and a character portrait; `GameLoseState` picks
-its voice line via `GetRandomPlayerMember`. If any of that dereferences a living member
-that does not exist, the coroutine dies before `_ResultTween` plays, and no amount of
-correct payload helps. That is the next thing to read, and it is the last untested idea
-that fits every observation.
+**That hypothesis is now disproved.** `SetResultData` and all five page builders were
+read end to end on 2026-09-19 (below). Not one of them touches a party member, alive or
+dead. The panel is built entirely from the stage row, `BattleReward`, and serialized
+prefab references.
+
+### The panel, read end to end
+
+`PanelBattleResult` methods live inside IDA-folded ranges; the addresses below are ours
+(EN 2.2.7). `InitUIResult` starts the coroutine and *then* enters state 6, synchronously:
+
+    InitUIResult              0x16b4870   RunCoroutine(coInitResultData); OnEnterResultState(6)
+    coInitResultData MoveNext 0x16b82c4   spin-waits on PlayerBattle.IsBattleEndReady (+0xA0),
+                                          then and only then calls SetResultData
+    SetResultData             0x16b60bc
+    SetKizunaUpResultData     0x16b6398
+    SetCharLevelResultData    0x16b6494
+    SetEvaResultData          0x16b6614
+    SetRewardResultData       0x16b6854   -> UpdateGuildRewardData 0x16b68cc  (IsBossStage)
+                                          -> UpdateRegularRewardData 0x16b699c (otherwise)
+
+`SetResultData` sets four panel fields and then tail-calls the page builders:
+
+    panel[0x140] = stageRow[0xB8]          ; _book
+    panel[0x144] = IsEvaResultOn()         ; isEvaMode
+    panel[0x145] = !IsBossStage()
+    panel[0x146] = RewardData.barValues.Count >= 1   ; isCharLevelMode
+    ... UpdateLive2d, SetKizunaUp, SetCharLevel, SetEva, tail-call SetRewardResultData
+
+`IsEvaResultOn` returns true only when the stage has `_rating_datas` AND at least one
+entry of `GetRewardRatingList()` (our `rating_list`) is **non-zero**. We send `[0,0,0,0]`
+on a guild win and `[]` on a loss, so it is false either way.
+
+That makes the state the panel lands in purely a function of our payload:
+
+    PtBattleWinCb: isCharLevelMode ? Enter(3 CharLevel) : Enter(isEvaMode ? 1 Eva : 2 Reward)
+
+    guild WIN   bar_list non-empty -> isCharLevelMode -> state 3
+    guild LOSS  bar_list empty     -> neither flag    -> state 2
+
+**The dead tap is `isSkipEnabled` (panel+0x147), and nothing else.** `OnClickNextStep`
+(0x16b3970) is:
+
+    if (this.isSkipEnabled == 0) return;        // <- the dead tap, exactly
+    this.isSkipEnabled = false;
+    Timing.KillCoroutines(tag); SkipResult(this._curResultState);
+
+`isSkipEnabled` is written true in exactly three places -- `PtEvaCb`, `PtRewardCb`,
+`PtCharLevelCb` -- and each is a one-shot `onFinished` callback on tween `panel[0xA8]`.
+So the tap can only ever arm once a result *page* tween has finished. The "BATTLE ENDS"
+banner is a different tween, `panel[0x60]`, played by `ShowBattleWin`. Banner up with a
+dead tap and an empty background is therefore the exact signature of **`SetResultData`
+never having been called at all** -- the coroutine is still spinning on
+`IsBattleEndReady`.
+
+One report is closed by this read and is not a bug: `ShowBattleWin` (0x16b4900) picks the
+banner with `IsBossStage() ? panel[0x70] : panel[0x68]`, never by win/loss. A guild
+victory showing "BATTLE ENDS" is what retail does.
+
+### Where `IsBattleEndReady` is set -- and the boss/story fork
+
+**A guild fight and a story fight take different code, not just different data.** The
+fork is in `GameWinState.OnEnter` (0x1969220) at 0x1969414:
+
+    IsBossStage()  -> ShowBattleResult()            ; guild: straight to the RPC
+    else if (BattleData.BattleType != 0)
+                   -> ShowBattleResult()
+    else           -> BattleEnd_Stage()             ; story: victory cinematic first
+
+So `BattleEnd_Stage` -- the long prologue with the end-cinematic clone, the
+`GetTeamMembers` pose list and the wave-box lookup -- **is never executed for a guild
+stage**. Nothing in it can explain the guild hang. (Both of its data-driven throw sites
+were chased down and eliminated anyway: `MapManager.boxs` is filled by
+`BattleDataInitializer.CloneItems` from a *stage-independent* static name list, so its
+count is the same constant for every stage and the `InterludeList` box index cannot go
+out of range on a guild stage alone; and the `sceXXXX_clear` directors are absent from
+the scene bundles for story stages too, so their lookup is symmetric.)
+
+`ShowBattleResult` (0x1969604) is short and does the one thing that matters:
+
+    book = this[0x24]                                  ; stage _book, stored in OnEnter
+    PlayerBattle.ServerRPCBattleEnd(runeSel: book == 2)
+
+and `ServerRPCBattleEnd` (0x1687cec) is a trap:
+
+    IsBattleEndReady = 0                               ; cleared FIRST, unconditionally
+    if (BattleData == null)               return;      ; bare RET -- no RPC
+    if (BattleData.BattleType != 0)       return;      ; bare RET -- no RPC
+    if (BattleData.BattleResultType != 1) return;      ; bare RET -- no RPC   (+0xA8)
+    ...
+    ServerRpc.PlayerBattleServerCmd(0x1F9 = 505, ...)
+
+Miss either gate and the flag has been cleared with nothing left that will ever set it:
+`coInitResultData` spins forever, `SetResultData` is never called, and the panel sits on
+the banner with a dead tap. That is the failure shape, and it is why
+`WAVE_RESULT_WIN`-on-a-boss-wipe (which drives `HandleWaveEnd` to write
+`BattleResultType = 1`) is load-bearing rather than cosmetic.
+
+The flag is re-armed only by `GameWinState.OnBattleEnd` -- four identical generic
+instantiations (0x1969cf0 / d4c / da8 / e04), each simply
+`PlayerBattle.Instance.IsBattleEndReady = 1`. They are reached through
+`BattleStateMachine.OnBattleEnd`, which looks up `_stateDic[9]`, type-checks
+`GameWinState` and forwards with **no active-state guard**. `BattleStateMachine.AddListener`
+(0x17f74e4) registers them on three dispatchers:
+
+    StageEvent      type 3
+    ChallengeEvent  type 4     (ChallengeEventType.Challenge_BATTLE_END)
+    ArenaEvent      type 7
+
+For a guild fight the live route is the ChallengeEvent one, and it is reply **786**:
+
+    ChallengeBattleRewardReply (0x1690428)
+      if (intargs.Count != 3) return;                  ; silent -- no dispatch at all
+      info.damage/bonus/total_damage = intargs[0..2]
+      PlayerChallenge.Event.Dispatch(4, new ChallengeEvent())   -> IsBattleEndReady = 1
+
+We send exactly three ints, from the 505 handler, i.e. *after* `ServerRPCBattleEnd`
+cleared the flag. So the ordering is right and the payload is right.
+
+### Resolved 2026-09-20: the tap was never dead -- it was crashing
+
+One device run with logcat settled it. The server side was perfect (505 in, EndReward +
+786 out, three ints), and the client threw on **every tap**:
+
+    ArgumentOutOfRangeException: Index was out of range.
+      at System.ThrowHelper.ThrowArgumentOutOfRangeException ()
+      at Game.Gui.Panel.PanelBattleResult.CheckAppsFlyer ()
+      at Game.Gui.Panel.PanelBattleResult.OnClickResultEnd ()
+      at UIEventListener.OnSafeClick ()
+
+`OnClickResultEnd` -- the Tap to End handler -- is `CheckAppsFlyer(); QuitBattle()`, and
+`CheckAppsFlyer` (0x16b4054) opens with an **unconditional read of `rating_list[3]`**:
+
+    list = PlayerBattle.GetRewardRatingList()
+    if (list._size <= 3)  -> ThrowArgumentOutOfRangeException
+    if (list[3] == 1)     -> AppsFlyer analytics for a few hardcoded stage ids
+    else                  -> return
+
+A win sent `rating_list=[0,0,0,0]` -> index safe -> `QuitBattle` ran -> worked. A loss
+sent `[]` -> the throw killed the handler before `QuitBattle`, every tap, forever. That
+is the exact reported symptom ("works on a win, dead on a loss") and none of it involved
+`IsBattleEndReady` -- the panel had reached its final state normally.
+
+**Fix:** `battle_end_reward` now sends `battle.rating_flags()` on both outcomes; on a
+loss that is four honest zeros (every condition is gated on `cleared`). One line.
+Verified on the device the same morning: wipe, banner, tap, clean exit to the Record
+page, zero exceptions in logcat.
+
+The `IsBattleEndReady` chain documented above stays: it is all true, it is why the
+wipe-as-win WaveEnd is load-bearing, and it is the map the next result-panel bug will
+need. But the lesson of this hunt is the doc's closing line made real: the four wrong
+fixes below were all payload guesses, the fifth "fix" (the flag chain) was a correct
+read of the wrong code path, and the actual bug fell out of **one logcat trace** the
+moment a device was attached. Exceptions first, disassembly second.
 
 ### Four wrong fixes, and why each was wrong
 

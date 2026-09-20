@@ -1120,7 +1120,13 @@ def battle_end_reward(battle, state):
                       else [1, d[0], d[1]] for d in drops],
         "itembonus_list": [],
         "bar_list": bars,
-        "rating_list": battle.rating_flags() if won else [],
+        # ALWAYS rating_flags(), never [] -- on a loss it is four honest zeros.
+        # `CheckAppsFlyer` reads rating_list[3] unconditionally from OnClickResultEnd,
+        # so a short list turns the Tap to End button into an ArgumentOutOfRange throw
+        # on every tap and the battle can never be exited. Caught live on a guild wipe
+        # (stage 1000037, 2026-09-20 logcat): the panel rendered, the score banked,
+        # and the tap "did nothing" because each one died before QuitBattle.
+        "rating_list": battle.rating_flags(),
         "helper_uid": "",
     }
     msgs = [uint64_msg(PLAYER_STAGE, STAGE_RPLY_END_REWARD, [],
