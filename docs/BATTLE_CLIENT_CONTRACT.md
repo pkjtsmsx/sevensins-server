@@ -4,6 +4,10 @@
 from `libil2cpp.so` (2.2.7) and the shipped design pack — *not* from our server code.
 This exists because parts of it have been worked out before and lost.
 
+**See also `docs/BATTLE_RESULT_PANEL.md`** for the end-of-battle result panel: the
+`IsBattleEndReady` handshake, why a lost guild fight leaves the tap dead, and what the
+Il2CppDumper C# export can and cannot be trusted for.
+
 Rule of thumb established by decompiling: **the client renders, the server decides.**
 There is no damage calculation anywhere in the client (no `CalcDamage`/`GetDamage`; the
 `Formula` static class is progression costs only — level-up XP, rank-up, capacity). Every
