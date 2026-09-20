@@ -2922,6 +2922,13 @@ def shop_buy(r):
     # SendBuyCmd(goodsID, count) -- no shop id, goods ids are global.
     gid = r.intargs[0] if r.intargs else 0
     cnt = r.intargs[1] if len(r.intargs) > 1 else 1
+    # Snapshot storage 2 so a purchase that rolled STARSHARDS (the luckybags, the
+    # Soul Altar cards, a selector) can push the equipment sync below. The panel is
+    # cached from login exactly like the bag, and without the push a player opened
+    # the Starshards list to yesterday's inventory -- which is also what made the
+    # bulk-buy popup's single-shard lie look true.
+    eq_before = len((r.state.get("backpack") or {}).get(
+        str(ps.BP_STORAGE_EQUIPMENT), {}))
     ok, shop_id, why, new_chars = ps.buy_shop_goods(
         r.state, gid, cnt)
     if ok:
@@ -2970,6 +2977,16 @@ def shop_buy(r):
             r.send(MSG_RPC, uint_msg(
                 PLAYER_CHAR, CHAR_RPLY_CREATE, [],
                 [ps.char_create_json(r.state, new_chars)]))
+        # Storage 2 grew: the purchase paid starshards. Same message pair the
+        # battle-drop path sends -- the bare storage sync (85) carries the list but
+        # NOT the info rows the "Inventory n/999" counter reads, so it has to be
+        # 145 with backpack_info (see the rune-drop note in battle_end_reward).
+        if len((r.state.get("backpack") or {}).get(
+                str(ps.BP_STORAGE_EQUIPMENT), {})) != eq_before:
+            r.send(MSG_RPC, backpack_msg(
+                BACKPACK_CHANGE, [0],
+                [ps.backpacks_all_json(r.state, {ps.BP_STORAGE_EQUIPMENT}),
+                 ps.backpack_info_json(r.state)]))
         # Stamina bundles pay ENERGY, which the client caches
         # from the login sync like everything else.
         r.send(MSG_RPC, uint_msg(0xAE487D79, 512, [],

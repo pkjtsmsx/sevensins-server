@@ -53,6 +53,21 @@ the value their description states — including the Guard/Power/Speed/Critical/
 Surge families, whose strength now follows the SKILL that granted them (an enhanced
 bloodpact passive grants a stronger Surge than the base version, as its text says).
 
+## Starshard luckybags (hotfix, later the same day)
+
+Three user reports, all real, all fixed — thank you:
+
+- **★4 bags paid ★1–★6 shards.** The bag's star and the shard's rank are two
+  different axes and the pool was filtered on the wrong one. A ★4 (UR-LR) bag now
+  pays exactly ★4 shards at UR or LR, and the ★3 slot-6 bag pays ★3, slot 6.
+- **Bulk buys looked like ten copies of one shard.** They never were — the rolls
+  were always different, but the popup could only name one item and reported the
+  last roll ×10, and the Starshards list didn't refresh to disprove it. Multi-buys
+  now show an itemized drop list, and the panel refreshes immediately.
+- **"Test" starshards.** The game data carries 18 leftover early-development shard
+  rows that look shard-shaped to a filter; they were in the any-element bag's pool
+  and are now excluded.
+
 ## Rewards go where you can see them
 
 - Casts, Bunrei and skill books from **mail, roulette, guild payouts and event

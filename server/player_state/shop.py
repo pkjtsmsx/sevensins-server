@@ -231,16 +231,25 @@ BUNDLE_PAYOUT = {
 # element at the named grade. Starshard items encode the slot in `_action` (111..116)
 # and the grade in `_param2`, so "★4 (UR-LR) Random Slot Endearment" is exactly
 # "any _param2 4 Endearment shard", which is what the card promises.
+# (element, STAR, slot). The star is `_rarity` (also the id's last digit), the rank is
+# `_param2` on the scale N=1 R=2 SR=3 UR=4 LR=5 -- verified across all 756-per-rank
+# canonical rows -- and the card's "(UR-LR)" names the rank RANGE, so the pool is
+# `_rarity == star and _param2 in (4, 5)`. The old shape filtered `_param2 == 4` alone,
+# which is the UR RANK at EVERY star: a ★4 bag paid ★1..★6 shards, owner-reported by a
+# player who drew the whole spread from one bag. Slot is fixed only on 1200020, whose
+# card says "(Slot 6)" outright.
 RUNE_BUNDLES = {
-    1200021: ("Endearment", 4),
-    1200022: ("Chaos", 4),
-    1200023: ("Hawkeye", 4),
-    1200024: ("Defender", 4),
-    1200020: (None, 3),          # ★3 (UR-LR) Random Starshard Luckybag (Slot 6)
+    1200021: ("Endearment", 4, None),
+    1200022: ("Chaos", 4, None),
+    1200023: ("Hawkeye", 4, None),
+    1200024: ("Defender", 4, None),
+    1200020: (None, 3, 6),       # ★3 (UR-LR) Random Starshard Luckybag (Slot 6)
     # 311..314 (the Soul Altar "Summon Star Shards" cards) used to be listed here as
-    # (None, star) -- except the second field is a GRADE, so they rolled the wrong thing
-    # in both axes. They are decoded from their names now; see starshard_any_suit_box.
+    # (None, star) -- except the second field was read as a GRADE, so they rolled the
+    # wrong thing in both axes. They are decoded from their names now; see
+    # starshard_any_suit_box.
 }
+RUNE_BUNDLE_RANKS = (4, 5)       # UR, LR -- what every luckybag card promises
 
 # **Drop Info shows "SET" icons, which are display-only and cannot be used.** They are
 # the `Random ★{star} {Element}` items -- five per (element, star), one per RANK
@@ -497,19 +506,32 @@ def rune_star_suit_pool(star, suit):
     return _rune_pool_cache[key]
 
 
-def rune_bundle_pool(element, grade):
-    """Starshard item ids matching an element (or any) at a grade."""
-    key = (element, grade)
+def rune_bundle_pool(element, star, slot=None):
+    """Starshard item ids for one luckybag: element (or any), at STAR, ranks UR-LR.
+
+    Banded to the canonical element ids (201xxx..221xxx): the pack also carries the
+    legacy per-stat rows 2001..2018 ("3星霄闇攻擊" -- ★3 Nightshade et al.) whose
+    `_action`/`_param2` look shard-shaped, and without the band the any-element bag
+    dealt them out. They are not equippable through the Starshards panel, which is the
+    "test starshards" a player reported drawing."""
+    key = (element, star, slot)
     if key not in _rune_pool_cache:
         pool = []
         for iid, row in (bt.dd.rows("item") or {}).items():
+            i = int(iid)
+            if i // 1000 not in STARSHARD_ELEMENT_BAND:
+                continue
             if int(row.get("_action") or 0) not in range(111, 117):
                 continue
-            if int(row.get("_param2") or 0) != grade:
+            if int(row.get("_rarity") or 0) != star:
+                continue
+            if int(row.get("_param2") or 0) not in RUNE_BUNDLE_RANKS:
+                continue
+            if slot and (i // 100) % 10 != slot:
                 continue
             if element and element not in (row.get("_itemName_en") or ""):
                 continue
-            pool.append(int(iid))
+            pool.append(i)
         _rune_pool_cache[key] = sorted(pool)
     return _rune_pool_cache[key]
 
@@ -996,10 +1018,20 @@ def grant_goods(state, item_id, amount, rng=None):
         pool = rune_bundle_pool(*bundle)
         if pool:
             from .gear import grant_rune       # local: gear imports core, not us
-            got = None
+            import collections as _c
+            rolls = _c.Counter()
             for _ in range(max(1, amount)):
                 got = rng.choice(pool)
+                rolls[got] += 1
                 grant_rune(state, got, rune_slot(got) or 1)
+            # A MULTI-ROLL is itemized through _last_payout, so the client gets one
+            # DropItemRply listing every shard actually rolled. Reply 513's own popup
+            # can only carry a single (id, count) pair, and reporting the LAST roll x
+            # amount there told a player their 10x buy paid ten copies of one shard --
+            # while the server had granted ten different ones. Owner-reported.
+            if sum(rolls.values()) > 1:
+                state.setdefault("_last_payout", {})[str(item_id)] = \
+                    sorted(rolls.items())
             return [], got, max(1, amount)
 
     # A random ★5+ cast orb.
@@ -1221,7 +1253,7 @@ def box_contents(item_id):
         return [[int(i), int(c)] for i, c in payout]
     bundle = RUNE_BUNDLES.get(item_id)
     if bundle:
-        element, star = bundle
+        element, star = bundle[0], bundle[1]
         if element:
             # One element, random slot -> its UR and LR set icons.
             ranks = starshard_set_items(element, star)
