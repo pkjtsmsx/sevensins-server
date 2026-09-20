@@ -892,6 +892,19 @@ _COEF_COUNTER = re.compile(
     r"strikes?\s+back\s+(?:by|with)\s+(\d+(?:\.\d+)?)\s*[%％]\s*"
     r"(?:of\s+)?(?:the\s+caster's\s+)?(ATK|DEF|Max HP|HP)",
     re.I)
+# The CHINESE counter sentence, tried before the EN counter anchor because the EN is a
+# translation with real errors here: Sky Devil's ZH ladders 100/100/110/110% while its
+# EN says 110 on all four ranks (UserContrib counter-sweep). Group 1 catches the two
+# phrasings whose basis is the OTHER party's stat -- Royal Flush counters 以目標自身
+# 攻擊力200% and the Vengeance Set 以敵人100%的攻擊力 -- i.e. the ATTACKER's ATK, not
+# the holder's; filing those as self-ATK would be wrong at the right percentage.
+# Both operand orders exist: 以80%攻擊力的傷害回擊 (pct first) and 以目標自身攻擊力
+# 200%的傷害回擊 (stat first, Royal Flush).
+_COEF_COUNTER_ZH = re.compile(
+    r"以(目標自身|敵人)?\s*"
+    r"(?:(\d+(?:\.\d+)?)\s*[%％]\s*的?\s*(攻擊力|防禦力)"
+    r"|(攻擊力|防禦力)\s*(\d+(?:\.\d+)?)\s*[%％])"
+    r"(?:的傷害)?[^。\n]{0,8}(?:回擊|反擊)")
 # Chinese writes it either way round: `攻擊力95%` or `95%攻擊力`.
 # `％` (full-width) as well as `%`: "360％防禦力的傷害" is how every rank of Sweets
 # Sweet Heart is written, and with `%` alone the whole family compiled to a damage
@@ -2440,14 +2453,41 @@ def damage(r, targets_enemy):
     # the real coefficient with the heal and the match slides to a rider's 200% -- an
     # A/B over all 14,410 skills showed 97 rows moving, most of them wrong. Anchoring
     # on the verb changes exactly the counter-shaped rows and nothing else.
-    m = (_COEF_DEAL.search(note_en) or _COEF_COUNTER.search(note_en)
-         or _COEF.search(note_en))
+    of_attacker = False
     basis, coef, source = None, None, None
+    m = None
+    if r.get("_type") in (4, 6):
+        # PASSIVES: the ZH counter sentence first. The EN can phrase a counter as
+        # "Deals N% ATK as counter", which the attack anchor below would claim --
+        # and only the Chinese says whose stat it scales off (以目標自身攻擊力,
+        # 以敵人的攻擊力 = the ATTACKER's).
+        mz = _COEF_COUNTER_ZH.search(r.get("_note1") or "")
+        if mz:
+            basis = {"攻擊力": "ATK", "防禦力": "DEF"}[mz.group(3) or mz.group(4)]
+            coef = round(float(mz.group(2) or mz.group(5)) / 100.0, 4)
+            source = "zh"
+            of_attacker = mz.group(1) is not None
+    if coef is None:
+        m = _COEF_DEAL.search(note_en)
     if m:
         basis = m.group(2).upper().replace(" ", "_")
         coef = round(float(m.group(1)) / 100.0, 4)
         source = "en"
-    else:
+    if coef is None:
+        # ZH counter sentence BEFORE the EN counter anchor -- see _COEF_COUNTER_ZH.
+        mz = _COEF_COUNTER_ZH.search(r.get("_note1") or "")
+        if mz:
+            basis = {"攻擊力": "ATK", "防禦力": "DEF"}[mz.group(3) or mz.group(4)]
+            coef = round(float(mz.group(2) or mz.group(5)) / 100.0, 4)
+            source = "zh"
+            of_attacker = mz.group(1) is not None
+    if coef is None:
+        m = _COEF_COUNTER.search(note_en) or _COEF.search(note_en)
+        if m:
+            basis = m.group(2).upper().replace(" ", "_")
+            coef = round(float(m.group(1)) / 100.0, 4)
+            source = "en"
+    if coef is None:
         # The Chinese writes the percentage BEFORE the stat -- `95%攻擊力的2段傷害` --
         # which is why the English-shaped pattern finds nothing in these rows.
         m = _COEF_ZH.search(_without_heal_clauses(r.get("_note1") or ""))
@@ -2468,8 +2508,12 @@ def damage(r, targets_enemy):
         if word in low:
             times = n
             break
-    return {"op": "damage", "basis": basis, "coefficient": coef,
-            "prose_times": times, "source": source}
+    out = {"op": "damage", "basis": basis, "coefficient": coef,
+           "prose_times": times, "source": source}
+    if of_attacker:
+        # 以目標自身攻擊力/以敵人X%的攻擊力 -- the counter scales off the OTHER party.
+        out["of"] = "attacker"
+    return out
 
 
 # --- passives: WHEN a clause fires ---------------------------------------------------
@@ -2494,7 +2538,8 @@ PASSIVE_TRIGGERS = [
     # damage" share every word but the verb.
     ("on_damage_taken", re.compile(
         r"\b(?:when|while|after|every\s+time|each\s+time|upon|if)\b[^,.;]{0,40}?"
-        r"(?:tak(?:e|es|ing)\s+(?:damage|attacks?|enemy)|damaged|受到傷害|被攻擊)", re.I)),
+        r"(?:tak(?:e|es|ing)\s+(?:damage|attacks?|enemy)|damaged)"
+        r"|受到傷害|受到攻擊|被攻擊", re.I)),
     ("on_damage_dealt", re.compile(
         r"\b(?:when|while|after|every\s+time|each\s+time|upon|if)\b[^,.;]{0,40}?"
         r"(?:deal(?:s|ing)?\s+(?:any\s+)?(?:damage|attack)|land(?:s|ing)\s+a\s+critical"
@@ -2734,7 +2779,8 @@ _PASSIVE_EFFECT_WORD["remove_status"] = re.compile(r"\bremoves?\b|移除|解除"
 # damage effect deferred as unnamed -- no clause, no trigger, no rule. That includes
 # Belphegor's Deflection: the engine's on_damage_taken branch never saw it.
 _PASSIVE_EFFECT_WORD["damage"] = re.compile(
-    r"\bdeals?\b[^,.;]{0,20}damage|造成.{0,6}傷害|strikes?\s+back|回擊|反擊", re.I)
+    r"\bdeals?\b[^,.;]{0,20}damage|造成.{0,6}傷害|strikes?\s+back|\bcounters?\b|回擊|反擊",
+    re.I)
 _PASSIVE_EFFECT_WORD["modify_cd"] = re.compile(r"cooldown|冷卻", re.I)
 
 
@@ -2788,6 +2834,26 @@ def annotate_passive(r, spec, rows=None):
             word = _PASSIVE_EFFECT_WORD.get(op)
             m = word.search(note) if (word and note) else None
             clause, name = (_sentence_at(note, m.start()) if m else None), op
+            if clause is None and op == "damage" and word is not None:
+                # DAMAGE ONLY, and split on the CHINESE full stop. The EN names the
+                # effect with no recognized verb at all (the Vengeance Set's counter
+                # clause), while the Chinese says 反擊 outright -- but _sentence_at
+                # splits on [.!?], so handing it the ZH note returns the WHOLE note
+                # and the first 戰鬥開始時 anywhere in it wins the trigger. An A/B
+                # over all skills showed 140+ non-damage effects picking up
+                # battle_start that way -- a wrong trigger, which is worse than a
+                # missing one. Damage is the one op where the counter vocabulary
+                # makes the ZH sentence unambiguous.
+                # COUNTER vocabulary only, not the generic 造成…傷害 -- that also
+                # matches ※-glossary lines about damage MODIFIERS ("破斧：造成的最終
+                # 傷害+30%，持續整場戰鬥"), and taking one of those handed the
+                # skill's damage effect a battle_start trigger off an unrelated
+                # sentence.
+                zh_note = r.get("_note1") or ""
+                for frag in re.split(r"[。；\n]", zh_note):
+                    if re.search(r"回擊|反擊", frag):
+                        clause = frag
+                        break
         if not clause:
             deferred.append((e, name))
             continue

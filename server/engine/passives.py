@@ -885,9 +885,15 @@ def _compiled_rules(spec):
             # and no per-cast action counter exists to gate on. So these fire on every
             # hit taken, which is STRONGER than retail, not weaker -- worth knowing
             # before reading a damage number off a device.
+            # `of: attacker` -- the ZH states the counter scales off the OTHER
+            # party's stat (Royal Flush 以目標自身攻擊力, Vengeance Set 以敵人的
+            # 攻擊力). OF_OTHER_ATK reads the event's other party, which on
+            # on_damage_taken is exactly the attacker. Filing these as self-ATK
+            # would be wrong at the right percentage (UserContrib counter-sweep).
             rules.append(Rule(
                 trigger, effect=DAMAGE, to=ATTACKER, when=when, chance=chance,
-                basis=(OF_SELF_DEF if (eff.get("basis") or "").upper() == "DEF"
+                basis=(OF_OTHER_ATK if eff.get("of") == "attacker"
+                       else OF_SELF_DEF if (eff.get("basis") or "").upper() == "DEF"
                        else OF_SELF_ATK),
                 # The compiler stores a multiplier (3.5); Rule.magnitude is a percent.
                 magnitude=float(eff["coefficient"]) * 100.0,
