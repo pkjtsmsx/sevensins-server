@@ -1,3 +1,76 @@
+# Server Update — 20 September
+
+**How to update:** open the app, tap **Check for updates**, then restart the app when it
+asks. Your account is not touched by an update.
+
+**Heads-up:** this is a big battle update and most of it is fresh — if a fight behaves
+strangely, that report is exactly what we need.
+
+---
+
+## The guild defeat screen works
+
+Losing a Guild Weekly fight left you stuck on "BATTLE ENDS" with a Tap to End that did
+nothing — your score was banked, but the only way out was killing the app. Every tap
+was actually crashing inside the results screen because of one missing value in the
+defeat payload. Fixed and verified on a device; win or lose, the fight now exits
+cleanly to the Record page. (The "BATTLE ENDS" banner on a guild *victory* is what the
+real game shows too — that part was never a bug.)
+
+## [Elite] finally means something
+
+185 skills in the game say things like "if the target is Elite…" — bonus damage,
+crit buffs, whole kits built around boss-killing. None of them ever worked, twice over:
+the bosses that ARE Elite never actually held the marker, and the "is the target
+Elite?" check was being asked about the wrong unit. Both fixed. Daily dungeon bosses,
+tower bosses, raid bosses and each story chapter's final boss now count as Elite, and
+your Elite-killer kits read it correctly.
+
+## Passives you could never see — or feel
+
+- **"Can only trigger once per battle" now means once.** Some limited passives (life
+  steals, one-time saves) could re-trigger on every hit.
+- **Turn-start and after-action passives now show up.** Buffs a passive granted
+  mid-fight were applied silently — no icon, no popup. Kills from passive damage are
+  now announced instead of leaving the victim standing on your screen forever.
+- **Revive passives reach the screen.** A passive that raised an ally used to change
+  the server's numbers and tell nobody — the "revived" unit looked dead until relog.
+- **Deaths trigger everything they should.** A counter-kill, a poison death or a
+  stray rider kill now fires on-death passives (revives, cleanses) like a direct kill.
+
+## Counterattacks, round two
+
+Last update made 8 casts counter. This one fixes the rest: about **100 counter
+passives** now fire, including Eternal Dream/Freeze, Knight's Spirit, Sky Devil,
+Solidarity, Royal Flush and the Vengeance set bonus. Two subtleties from the Chinese
+text: Asmodeus (Royal Flush) and the Vengeance set counter with **the attacker's**
+ATK, not their own — and Sky Devil's early ranks counter at 100%, not 110%.
+
+## Buffs carry their real numbers
+
+Around **420 status effects** that applied, drew an icon and moved nothing now carry
+the value their description states — including the Guard/Power/Speed/Critical/Health
+Surge families, whose strength now follows the SKILL that granted them (an enhanced
+bloodpact passive grants a stronger Surge than the base version, as its text says).
+
+## Rewards go where you can see them
+
+- Casts, Bunrei and skill books from **mail, roulette, guild payouts and event
+  exchanges** now land in your Cast List instead of vanishing (the shop already
+  worked).
+- **LR Soulmirror Sets and Selectors** open into real mirrors (about half the boxes in
+  the game — the rest, mostly outfit-series, still land in the bag while we work out
+  their mapping).
+- The **★5 Awaker Orb** now always pays an SSR cast. It could pay a ★4-grade beginner
+  cast before.
+- Casts from quest rewards and exchanges arrive at the **right star** (an SSR from a
+  shard shop was arriving one rung low).
+- Items split across two bag stacks now **actually get consumed** — some purchases
+  and karma gifts were effectively free, which also meant some players got karma for
+  gifts that never left their bag.
+
+---
+
 # Server Update — 12 September
 
 **How to update:** open the app, tap **Check for updates**, then restart the app when it
