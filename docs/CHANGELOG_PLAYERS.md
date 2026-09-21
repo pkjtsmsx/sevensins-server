@@ -68,6 +68,20 @@ Three user reports, all real, all fixed — thank you:
   rows that look shard-shaped to a filter; they were in the any-element bag's pool
   and are now excluded.
 
+## Rank Up repaired (third hotfix)
+
+- **Starter Lucifer and Leviathan can rank to ★6.** Your two starting casts carried an
+  unset star internally: the panel showed a 5★ cast, the server priced a 0★ one and
+  refused every attempt. Only the starters were affected.
+- **EX Rank Up works.** The purple-star path past ★6 was never implemented — the panel
+  showed no cost and the button did nothing. It now works, six rungs, priced in Coin
+  (500k up to 5M per rung, no materials for now — the price the panel shows is exactly
+  what is charged).
+- **No more phantom "downgrade".** Ranking a cast that already has purple stars was
+  showing a downgrade to a plain 5★ — display fallout of the unimplemented EX path.
+  With the real reply in place the cast updates correctly. If you saw this happen,
+  nothing was actually lost server-side.
+
 ## Lost rewards come back (second hotfix)
 
 Two more reports, one cause. Grimoires of Sin/Virtue/Rider (and ★N Awaker/Minion

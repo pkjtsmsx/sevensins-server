@@ -427,7 +427,16 @@ def rank_up_char(state, uid):
     entry = state["roster"].get(uid)
     if not entry:
         return False, 0, 0
-    star = int(entry.get("star") or 0)
+    # RESOLVE THE DEFAULT, same as char_max_lv and the serializer. A seeded cast
+    # (the starter Lucifer and Leviathan, exactly) carries `star: None` until its
+    # first rank-up succeeds -- and `None or 0` read that as star 0, below
+    # MinRankUpStar, so THIS refusal fired on every attempt: the panel showed a
+    # 5-star cast, the server priced a 0-star one, and the starters could never
+    # reach 6. Owner-reported as "starter Levi and Luci can't rank up to 6".
+    star = entry.get("star")
+    if star is None:
+        star = bt._default_star(bt.dd.row("char", entry["id"]) or {})
+    star = int(star or 0)
     if star < MIN_RANKUP_STAR or star >= MAX_STAR:
         return False, 0, 0
     gems, coins = rank_up_cost(star)
@@ -444,6 +453,55 @@ def rank_up_char(state, uid):
     # MaxLv = plus + 10*star + 5*super_star, so the cap rises with the star. The level
     # itself is untouched -- the panel advertises "Max Lv. 40 > 50", not a level gain.
     return True, gems, coins
+
+
+# ---- EX Rank Up (PanelCharacterUpgrade, cmd 289 -> reply 545) ---------------
+# `RequestSuperRankUp(target_uid)` sends strargs = [uid]; reply 545 shares
+# receivedOneCharAndRemove with 534..537 (IDA's jumptable annotation on
+# PlayerChar.OnClientCmdReceived names cases 534-537,545 as one block), so the reply
+# body is the same updated CharData as a regular rank up.
+#
+# The panel prices this from GeneralSyncGameRuleData, NOT from the pack:
+#   SetRankUpCost (0x18ad4e4):        cost = superRankUpCost[Alignment.ToString()][superStar]
+#   InitRankUpMaterialInfo (0x18b93d0): mats = superRankUpMaterial[align][superStar][job-1]
+#                                       as [itemId, count] pairs, shown via GetItemCount.
+# Both dictionaries are retail live-ops data this snapshot does not carry, so the COIN
+# ladder below is an OWNER-SET design choice (continuing the 50k/150k/500k regular
+# curve), and the material table ships EMPTY on purpose: the panel then shows no
+# material requirement and the rung costs coins only. When retail values surface, fill
+# SUPER_RANKUP_MATERIALS and the general sync serialises them as-is.
+SUPER_RANKUP_COINS = [500_000, 1_000_000, 1_500_000, 2_000_000, 3_000_000, 5_000_000]
+MAX_SUPER_STAR_RANKUP = 6                     # client caps at superStar == 6
+
+
+def super_rank_up_cost(entry):
+    """-> coin cost for this cast's NEXT super star, or None when maxed/not star 6."""
+    star = entry.get("star")
+    if star is None:
+        star = bt._default_star(bt.dd.row("char", entry["id"]) or {})
+    if int(star or 0) < MAX_STAR:
+        return None
+    ss = int(entry.get("super_star") or 0)
+    if ss >= MAX_SUPER_STAR_RANKUP:
+        return None
+    return SUPER_RANKUP_COINS[ss]
+
+
+def super_rank_up_char(state, uid):
+    """Raise one star-6 cast's super_star by 1 for coins. -> (ok, coins)."""
+    entry = state["roster"].get(uid)
+    if not entry:
+        return False, 0
+    coins = super_rank_up_cost(entry)
+    if coins is None:
+        return False, 0
+    if int(state["currency"].get(str(CURRENCY_COIN), 0)) < coins:
+        return False, 0
+    state["currency"][str(CURRENCY_COIN)] = \
+        int(state["currency"].get(str(CURRENCY_COIN), 0)) - coins
+    entry["star"] = MAX_STAR                    # materialise the default while here
+    entry["super_star"] = int(entry.get("super_star") or 0) + 1
+    return True, coins
 
 
 # ---- Transcend (PanelCharacterUpgrade, CharRpcServerCmd.char_plus_up 280) ----
@@ -527,7 +585,12 @@ def transcend_char(state, uid, material_uids):
     pxp = coins = 0
     for m in mats:
         mat = state["roster"][m]
-        star = mat.get("star") or 0
+        # Same star: None trap as rank_up_char -- a seeded starter fed as material
+        # priced as star 0 instead of its real rung.
+        star = mat.get("star")
+        if star is None:
+            star = bt._default_star(bt.dd.row("char", mat["id"]) or {})
+        star = int(star or 0)
         same = target_job is not None and char_job(mat["id"]) == target_job
         pxp += plusup_food_pxp(star, same)
         coins += plusup_food_cost(star)      # cost ignores the same-job bonus

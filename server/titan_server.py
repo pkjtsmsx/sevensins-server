@@ -554,6 +554,10 @@ CHAR_REQ_SELL, CHAR_RPLY_SELL = 291, 547
 CHAR_REQ_LEVEL_UP, CHAR_RPLY_LEVEL_UP = 278, 534
 # CharRpcServerCmd.char_rank_up / CharRpcClientCmd.char_rank_up -- Rank Up.
 CHAR_REQ_RANK_UP, CHAR_RPLY_RANK_UP = 279, 535
+# EX Rank Up: RequestSuperRankUp (0x16a0800) sends 289 with strargs=[uid]; the reply
+# jumptable routes 545 into receivedOneCharAndRemove alongside 534..537, so the body
+# is the same updated CharData as a regular rank up.
+CHAR_REQ_SUPER_RANK_UP, CHAR_RPLY_SUPER_RANK_UP = 289, 545
 # CharRpcServerCmd.char_plus_up / CharRpcClientCmd.char_plus_up -- Transcend.
 CHAR_REQ_PLUS_UP, CHAR_RPLY_PLUS_UP = 280, 536
 # Names and numbers below are from the CharRpcServerCmd / CharRpcClientCmd enums in
@@ -2214,6 +2218,30 @@ def char_rank_up(r):
             [ps.backpack_json(r.state, ps.BP_STORAGE_NORMAL)]))
         r.send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
                                [ps.currency_json(r.state)]))
+
+
+@rpc(PLAYER_CHAR_SERVER, CHAR_REQ_SUPER_RANK_UP)
+def char_super_rank_up(r):
+    # EX Rank Up: star-6 casts, super_star 0..6. Coin-only for now -- the material
+    # table the panel displays is served empty from the game-rule sync, so what the
+    # player is shown is exactly what is charged (see charprogress.SUPER_RANKUP_COINS
+    # for the owner-set ladder and the retail-data caveat).
+    uid = r.strargs[0] if r.strargs else ""
+    ok, coins = ps.super_rank_up_char(r.state, uid)
+    if ok:
+        ps.save(r.state)
+        e = r.state["roster"].get(uid, {})
+        log(f"    -> EX rank up {uid} -> super_star {e.get('super_star')} "
+            f"(spent {coins} coins)")
+    else:
+        log(f"    -> EX rank up REFUSED for {uid!r} -- not star 6, maxed, "
+            f"or not enough coins")
+    # Always reply, or the panel waits forever (same rule as 279).
+    r.send(MSG_RPC, uint_msg(PLAYER_CHAR, CHAR_RPLY_SUPER_RANK_UP, [],
+                             [ps.char_data_json(r.state, uid)]))
+    if ok:
+        r.send(MSG_RPC, sint_msg(0xBC8FDA7C, 512, [],
+                                 [ps.currency_json(r.state)]))
 
 
 @rpc(PLAYER_CHAR_SERVER, CHAR_REQ_LEVEL_UP)

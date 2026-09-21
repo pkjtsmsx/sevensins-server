@@ -54,7 +54,7 @@ def check_registry_shape():
     for idx, _cmd in ts.HANDLERS:
         by_sub[idx] = by_sub.get(idx, 0) + 1
     check("Char, Backpack and Shop are in the table",
-          by_sub.get(ts.PLAYER_CHAR_SERVER) == 24 and by_sub.get(ts.BACKPACK_SERVER) == 9
+          by_sub.get(ts.PLAYER_CHAR_SERVER) == 25 and by_sub.get(ts.BACKPACK_SERVER) == 9
           and by_sub.get(ts.SHOP_SERVER) == 5, str(by_sub))
     # The chain must no longer carry what the table answers, or the two could drift.
     src = open(os.path.join(HERE, "titan_server.py"), encoding="utf-8").read()
@@ -69,7 +69,7 @@ def check_registry_shape():
     left = re.findall(r"^ {20}elif \(?index == (\S+)", src, re.M)
     check("only the Battle branch still dispatches on index in the chain",
           left == ["bt.BATTLE_SERVER_INDEX"], str(left))
-    check("the registry holds 75 pairs", len(ts.HANDLERS) == 75, str(len(ts.HANDLERS)))
+    check("the registry holds 76 pairs", len(ts.HANDLERS) == 76, str(len(ts.HANDLERS)))
 
     dup = False
     try:

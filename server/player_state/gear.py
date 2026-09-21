@@ -1024,6 +1024,27 @@ def game_rule_json():
     d["super_limit_define"] = SUPER_LIMIT_DEFINE
     for k in GAME_RULE_EMPTY_DICTS:
         d[k] = {}
+    # EX Rank Up (cmd 289). SetRankUpCost prices the star-6 rungs from
+    # superRankUpCost[Alignment.ToString()][superStar] and InitRankUpMaterialInfo
+    # reads superRankUpMaterial[align][superStar][job-1] as [itemId, count] pairs --
+    # both retail live-ops tables the snapshot lacks, so the coin ladder is owner-set
+    # (see charprogress.SUPER_RANKUP_COINS) and the materials are deliberately empty
+    # per rung: the panel then shows no material requirement, which is exactly what
+    # the server charges. Keyed by every alignment a playable cast carries; ContainsKey
+    # misses price as 0, so covering all of them is what makes the button honest.
+    from .charprogress import SUPER_RANKUP_COINS
+    # The char table carries 212 distinct `_alignment` values, most of them AVG/mob
+    # banding in the hundreds of thousands; the playable buckets are the two-digit-to-
+    # four-digit ones (1/2 tutorial, 100..104 Sin/Virtue/Rider/Awakers, 200..203, 904/
+    # 905, 9001 minions). Keying the table to those keeps the sync payload at 14 rows
+    # instead of 212 of identical padding.
+    aligns = sorted({int(r.get("_alignment") or 0)
+                     for r in (bt.dd.rows("char") or {}).values()
+                     if isinstance(r, dict) and r.get("_alignment")
+                     and int(r.get("_alignment") or 0) < 10000})
+    d["super_rank_up_cost"] = {str(a): list(SUPER_RANKUP_COINS) for a in aligns}
+    d["super_rank_up_material"] = {str(a): [[] for _ in SUPER_RANKUP_COINS]
+                                   for a in aligns}
     # All five magnification lists are parsed as decimals; 1 per rarity keeps the
     # arithmetic at the base curve rather than leaving the loops empty.
     for k in ("soulfrag_enhance_coin_magnification",
