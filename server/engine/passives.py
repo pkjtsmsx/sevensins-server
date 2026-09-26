@@ -188,6 +188,21 @@ def holds(name, on="holder"):
     return _f
 
 
+def used_special():
+    """The holder's LAST action was its Special Move (必殺技).
+
+    Reads `skill_type` out of the ctx, which battle.end_turn fills from the design row --
+    so "sp_skill" is the game's own classification, not a guess from the slot index.
+
+    45 passive skills across 27 groups gate a clause on the Special Move and 20 were
+    compiled `unmodelled` for want of any way to ask. AFTER_ACTION is the only trigger
+    this can be judged at: it is the only one that follows a specific action.
+    """
+    def _f(h, u, c=None):
+        return bool(c) and (c.get("skill_type") == "sp_skill")
+    return _f
+
+
 def stacks_at_least(name, n, on="other"):
     """`on` holds at least `n` stacks of a status.
 
@@ -901,6 +916,46 @@ def _compiled_rules(spec):
     return rules
 
 
+# --- rules ADDED to the derived set, rather than replacing it -----------------------
+#
+# `PASSIVES` above is all-or-nothing: a hand entry wins outright, which is right when the
+# prose defeats the compiler wholesale. It is WRONG when the compiler got most of a
+# passive and missed one clause -- writing the whole cast out by hand to add that clause
+# discards the derived rules AND their per-level magnitudes, which are the thing the
+# derivation is best at.
+#
+# Satan is exactly that: four of his five clauses compile (Wrath twice, Summit War, his
+# immunities) and only the Bankai grant does not. Putting him in `PASSIVES` silently
+# deleted his Wrath stacking -- and Wrath is what feeds the very clause being added, so
+# the passive would have been strictly worse than before the "fix".
+#
+# Appended after the derived rules, so ordering within a trigger follows the prose.
+PASSIVES_EXTRA = {
+    # SATAN -- Krampus of The Undead World: NOTHING IS NEEDED HERE, and this note is the
+    # record of why.
+    #
+    # A rule granting Bankai used to live here, written on the belief that the clause was
+    # unmodelled -- "回合開始時，若「盛怒」達到5層，使用必殺技時將賦予自身「萬解」" appears in
+    # the passive's `unmodelled` list three times over. It is NOT missing: 使用必殺技時
+    # points at the Special Move, and the Special Move already does it. `2002121 Purgatory
+    # Xmas Tree` compiles `apply_status Bankai` with `requires {status: Wrath, count: 5}`
+    # and `permanent: True`, straight off its own prose ("行動開始前，若自身「盛怒」達到5層，
+    # 使自身附加「萬解」"). The passive clause restates what the Special Move does; it is
+    # not a second mechanism.
+    #
+    # The hand rule was worse than nothing in three ways the compiled effect gets right:
+    # it hardcoded 5 stacks where the pack varies the threshold by rung (5 at I, 3 at III,
+    # NONE at VI -- 2002126 just grants it), it fired on AFTER_ACTION where the prose says
+    # 行動開始前, and it took the default 2-turn duration where 萬解 states 持續整場戰鬥,
+    # "lasts the entire battle". Removed rather than patched: the mechanism already
+    # existed, and reading the pack harder was the whole job.
+    #
+    # What DID need doing lives elsewhere -- Bankai's SPD figure in
+    # `status.BANKAI_SPD_UP`, and the pursuit's per-rung coefficient in
+    # `pursuit_values.PURSUIT_NAMED_SKILL`.
+}
+
+
 def rules_for(skill_id):
     """-> the rules for a passive, by its group (all levels share one entry).
 
@@ -913,7 +968,7 @@ def rules_for(skill_id):
     group = spec.get("group") or skill_id
     hand = PASSIVES.get(group)
     if hand:
-        return hand
+        return hand + list(PASSIVES_EXTRA.get(group) or ())
     # DERIVED RULES CACHE PER SKILL, NOT PER GROUP. The hand table is written per cast
     # and is level-agnostic, so a group key is right for it. Derived rules are not: the
     # magnitudes come out of the spec, and the spec is per LEVEL -- Jealousy Vortex is
@@ -924,7 +979,11 @@ def rules_for(skill_id):
     # the result depended on call order: requesting V before I gave the whole ladder
     # 350%, requesting I first gave it 175%. Two runs of the same fight could disagree.
     if skill_id not in _COMPILED:
-        _COMPILED[skill_id] = _compiled_rules(spec)
+        # Derived rules PLUS any hand-written addition for the clauses the compiler could
+        # not express. Cached per skill (per level) like the derived set, so the extra
+        # rule rides along without a second lookup on every fire. See PASSIVES_EXTRA.
+        _COMPILED[skill_id] = (_compiled_rules(spec)
+                               + list(PASSIVES_EXTRA.get(group) or ()))
     return _COMPILED[skill_id]
 
 

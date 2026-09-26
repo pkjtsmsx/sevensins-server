@@ -201,7 +201,40 @@ def battle_team(state, index=0):
     for e in party:
         _annotate_bloodpact(state, e)
         _annotate_gear(state, e)
+        _annotate_master(state, e)
     return party or list(state.get("team", []))
+
+
+def _annotate_master(state, entry):
+    """The rung this cast's Consonance master passive is taken to.
+
+    NOTHING IN THE PACK OR THE SAVE RECORDS THIS. The client's DesignSoulbookKizunaRow --
+    which would say how deep each cast's ladder runs and what it costs -- is not in this
+    design pack, and no RPC ever sends a master-passive level, so there is no number to
+    reconstruct. This is a design choice (CLAUDE.md section 1), made explicit here:
+
+        the passive's rung = the cast's KARMA rank, clamped to its ladder depth.
+
+    Karma rank is the Consonance panel's own progression axis -- it is the same panel, and
+    `flv` is already stored and already drives `_flvBonus` -- so this needs no new save
+    field and no new RPC, and it scales with the thing the passive belongs to. A cast at
+    Karma 1 gets rung I; Lucifer's 6-rung ladder maxes at Karma 6, Leviathan's 10-rung at
+    Karma 10, and anything above that clamps.
+
+    Rejected alternative, for the record: the highest level stored against the cast's
+    equipped Kizuna support ROWS. Those rows have no link to the passive -- the row ids
+    come from the form we do not have -- so the number would have been arbitrary, and it
+    would have paid nothing at all to a player who never opened the panel.
+
+    battle.Unit clamps to the real depth again, so an inflated `flv` cannot over-level it.
+    """
+    from .core import karma_of
+    try:
+        level = int((karma_of(state, entry.get("id")) or {}).get("flv", 1))
+    except Exception:                       # noqa: BLE001 -- never break a party build
+        return
+    if level > 0 and bt.master_passive(entry.get("id")):
+        entry["master_lv"] = level
 
 
 # ---- Consonance (Karma) stat rewards ----------------------------------------
@@ -380,6 +413,39 @@ def _annotate_skillup(state, entry):
         merged[key] = merged.get(key, 0) + value
     entry["gear_bonus"] = merged
     entry["skillup_bonus"] = bonus
+
+
+def sheet_bonus(state, entry):
+    """-> {stat key: total} the LOBBY SHEET has to add on top of the grow rung.
+
+    The two ladders battle already applies but `_char_data_json` never did: Consonance
+    (`_flvBonus`) and Skill Up (`_limitBonus`). Both are folded into `gear_bonus` for a
+    fight, so at Karma 30 Leviathan fought with the ladder and her Cast sheet still
+    showed the Karma 1 numbers -- which reads as "Consonance does nothing". CharData's
+    stats are [JsonProperty], read straight off this payload, so the client cannot add
+    them itself.
+
+    Equipment is deliberately NOT here: the client computes the gear deltas itself (see
+    _annotate_gear), so adding `gear_bonus` wholesale would double-count it.
+
+    hp/atk/def/spd only. cri/cdi are in the design x10 scale and every char_grow row in
+    this pack has them at 0, so their wire scale is unconfirmed and a guess would print
+    a wrong percentage.
+    """
+    from .core import karma_of
+    try:
+        level = (karma_of(state, entry.get("id")) or {}).get("flv", 1)
+    except Exception:                       # noqa: BLE001 -- never break a sheet
+        return {}
+    total = ((entry.get("limit_book") or 0) + (entry.get("limit_char") or 0)
+             + (entry.get("limit_suit") or 0) + (entry.get("super_star") or 0))
+    out = {}
+    for src in (consonance_bonus(entry.get("id"), level),
+                skillup_bonus(entry.get("id"), total)):
+        for key in ("hp", "atk", "def", "spd"):
+            if src.get(key):
+                out[key] = out.get(key, 0) + src[key]
+    return out
 
 
 def _annotate_gear(state, entry):

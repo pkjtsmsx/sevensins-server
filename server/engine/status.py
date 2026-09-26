@@ -382,9 +382,17 @@ def tick_damage(unit):
     """
     dot = hot = 0
     for st in _actives(unit):
+        base = st.source_atk if st.source_atk else getattr(unit, "atk", 0)
+        # 凍結 is classified `control`, so it never reached the DoT branch even though
+        # its Chinese says 受到持續性的傷害. Its size is a house number (CONTROL_DOT);
+        # everything else about it -- the ATK basis, the source snapshot, the stacking --
+        # is the same machinery every other DoT uses.
+        house = CONTROL_DOT.get(st.status_id)
+        if house:
+            dot += int(base * house / 100.0) * max(1, st.stacks)
+            continue
         if st.kind not in ("dot", "heal") or st.magnitude is None:
             continue
-        base = st.source_atk if st.source_atk else getattr(unit, "atk", 0)
         amount = int(base * float(st.magnitude) / 100.0) * max(1, st.stacks)
         if st.kind == "dot":
             dot += amount
@@ -451,19 +459,45 @@ def tick(unit):
 # impossible without a depth counter to tune.
 
 
+# A nested script that fires ONLY when its holder's own action ends, not once per global
+# turn like the rest. One status states this, and the difference is load-bearing:
+#
+#   邪眼詛咒 (407): 自身行動結束時，造成...傷害，並50%固定機率對自身附加逆風,
+#                  50%固定機率對自身附加石化
+#   ("WHEN THE HOLDER'S OWN ACTION ENDS ... 50% chance to inflict Headwind on itself")
+#
+# Run once per global turn instead, it becomes a permanent lockout that cannot unwind: the
+# Headwind it inflicts blocks the holder's move gauge, so the holder never acts -- and the
+# script keeps firing anyway, renewing the Headwind forever. A unit sat out a 44-turn
+# fight at FULL HP that way, which is what the fuzzer's starvation invariant caught.
+# Gated on the holder's own action, a blocked holder simply stops accruing more.
+#
+# Measured over all 428 nested-script statuses: 30 state 回合開始時/每回合 (each turn --
+# the existing reading, kept), 397 state no timing at all (so the documented default
+# stands), and this is the only one that states the holder's own action. It is a SET
+# rather than a flag so the next one found is a one-line addition.
+OWN_ACTION_NESTED = {407}
+
+
 def nested_ops(status_id):
     return (_registry(status_id) or {}).get("nested") or []
 
 
-def run_nested(unit, caster=None):
+def run_nested(unit, caster=None, own_action=False):
     """Fire the nested scripts of every status `unit` holds. -> [StatusEvent-ish dicts].
 
     Returns what changed so the caller can put it on the wire; the client is never told
     about a status it did not see applied, and a turn-start grant has no attack of its
     own to ride on.
+
+    `own_action` says this call is the holder's own action ending rather than the global
+    per-turn sweep. Scripts in OWN_ACTION_NESTED fire only on the former, everything else
+    only on the latter -- so no script can fire twice in one turn.
     """
     changed = []
     for st in list(_actives(unit)):
+        if (st.status_id in OWN_ACTION_NESTED) != bool(own_action):
+            continue
         ops = nested_ops(st.status_id)
         if not ops:
             continue
@@ -855,6 +889,106 @@ def _actives(unit):
     return [s for s in getattr(unit, "statuses", []) if isinstance(s, Active)]
 
 
+# ---- the control debuffs' numeric halves ------------------------------------
+# Four statuses state a second effect in Chinese and state no NUMBER for it, in either
+# language. Following the project's tier order (CLAUDE.md section 1): the Chinese is
+# silent on the figure, the English is silent too, so the figure is OURS -- a design
+# choice, named here, in one knob, and nowhere else.
+#
+# What is NOT ours is the CHANNEL, and this is where reading the English first goes
+# wrong. Each entry below takes its direction and its stat from `_note1`:
+#
+#   610 麻痺  無法行動並且受到的傷害增加   -> damage TAKEN up.
+#   613 石化  自身防禦力上升但無法行動     -> the holder's own DEF UP. The English says
+#             "take reduced damage", which is a different channel with a different
+#             interaction with defence ignores -- the Chinese wins.
+#   619 幻惑  攻擊力降低，且...使用普攻    -> the holder's ATK down.
+#   602 凍結  無法行動並且受到持續性的傷害 -> a damage-over-time.
+#
+# DELIBERATELY ABSENT, because for these the Chinese is COMPLETE rather than silent, so
+# there is nothing to fall back FROM:
+#   612 魅惑  無法操控並且必定攻擊友方 -- EN 612 claims an ATK penalty the Chinese does
+#             not state anywhere. That is a translation error, not a gap.
+#   601 暈眩  無法行動 -- full stop. (EN calls 610 "Stun" and 601 "Daze"; the damage
+#             clause belongs to 麻痺/610, not here.)
+#   611/615 混亂 無法分別敵我 -- scrambles targeting, no DoT in either language.
+#
+# OWNER-SANCTIONED HOUSE NUMBER. One knob for all four so they stay comparable and so
+# there is exactly one place to change when footage or prose ever states a real figure.
+# Each map is independent, so a single recovered number can be split out without
+# disturbing the others.
+CONTROL_RIDER_PCT = 25.0
+
+CONTROL_DAMAGE_TAKEN = {610: +CONTROL_RIDER_PCT}     # 麻痺 受到的傷害增加
+CONTROL_SELF_DEF_UP = {613: +CONTROL_RIDER_PCT}      # 石化 自身防禦力上升
+CONTROL_ATK_DOWN = {619: -CONTROL_RIDER_PCT}         # 幻惑 攻擊力降低
+# 凍結's tick. Runs through the ORDINARY DoT machinery -- a percentage of the inflicter's
+# ATK, snapshotted in `source_atk` like every other prose DoT -- rather than the "share of
+# the hit that applied it" the contribution proposed. That would have been a second,
+# parallel damage-over-time mechanism for one status, and nothing in either language asks
+# for one.
+CONTROL_DOT = {602: CONTROL_RIDER_PCT}               # 凍結 受到持續性的傷害
+
+
+def _control_rider(unit, table):
+    """-> the summed house rider from `table` for this unit's active statuses."""
+    total = 0.0
+    for st in _actives(unit):
+        pct = table.get(st.status_id)
+        if pct:
+            total += pct * max(1, int(st.stacks))
+    return total
+
+
+# ---- Bankai's other half ----------------------------------------------------
+# 萬解 (status 158) states a SPD gain that reaches nothing, for the same two reasons
+# Taunt's ATK penalty did not: the registry classifies it `kind=other` so
+# `stat_multiplier` skips it, and its `category` is `misc` so `signed_magnitude` cannot
+# pick a direction. The row carries `stat: SPD` and no number at all.
+#
+# THE NUMBER IS STATED, just not on Satan's own rung. Her passive writes only
+# 自身速度提升 ("raises own SPD"), but the same status spelled out on the three alt-band
+# casts gives the figure outright:
+#
+#   ※ 萬解：攻擊行動後追加使用1次普攻IV。自身速度+35%，不可疊加，持續整場戰鬥。
+#           (151000121 / 152000121 / 153000121)
+#
+# So this is a RECONSTRUCTION -- the pack's own figure for the pack's own status -- not a
+# house number. Contributed, and checked against all three rows before being taken.
+BANKAI_SPD_UP = {158: +35.0}
+
+
+# ---- Taunt's other half -----------------------------------------------------
+# 挑釁 and 超．挑釁 state an ATK penalty that the English description drops entirely:
+#
+#   ※ 挑釁    ：使目標攻擊力-35%並只攻擊自己，持續1回合。
+#   ※ 超．挑釁：使目標攻擊力-35%並只攻擊自己，持續1回合，不受全免疫影響，不可解除。
+#   EN 608/674: "can only attack the taunt caster before the effect wears off."
+#
+# Only the "只攻擊自己" half was implemented (battle._forced_target). The penalty died
+# TWICE over: the registry classifies these `kind=control`, so `stat_multiplier` skipped
+# them, and their `category` is `misc`, so `signed_magnitude` could not justify a
+# direction either -- even though the compiler had already parsed the figure onto 584
+# clauses, per level (20/30/35).
+#
+# The real cause is that `kind` is single-valued and 挑釁 is genuinely both a control and
+# a stat_mod. Fixing that is a compile_statuses change touching every consumer, so this
+# is the narrow fix and this comment is the record of why.
+#
+# NOT widened to the other 15 `kind=control` rows carrying a `stat`: most of those
+# magnitudes are not stat changes at all -- 603 Poison's `stat=ATK mag=75` is the SIZE OF
+# ITS DoT, 611 Confuse's `stat=HP` likewise, 159 Charge's 180 is a damage coefficient.
+# These two are here because the Chinese states a stat, a direction and a number.
+# 幻惑/石化/麻痺 all state a stat change with NO number in either language, so they get
+# nothing rather than an invented figure.
+TAUNT_ATK_DOWN = (608, 674)
+
+# 幻惑 (EN "Charm"): the only redirect whose prose also restricts the SKILL --
+# "將使用普攻攻擊我方". Consumed by battle._forced_skill; see there for why 612/611/608
+# are not in it and why the English descriptions point the wrong way.
+CHARM_BASIC_ONLY = 619
+
+
 def stat_multiplier(unit, stat):
     """-> a multiplier for ATK/DEF/SPD/HP from the unit's active statuses.
 
@@ -864,11 +998,26 @@ def stat_multiplier(unit, stat):
     """
     total = 0.0
     for st in _actives(unit):
+        if st.status_id in TAUNT_ATK_DOWN and stat.upper() == "ATK":
+            # Sign from the prose ("攻擊力-35%"), magnitude from the clause that landed
+            # it, so a 20%/30%/35% rung pays its own figure. See TAUNT_ATK_DOWN.
+            if st.magnitude is not None:
+                total -= abs(float(st.magnitude)) * max(1, int(st.stacks))
+            continue
         if st.kind != "stat_mod" or (st.stat or "").upper() != stat.upper():
             continue
         m = st.signed_magnitude()
         if m is not None:
             total += m
+    # 幻惑's ATK drop and 石化's DEF rise: stated in the Chinese, numbered nowhere.
+    if stat.upper() == "ATK":
+        total += _control_rider(unit, CONTROL_ATK_DOWN)
+    elif stat.upper() == "DEF":
+        total += _control_rider(unit, CONTROL_SELF_DEF_UP)
+    elif stat.upper() == "SPD":
+        # 萬解's 自身速度+35% -- see BANKAI_SPD_UP. Unlike the riders above, this figure
+        # is the pack's own, read off the same status on another cast's rung.
+        total += _control_rider(unit, BANKAI_SPD_UP)
     return max(0.0, 1.0 + total / 100.0)
 
 
@@ -934,6 +1083,9 @@ def _damage_mult(unit, taken):
         if st.subject is None or (st.subject == "taken") != taken:
             continue
         total += m
+    if taken:
+        # 麻痺: "無法行動並且受到的傷害增加". No design row carries the figure.
+        total += _control_rider(unit, CONTROL_DAMAGE_TAKEN)
     return max(0.0, 1.0 + total / 100.0)
 
 

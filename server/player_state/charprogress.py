@@ -769,7 +769,9 @@ def char_data_json(state, uid):
     entry = state["roster"].get(uid)
     if not entry:
         return "{}"
-    return json.dumps(_char_data_json(uid, entry), separators=(",", ":"))
+    from .roster import sheet_bonus
+    return json.dumps(_char_data_json(uid, entry, sheet_bonus(state, entry)),
+                      separators=(",", ":"))
 
 
 def char_create_json(state, uids):
@@ -780,7 +782,9 @@ def char_create_json(state, uids):
     single-cast reply uses. Unknown uids are skipped rather than emitting a null the
     deserialiser would choke on.
     """
+    from .roster import sheet_bonus
     return json.dumps(
-        {uid: _char_data_json(uid, state["roster"][uid])
+        {uid: _char_data_json(uid, state["roster"][uid],
+                              sheet_bonus(state, state["roster"][uid]))
          for uid in uids if uid in state["roster"]},
         separators=(",", ":"))

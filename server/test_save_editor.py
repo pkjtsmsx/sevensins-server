@@ -43,10 +43,16 @@ def check(name, cond, detail=""):
 
 
 def _sample_ids():
-    """A real Soulmirror and a real Starshard item id from the design data."""
+    """A real Soulmirror and a real Starshard item id from the design data.
+
+    "Real" now excludes the pack's internal TEST rows. This picker used to return item 81
+    -- 測試用星石1號位, whose `_action` is a genuine 111 -- so the suite was quietly
+    exercising a row that must never reach a player's bag, and `make_rune` refusing it is
+    what surfaced that.
+    """
     soulmirror = starshard = None
     for iid in bt.dd.rows("item"):
-        if ps.item_bucket(iid) != "equipment":
+        if ps.item_bucket(iid) != "equipment" or ps.is_test_item(iid):
             continue
         action = (bt.dd.row("item", iid) or {}).get("_action")
         if action in ps.SOULFRAG_SLOT_INDEX:

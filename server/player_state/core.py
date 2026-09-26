@@ -14,7 +14,7 @@ Wire-format notes live next to each builder; the key names are NOT the C# field 
   CharData  : pro_chars / group_tbl / id_tbl / formations / acPeriod / ...
   Backpack  : "sid" (LuaTableConverter) inside BackpackItemsData
 """
-import json, math, os, shutil, threading, time
+import json, math, os, re, shutil, threading, time
 
 import battle as bt
 import design_data as dd
@@ -434,7 +434,8 @@ def load(player_id):
                 for k, v in _default(player_id).items():
                     st.setdefault(k, v)
                 if (_seed_roster(st) | _clamp_roster_stars(st) | _refill_passes(st)
-                        | _purge_orphan_sp_quests(st) | _rescue_bagged_rewards(st)):
+                        | _purge_orphan_sp_quests(st) | _rescue_bagged_rewards(st)
+                        | _purge_test_items(st)):
                     _save_locked(st)
                 return st
             except Exception:
@@ -459,6 +460,65 @@ def load(player_id):
         _seed_roster(st)
         _save_locked(st)
         return st
+
+
+def _purge_test_items(state):
+    """Strip the pack's internal TEST rows from a save. -> True if anything changed.
+
+    REPAIRS OLD DAMAGE. `grant_reward` and `make_rune` refuse these now (see
+    is_test_item), but that only helps new grants -- a player who already banked one is
+    stuck, because a test starshard in storage 2 takes the client's starshard panel down
+    and the session with it. One was reported unable to play at all.
+
+    BOTH HALVES, or the repair is worse than the damage: the bag entry AND any
+    `equips_list` slot pointing at its uid. Deleting the row alone leaves a cast wearing
+    a uid that no longer resolves, which is the same class of dangling reference that
+    breaks the panel in the first place.
+
+    Never raises. It runs inside `load`, and the comment there is emphatic about why: a
+    transient design_data failure in a normalisation helper once turned a 100 KB account
+    into a tutorial state. A purge that cannot read the pack does nothing and says so.
+
+    ON LOGIN ONLY. `save_editor._read` reads the file raw, deliberately, so it shows what
+    is on disk rather than rewriting a save somebody only wanted to look at -- which means
+    the editor still lists a test item until the player next logs in. That split is right,
+    but it is worth knowing before wondering why the editor disagrees.
+    """
+    try:
+        bag = state.get("backpack") or {}
+        doomed = {}                       # uid -> (storage, slot, item id)
+        for storage, rows in bag.items():
+            if not isinstance(rows, dict):
+                continue
+            for slot, rec in list(rows.items()):
+                if not isinstance(rec, dict):
+                    continue
+                iid = rec.get("iid")
+                if iid and is_test_item(iid):
+                    doomed[str(rec.get("uid") or "")] = (storage, slot, int(iid))
+        if not doomed:
+            return False
+        for storage, slot, _iid in doomed.values():
+            (bag.get(storage) or {}).pop(slot, None)
+        # ...and unequip them, so nothing is left wearing a uid that no longer exists.
+        stripped = 0
+        for entry in (state.get("roster") or {}).values():
+            worn = entry.get("equips_list")
+            if not worn:
+                continue
+            for i, uid in enumerate(worn):
+                if str(uid or "") and str(uid) in doomed:
+                    worn[i] = ""
+                    stripped += 1
+        print(f"[test-items] {state.get('player_id')}: removed "
+              f"{len(doomed)} internal test item(s) "
+              f"{sorted({i for _s, _sl, i in doomed.values()})}"
+              + (f", unequipped {stripped}" if stripped else ""), flush=True)
+        return True
+    except Exception as exc:              # noqa: BLE001 -- must never break `load`
+        print(f"[test-items] purge skipped for {state.get('player_id')}: {exc}",
+              flush=True)
+        return False
 
 
 def _purge_orphan_sp_quests(state):
@@ -750,7 +810,7 @@ MAX_STAR = bt.MAX_STAR
 MAX_SUPER_STAR = bt.MAX_SUPER_STAR
 
 
-def _char_data_json(uid, entry):
+def _char_data_json(uid, entry, sheet_bonus=None):
     """One CharData. Stats are computed the same way the battle engine builds a
     unit (DesignCharGrowForm indexed by the char's _growStar rung) so the lobby and
     the fight agree on the numbers.
@@ -763,6 +823,7 @@ def _char_data_json(uid, entry):
     star = min(entry.get("star") or bt._default_star(row), MAX_STAR)
     super_star = max(0, min(entry.get("super_star") or 0, MAX_SUPER_STAR))
     stats = bt._grow(row, star, entry.get("lv", 1), super_star)
+    _sheet = sheet_bonus or {}
     raw_grow = row.get("_growStar") or []
     grow = (bt.dd.row("char_grow", raw_grow[bt.grow_rung(row, star, super_star)])
             if raw_grow else {}) or {}
@@ -795,8 +856,12 @@ def _char_data_json(uid, entry):
             # (0 = base art). Per-copy, unlike the unlock flags, which are per char id.
             "equips_list": char_equips(entry), "skin": int(entry.get("skin", 0)),
         },
-        "hp": stats["hp"], "atk": stats["atk"], "def": stats["def"],
-        "spd": stats["spd"],
+        # PLUS the two ladders battle applies and this sheet used to ignore --
+        # see player_state.roster.sheet_bonus for which and why gear is not among them.
+        "hp": stats["hp"] + _sheet.get("hp", 0),
+        "atk": stats["atk"] + _sheet.get("atk", 0),
+        "def": stats["def"] + _sheet.get("def", 0),
+        "spd": stats["spd"] + _sheet.get("spd", 0),
         # char_grow carries crt/cdi columns; the remaining CharData stats have no
         # column in this pack, so they stay 0 rather than being invented.
         "cri": grow.get("crt", 0), "cdi": grow.get("cdi", 0),
@@ -1194,6 +1259,11 @@ def soulmirror_box_items(item_id):
 def grant_reward(state, item_id, amount):
     """Give `amount` of `item_id`, routed the way its design row says. Returns the
     bucket it landed in so the caller knows which sync to push."""
+    if is_test_item(item_id):
+        # Refused at the one place every reward path funnels through -- mail, quests,
+        # shop payouts, box contents -- and BEFORE the starshard branch, which would
+        # otherwise file 81-86 as real equipment. See is_test_item.
+        return "skipped"
     row = bt.dd.row("item", item_id) or {}
     action, param = row.get("_action"), row.get("_param1") or 0
     # **A starshard or soulmirror is an INSTANCE, not a stack.** Bagging one puts a
@@ -1355,8 +1425,59 @@ RUNE_SLOT_PRIMARY = {
 }
 
 
+# Items the pack ships for INTERNAL TESTING, and which must never be handed to a player.
+#
+# NEITHER LANGUAGE ALONE IS ENOUGH, and each misses exactly nine:
+#
+#   9 marked in Chinese only  51-59      測試用星石禮包 -- the English reads
+#                                        "★3 Slayer Starshards Bundle", indistinguishable
+#                                        from a reward.
+#   10 marked in both         81-88,     測試用星石N號位 / "GM I (Test)", plus the two
+#                             721004-5   test bloodpacts.
+#   9 marked in English only  71-78, 89  "★4 Awaker Summon Bundle I (Test)" -- the Chinese
+#                                        says 全給禮包 ("give-all bundle"), not 測試.
+#
+# 28 rows in all. A Chinese-only match -- which is what this was first written as, on the
+# contributed reasoning that "the English hides it" -- catches 19 of them and leaves the
+# nine give-all cast bundles grantable.
+#
+# THE WORD BOUNDARY ON THE ENGLISH IS LOAD-BEARING. 273 perfectly ordinary items contain
+# "test" inside a word: `EX Evolution Testament`, `Contest Ticket`, `Red Team Testament`.
+# A bare substring would purge all 273 from live saves. `\btest\b` matches exactly the 19
+# genuine rows and none of the 273 -- verified, and asserted in test_test_items.py.
+#
+# WHY A GRANT GUARD AND A SAVE PURGE SHARE ONE PREDICATE: owner's call. The crash class is
+# narrower -- 81-86 carry `_action` 111-116, squarely inside RUNE_ACTION_RANGE, and a test
+# starshard in storage 2 takes the client's starshard panel down with the session; one
+# player was reported unable to play at all. The give-all bundles break nothing. Treating
+# all 28 as never-legitimate everywhere was chosen over splitting the two, on the grounds
+# that one predicate is one thing to reason about. The cost is real and worth stating: an
+# unopened give-all bundle granted deliberately is deleted from the save at next login.
+#
+# Reachability, measured rather than assumed: no stage pool contains one (all 6,628
+# checked), no shop or goods row references one, and no server code mentions one. 17 bundle
+# items DO contain one, and nothing grants those either. So the guard closes a hole before
+# a future shop row, mail template or hand grant walks into it.
+#
+# `dd.row` is cached (~140ns), so this is free on the hot paths that call it per item.
+_TEST_ITEM_EN = re.compile(r"\btest\b", re.I)
+
+
+def is_test_item(item_id):
+    """-> True if this row is an internal test item that must never be granted."""
+    row = bt.dd.row("item", int(item_id or 0)) or {}
+    return ("測試" in (row.get("_itemName") or "")
+            or bool(_TEST_ITEM_EN.search(row.get("_itemName_en") or "")))
+
+
 def rune_slot(item_id):
-    """The part a starshard item belongs to, or None if it is not a starshard."""
+    """The part a starshard item belongs to, or None if it is not a starshard.
+
+    Deliberately FACTUAL: 81-86 are test rows but their `_action` really is 111-116, and
+    this answers "which part", not "may a player have one". Putting the refusal here broke
+    the save-editor suite, whose sample picker reads this to find a starshard at all. The
+    policy lives in `make_rune` and `grant_reward` instead.
+    """
     action = (bt.dd.row("item", int(item_id)) or {}).get("_action")
     if action in RUNE_ACTION_RANGE:
         return action - RUNE_ACTION_BASE
@@ -1414,7 +1535,17 @@ def make_rune(state, item_id, slot, level=0, enhance=0, rng=None):
     `slot` (1..6) picks the primary stat; `level` scales it; `enhance` is how many extra
     rolls each sub-stat has had. Everything else the client derives -- see the notes on
     RUNE_ATTR_* above.
+
+    REFUSES A TEST ROW, loudly. This is the single constructor every starshard path runs
+    through -- `grant_rune`, `roll_rune`, the reward funnel, the save editor -- so it is
+    the one place that covers them all, and a test shard in storage 2 is what takes the
+    client's starshard panel down. Raising rather than skipping matches the check below:
+    asking for one is a programming error, not a runtime condition to swallow.
     """
+    if is_test_item(item_id):
+        raise ValueError(
+            f"item {item_id} is an internal TEST row (測試) and must never be filed as a "
+            "starshard -- see is_test_item")
     import random as _r
     rng = rng or _r
     # The item decides the slot; a mismatch would put the wrong primary on the piece.

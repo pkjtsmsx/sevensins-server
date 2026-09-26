@@ -303,6 +303,22 @@ def check_passives_fire_at_battle_start():
     # that passive from the all-or-nothing drop.
     known_permanent = {"Field Angel", "The Divine", "Stun/Confuse Immunity",
                        "Swift Blade", "Return", "Elite", "CC Immunity", "Pride Mark"}
+    # The Consonance master passives (battle.master_passive) put 69 casts' panel passives
+    # into fights for the first time, and 33 of their statuses are battle-start self-buffs
+    # the pack explicitly marks `permanent` -- legitimate, but not nameable in advance.
+    # Derived from those ladders ONLY, deliberately: the allowlist is a tripwire that fires
+    # when something new lasts forever, and widening it to "any status some skill marks
+    # permanent" would let the original defect straight back through (the raid boss's
+    # Power Attack Seal IS permanent in other skills; its problem was that the boss's
+    # application stated no duration at all).
+    from engine import specs as espec
+    for _cid, (_base, _depth) in bt.master_passive_table().items():
+        for _rung in range(1, _depth + 1):
+            for e in (espec.skill(bt.skill_at_rank(_base, _rung)) or {}).get("effects") or []:
+                if (e.get("op") == "apply_status"
+                        and (e.get("numbers") or {}).get("permanent")):
+                    known_permanent.add((e.get("status") or {}).get("name") or "")
+    known_permanent.discard("")
     unexpected = [(o, n) for o, n in forever
                   if not any(k.lower() in (n or "").lower() for k in known_permanent)]
     check("only deliberately-permanent statuses last the whole battle",

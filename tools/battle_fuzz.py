@@ -211,6 +211,19 @@ def compare_restored(before, after):
     return bad
 
 
+def party_for(cfg):
+    """-> annotated roster entries for this fight, or None for a bare-cast fight.
+
+    Built from its own seeded rng so a config still reproduces exactly: the loadout is
+    part of the fight, and a finding that only reproduces with the right gear is the
+    kind this sweep exists to catch.
+    """
+    if not cfg.get("richness"):
+        return None
+    return A.loadout_party(cfg["team"], cfg["level"],
+                           random.Random(cfg["loadout_seed"]), cfg["richness"])
+
+
 def one_fight(cfg, cap=200, cover=None):
     """Play one randomised fight. -> [(kind, key, detail)] findings."""
     found = []
@@ -219,9 +232,11 @@ def one_fight(cfg, cap=200, cover=None):
     acted, turns_played = {}, 0
     try:
         if cfg["kind"] == "mirror":
-            b = A.mirror_battle(cfg["team"], cfg["level"])
+            b = A.mirror_battle(cfg["team"], cfg["level"],
+                                party=party_for(cfg))
         else:
-            b = A.stage_battle(cfg["stage"], list(cfg["team"]), cfg["level"], 1)
+            b = A.stage_battle(cfg["stage"], party_for(cfg) or list(cfg["team"]),
+                               cfg["level"], 1)
     except Exception as exc:                                   # noqa: BLE001
         return [("crash", f"{type(exc).__name__} @ {where(exc)} (setup)", str(exc))]
 
@@ -354,6 +369,15 @@ def main():
 
     rng = random.Random(args.seed)
     pools = {p: A.playable(p) for p in ("player", "mob", "mixed")}
+    # A pool of casts that actually CARRY the things the loadout path adds, because the
+    # general pools barely do: only 69 of the 512 player casts own a Consonance master
+    # passive and no mob owns one, so a uniform sweep fields it in ~2% of slots and says
+    # correspondingly little about it. Kept as one pool among four rather than replacing
+    # the others -- the ordinary casts still need sweeping.
+    loaded = [c for c in pools["player"]
+              if bt.master_passive(int(c)) or (dd.row("char", int(c)) or {}).get("_flvBonus")]
+    if len(loaded) >= 5:
+        pools["consonance"] = loaded
     stages = A.multiwave_stages(200, min_waves=1)
     choosers = sorted(A.CHOOSERS)
 
@@ -365,6 +389,12 @@ def main():
         cfg = {
             "kind": rng.choice(("mirror", "mirror", "stage")),
             "team": tuple(rng.sample(pools[pool], 5)),
+            # How kitted out the party is. Everything a cast carries into a fight --
+            # gear, Soulmirrors, bloodpact, the Consonance/Skill Up ladders, the master
+            # passive -- rides on a ROSTER ENTRY, and this sweep used to field bare ids,
+            # so none of it was ever tested. 0.0 keeps the bare path covered too.
+            "richness": rng.choice((0.0, 0.35, 0.7, 1.0)),
+            "loadout_seed": rng.randrange(1 << 30),
             "level": rng.choice((1, 15, 40, 80, 150, 250, 400)),
             "stage": rng.choice(stages),
             "chooser": rng.choice(choosers),
@@ -374,6 +404,23 @@ def main():
         }
         casts.update(cfg["team"])
         cover["fights"] += 1
+        # Loadout coverage. "0 findings" is only evidence about what was on the field,
+        # and this sweep once ran 4,000 clean fights with the master passive, all gear
+        # and both stat ladders absent from every one of them.
+        for e in (party_for(cfg) or []):
+            if not isinstance(e, dict):
+                continue
+            cover["party_entries"] += 1
+            if e.get("gear_bonus"):
+                cover["with_gear"] += 1
+            if e.get("pact_iid"):
+                cover["with_pact"] += 1
+            if e.get("consonance_bonus"):
+                cover["with_consonance"] += 1
+            if e.get("skillup_bonus"):
+                cover["with_skillup"] += 1
+            if e.get("master_lv"):
+                cover["with_master"] += 1
         for kind, key, detail in one_fight(cfg, cap=args.cap, cover=cover):
             findings[(kind, key)].append((detail, cfg))
         if (i + 1) % 200 == 0:
@@ -387,15 +434,23 @@ def main():
           f"({cover['engine_path']} engine / {cover['legacy_path']} legacy builder), "
           f"{cover['deaths']} deaths, {cover['status_rows']} status rows, "
           f"{cover['wave_advances']} wave advances, "
-          f"{cover['resumes']} save/restore cycles, {len(casts)} distinct casts\n")
+          f"{cover['resumes']} save/restore cycles, {len(casts)} distinct casts")
+    print(f"  loadout:   {cover['party_entries']} kitted party entries -- "
+          f"{cover['with_gear']} geared, {cover['with_pact']} bloodpact, "
+          f"{cover['with_consonance']} consonance, {cover['with_skillup']} skill-up, "
+          f"{cover['with_master']} master passive\n")
     for (kind, key), hits in sorted(findings.items(), key=lambda kv: -len(kv[1])):
         detail, cfg = hits[0]
         print(f"[{kind}] {key}  -- {len(hits)} hit(s)")
         print(f"    {detail[:200]}")
         print(f"    repro: kind={cfg['kind']} pool={cfg['pool']} lv={cfg['level']} "
               f"chooser={cfg['chooser']} seed={cfg['seed']}")
+        # richness + loadout_seed ARE the fight. Without them a repro line reproduces a
+        # DIFFERENT fight -- the first finding this sweep produced after the loadout work
+        # could not be reproduced from its own repro line, which is how this got noticed.
         print(f"           team={cfg['team']}"
-              + (f" stage={cfg['stage']}" if cfg["kind"] == "stage" else ""))
+              + (f" stage={cfg['stage']}" if cfg["kind"] == "stage" else "")
+              + f" richness={cfg['richness']} loadout_seed={cfg['loadout_seed']}")
     return 1 if findings else 0
 
 

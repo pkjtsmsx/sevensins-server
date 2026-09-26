@@ -20,6 +20,11 @@ from .core import (
 )
 
 
+# Game.Player.Char.CharType: Character=1, AdvencedLimitMaterial=2,
+# LimitMaterial=3, SurmountMaterial=5, Monster=7.
+CHAR_TYPE_CHARACTER = 1
+
+
 # ---- gacha ----------------------------------------------------------------
 # PlayerGacha.ReceiveSyncGacha (cmd 257) deserializes strargs[0] into
 # List<UnlimitGachaBox> and ends with PanelLoadingWaiting.Close() -- so if it throws,
@@ -591,8 +596,15 @@ def gacha_draw(state, count=10, cost=None, box_id=None):
     fill_aligns, fill_star = pool.get("filler", CAST_POOL_DEFAULT["filler"])
 
     def _bucket(alignments, listed=True):
+        # CharType.Character only (`_type` 1). The 9001 fodder tier is unlisted, so the
+        # `_order` check cannot guard it, and that bucket holds exactly one non-character
+        # row: char 40000 噬神者, `_type` 5 (SurmountMaterial), 1 of 168. It rolled as an
+        # ordinary 3★ pull and landed in the Cast List, which it must never do. A no-op
+        # for the listed buckets -- `_order` already excludes every `_type` 3/7 row there
+        # (aligns 100-104: listed count == type-1 count, checked).
         return [r for r in rows.values()
                 if r.get("_alignment") in alignments
+                and r.get("_type") == CHAR_TYPE_CHARACTER
                 and (bool(r.get("_order")) or not listed)
                 and any(r.get("_growStar") or [])]
 

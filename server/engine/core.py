@@ -10,6 +10,7 @@ import random
 from typing import Any, Dict, List, Optional
 
 from . import formula, passives as _passives, specs, status as _status
+from . import pursuit_values as _pursuit
 
 TEAM_PLAYER, TEAM_ENEMY = 1, 2
 
@@ -539,7 +540,7 @@ def _removable(status_row, category):
 
 
 def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=True,
-            coefficient_override=None, round_no=None):
+            coefficient_override=None, basis_override=None, round_no=None):
     """Run one skill. -> Outcome.
 
     `apply_damage` mutates target HP as it goes, because later swings of a multi-hit
@@ -556,7 +557,8 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
     its own. Pursuit sub-skills need it: their design row carries no numbers at all
     (100000341 is `_note1_jp` "脊砕き 追加技能" and nothing else), and the figure lives in
     the PARENT's prose -- 追擊(造成120%攻擊力傷害). Only fills a gap; a child that states
-    its own coefficient keeps it.
+    its own coefficient keeps it. `basis_override` is its other half -- the stat that
+    figure scales off, which travels with it for the same reason.
     """
     r = rng or random.Random()
     skill_id = spec.get("id")
@@ -591,10 +593,16 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
                 # group instead of four. Overkill is simply wasted; death resolves at the
                 # end of the skill, which is also where the `die` flag belongs.
                 coef = e.get("coefficient")
+                basis = e.get("basis") or "ATK"
                 if coef is None:
                     coef = coefficient_override
-                amount, detail = formula.strike(
-                    caster, tgt, coef, e.get("basis") or "ATK", r)
+                    # The stat travels with the figure. A sub-skill row that states
+                    # neither would otherwise be read as ATK, which is wrong by the gap
+                    # between ATK and DEF on that cast -- 131 of the recovered pursuits
+                    # scale off DEF and 9 off the target's max HP.
+                    if basis_override:
+                        basis = basis_override
+                amount, detail = formula.strike(caster, tgt, coef, basis, r)
                 if amount is None:
                     out.skipped.append({"op": "damage", "why": "coefficient unknown",
                                         "skill": skill_id})
@@ -790,11 +798,25 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
             # was correct only while the function returned a plain bool -- once None
             # became "unevaluatable", it would have skipped every round-gated pursuit
             # outright instead of rolling for it.
-            if _blocked(e, caster, targets[0] if targets else None, held, ctx, r):
+            # RECOVERED GATES. The compiler drops a pursuit's odds when a skill states
+            # more than one pursuit (`zh_pursuit_numbers` returns after the first), and it
+            # never expressed "only while the caster holds X" at all. Both are read here
+            # so the branches below need no special case -- a recovered chance behaves
+            # exactly like a compiled one. See engine.pursuit_values.PURSUIT_GATES.
+            _gate = _pursuit.gate(skill_id, e.get("skill")) or {}
+            _chance = e.get("chance_pct")
+            if _chance is None and _gate.get("chance_pct") is not None:
+                _chance = _gate["chance_pct"]
+            _needs = _gate.get("requires_status")
+            if _needs and not _holds_status(caster, _needs, held):
+                # Satan's pursuit is the BANKAI's, not the skill's: no Bankai, no pursuit.
+                out.skipped.append({"op": op, "why": "gate status absent",
+                                    "skill": e["skill"]})
+            elif _blocked(e, caster, targets[0] if targets else None, held, ctx, r):
                 out.skipped.append({"op": op, "why": "condition not met",
                                     "skill": e["skill"]})
-            elif e.get("chance_pct") is not None and not formula.effect_lands(
-                    caster, caster, float(e["chance_pct"]) / 100.0, r):
+            elif _chance is not None and not formula.effect_lands(
+                    caster, caster, float(_chance) / 100.0, r):
                 # 以50%機率追擊 -- the pursuit is a ROLL. Every follow_up used to fire
                 # unconditionally because the compiler dropped the stated odds and this
                 # branch never looked for them, so 240 casts pursued on every cast.
@@ -808,13 +830,24 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
                 # A sub-skill reached via follow_up inherits the invoker's target set --
                 # its own `_target` is a placeholder (contract doc: `Refrain` from
                 # `Aurora`). Passing the lead target keeps that inheritance.
+                _recovered = (_pursuit.lookup(skill_id, e.get("skill"))
+                              or (None, None))
                 out.children.append(execute(
                     caster, child, units, r,
                     chosen=(targets[0].order if targets else None),
                     depth=depth + 1, apply_damage=apply_damage,
                     # The pursuit's damage figure is stated by the PARENT, not by the
-                    # sub-skill's own row -- see execute's docstring.
-                    coefficient_override=e.get("coefficient"),
+                    # sub-skill's own row -- see execute's docstring. When the compiler
+                    # found it in NEITHER, pursuit_values carries the figure the parent's
+                    # Chinese prose states, basis included; without it the pursuit plays
+                    # its animation and lands a 0, on 608 parent skills.
+                    # Keyed by (parent, sub-skill): six parents state two DIFFERENT
+                    # pursuit figures and the sub-skill is what tells them apart.
+                    coefficient_override=(
+                        e.get("coefficient") if e.get("coefficient") is not None
+                        else _recovered[0]),
+                    basis_override=(
+                        None if e.get("coefficient") is not None else _recovered[1]),
                     round_no=round_no))
         elif op == "modify_cd":
             turns = e.get("turns")

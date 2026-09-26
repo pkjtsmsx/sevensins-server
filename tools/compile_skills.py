@@ -2791,6 +2791,221 @@ def _sentence_at(note, pos):
     return note[start:(min(ends) + 1 if ends else len(note))].strip()
 
 
+# --- two opcodes, two timings ------------------------------------------------------
+# A passive's `_actID` sometimes lists the SAME status twice, and that is the game's own
+# data rather than a duplicate to drop: the clause states two MOMENTS, one per opcode.
+#
+#     盛怒萬解：攻擊行動開始前，或受到傷害時，都將為自身疊加1層「盛怒」
+#     ("before the attack action, OR on taking damage, gain 1 stack of Wrath")
+#     暈眩氣場：戰鬥開始時對敵隨機1人附加暈眩狀態，行動開始前對敵隨機1人附加暈眩狀態
+#     ("at battle start inflict Daze on 1 random enemy; before the action, again")
+#
+# `annotate_passive` derives the trigger from `_note1_EN` and finds ONE clause per status
+# name, so both opcodes inherited one trigger. Satan gained 2 stacks per hit and none
+# before acting; the six 氣場 auras front-loaded TWO control statuses at battle start and
+# applied none per turn.
+#
+# The English cannot fix this: it writes Satan's first moment as "Before dealing any
+# attack", which no pattern in PASSIVE_TRIGGERS matches, and the ZH markers already in
+# those patterns are dead on the passive path because the clause text is English. Proven
+# by measurement -- adding four ZH spellings to PASSIVE_TRIGGERS and recompiling the whole
+# corpus changed the trigger of exactly 0 effects.
+#
+# So the CHINESE is read here, directly, and only to SPLIT a tie that already exists:
+# nothing is retriggered unless the pack itself carries N>1 opcodes for one status and the
+# Chinese names at least 2 moments. 11 groups / 26 skills match, every one of them checked
+# by hand against its prose.
+_ZH_PASSIVE_TRIGGERS = [
+    ("on_death", re.compile(r"死亡|被擊倒")),
+    ("on_damage_taken", re.compile(r"受到傷害|受到攻擊|被攻擊")),
+    ("on_damage_dealt", re.compile(r"造成傷害|擊傷")),
+    ("battle_start", re.compile(r"戰鬥開始")),
+    ("after_action", re.compile(r"行動結束後|攻擊行動結束後|攻擊後|行動後|回合結束")),
+    ("turn_start", re.compile(r"行動開始前|攻擊行動開始前|回合開始|行動前")),
+]
+_ZH_GRANT_VERB = re.compile(r"附加|賦予|疊加|獲得")
+
+
+def zh_triggers_in(clause):
+    """-> every trigger this Chinese clause names, in the order the TEXT states them.
+
+    Order is by position, not by pattern precedence: the opcodes are distributed in
+    prose order, so "戰鬥開始時...，行動開始前..." must yield battle_start first.
+    """
+    hits = []
+    for name, rx in _ZH_PASSIVE_TRIGGERS:
+        m = rx.search(clause or "")
+        if m:
+            hits.append((m.start(), name))
+    return [n for _, n in sorted(hits)]
+
+
+def zh_grant_clause(rows, r, status_id):
+    """-> the Chinese sentence that GRANTS this status, or None.
+
+    Skips glossary lines (`※ 名稱：...`). A glossary line says what the status DOES --
+    魂刺痕's "回合開始時，造成...傷害" is its DoT tick, not when it is handed out -- and
+    reading a trigger off one is the error `passive_trigger`'s own _GLOSSARY_CLAUSE guard
+    exists to prevent. A first pass at this measurement fell for it and reported 677
+    recoverable effects where the honest number is 26.
+    """
+    zh_name = ((rows or {}).get(status_id) or {}).get("_name") or ""
+    if not zh_name:
+        return None
+    for sent in re.split(r"[。\n]", r.get("_note1") or ""):
+        if sent.lstrip().startswith("※"):
+            continue
+        if zh_name in sent and _ZH_GRANT_VERB.search(sent):
+            return sent
+    return None
+
+
+def split_duplicate_triggers(r, spec, rows):
+    """Give each of N same-status opcodes its own moment, where the Chinese states N.
+
+    Mutates `spec` in place. -> how many effects were retriggered.
+    """
+    groups = {}
+    for e in spec.get("effects") or []:
+        if e.get("op") != "apply_status":
+            continue
+        key = ((e.get("status") or {}).get("id"), e.get("trigger"))
+        if key[0]:
+            groups.setdefault(key, []).append(e)
+    changed = 0
+    for (sid, _trig), effects in groups.items():
+        if len(effects) < 2:
+            continue
+        triggers = zh_triggers_in(zh_grant_clause(rows, r, sid))
+        if len(triggers) < 2:
+            continue                      # one moment, or none stated: leave it alone
+        for e, trig in zip(effects, triggers):
+            if e.get("trigger") != trig:
+                e["trigger"] = trig
+                e["trigger_source"] = "prose_zh_split"
+                changed += 1
+    return changed
+
+
+# --- the Chinese names it where the English does not -------------------------------
+# 3,236 passive apply_status effects have NO trigger because the status's name never
+# appears in `_note1_en`. That is usually a TRANSLATION artifact rather than an
+# undocumented trait: the row is `Body Strike II` and the English clause calls it
+# `Healthy Strike II`, so `_clause_for` finds nothing, while the Chinese names it exactly
+# -- 體健強撃II -- because the ZH row name and the ZH prose are the same string.
+#
+# So the status is looked up by its CHINESE name in `_note1`, and the timing is read off
+# the GRANTING fragment. Three guards, each of which a looser version got wrong when this
+# was measured:
+#
+#   * STRICT timing markers. A bare 死亡 is not a trigger -- 行動前免疫死亡 is "before the
+#     action, immune to death", and a loose pattern read it as on_death. Likewise
+#     我方造成傷害提高 is a damage-dealt MODIFIER, not a damage-dealt trigger. Every
+#     marker here must carry 時/前/後, and 死亡 is refused outright after 免疫.
+#   * A GRANT VERB in the fragment. Without it a clause that merely mentions the status
+#     as a CONDITION ("if the target has X") is read as granting it.
+#   * GLOSSARY lines skipped. 魂刺痕's "回合開始時，造成...傷害" is when the status TICKS,
+#     not when it is handed out. Reading those put the estimate at 677 where the honest
+#     number is 322.
+#
+# Fills a GAP only: never overrides a trigger the English already produced.
+_ZH_STRICT_TRIGGERS = [
+    ("on_death", re.compile(r"(?<!免疫)(?:死亡|被擊倒|陣亡)(?:時|後)")),
+    ("on_damage_taken", re.compile(r"受到(?:傷害|攻擊)(?:時|後)|被攻擊(?:時|後)")),
+    ("on_damage_dealt", re.compile(r"(?:造成傷害|擊傷|攻擊命中)(?:時|後)")),
+    ("battle_start", re.compile(r"戰鬥開始(?:時|前)")),
+    ("after_action", re.compile(r"(?:攻擊)?行動(?:結束)?後|攻擊後|回合結束時")),
+    ("turn_start", re.compile(r"回合開始時|(?:攻擊)?行動(?:開始)?前")),
+]
+
+
+def zh_strict_trigger(fragment):
+    """-> the trigger this fragment states, or None. The LAST one wins.
+
+    Last rather than first because a fragment chain reads "at turn start, if X, then on
+    taking damage do Y" -- the marker nearest the grant is the one that governs it.
+    """
+    hits = [(m.start(), name) for name, rx in _ZH_STRICT_TRIGGERS
+            if (m := rx.search(fragment or ""))]
+    return sorted(hits)[-1][1] if hits else None
+
+
+# Words that make a mention of a status the OPPOSITE of granting it. Without this the
+# fallback fired on immunity clauses, and an immunity is compiled as an apply_status of
+# the very status it protects against: 女王氣場：阿斯莫德免疫魅惑、幻惑 ("Asmodeus is
+# IMMUNE to Charm and Enchant") is an `apply_status Charm` aimed at allies. Those effects
+# are inert today, and giving them a trigger would have charmed the player's own team at
+# battle start -- 25 effects, found by reading the sample rather than by any test.
+_ZH_NOT_A_GRANT = re.compile(r"免疫|不受|無效|清除|移除|解除")
+
+
+def _is_granted(sent, zh_name):
+    """Is this mention a GRANT, or a negation of one?
+
+    Decided by which keyword sits NEAREST before the name. `_FRAGMENT_SPLIT` breaks
+    免疫魅惑、幻惑 into two fragments, so the second one looks innocent on its own -- the
+    scan has to run over the whole sentence up to the name, not over the fragment.
+    """
+    at = sent.find(zh_name)
+    if at < 0:
+        return False
+    # A status whose OWN NAME is a negation absorbs the 免疫 in the text. Status 706 is
+    # literally called 免疫挑釁 ("Taunt Immunity"), so "戰鬥開始時，自身常駐免疫挑釁" GRANTS
+    # it -- there is nothing being negated. Without this the guard refused the immunity
+    # statuses it was never aimed at, and that is how Belphegor's `A Matter of Survival`
+    # came to work at rungs I-II and go silent at III-VI: the English wording drifts
+    # between rungs ("gains immunity to Taunt" -> "immune Taunt permanently") while the
+    # Chinese stays put, so the Chinese fallback was the only thing that could have saved
+    # it and this check was turning it away.
+    if _ZH_NOT_A_GRANT.search(zh_name):
+        return True
+    before = sent[:at]
+    neg = max((m.end() for m in _ZH_NOT_A_GRANT.finditer(before)), default=-1)
+    grant = max((m.end() for m in _ZH_GRANT_VERB.finditer(before)), default=-1)
+    return grant > neg
+
+
+def zh_passive_trigger(rows, r, status_id):
+    """-> the trigger the Chinese states for GRANTING this status, or None."""
+    zh_name = ((rows or {}).get(status_id) or {}).get("_name") or ""
+    if not zh_name:
+        return None
+    for sent in re.split(r"[。\n]", r.get("_note1") or ""):
+        if sent.lstrip().startswith("※") or zh_name not in sent:
+            continue
+        if not _is_granted(sent, zh_name):
+            continue                  # an immunity or a cleanse, not a grant
+        frags = _FRAGMENT_SPLIT.split(sent)
+        # A status whose own name is a negation needs no grant verb: 自身常駐免疫挑釁 has
+        # none, and the name IS the effect. `_is_granted` has already vouched for the
+        # sentence, so this only decides WHICH fragment to read the timing from.
+        self_naming = bool(_ZH_NOT_A_GRANT.search(zh_name))
+        granting = [i for i, f in enumerate(frags)
+                    if zh_name in f and (self_naming or _ZH_GRANT_VERB.search(f))]
+        if not granting:
+            continue                  # named, but as a condition rather than a grant
+        for j in range(granting[0], -1, -1):
+            trigger = zh_strict_trigger(frags[j])
+            if trigger:
+                return trigger
+        return None
+    return None
+
+
+def fill_triggers_from_zh(r, spec, rows):
+    """Give trigger-less passive effects the timing the Chinese states. -> how many."""
+    filled = 0
+    for e in spec.get("effects") or []:
+        if e.get("trigger") or e.get("op") != "apply_status":
+            continue
+        trigger = zh_passive_trigger(rows, r, (e.get("status") or {}).get("id"))
+        if trigger:
+            e["trigger"] = trigger
+            e["trigger_source"] = "prose_zh"
+            filled += 1
+    return filled
+
+
 def annotate_passive(r, spec, rows=None):
     """Give every effect of a passive its trigger, in place.
 
@@ -3036,6 +3251,13 @@ def annotate_passive(r, spec, rows=None):
                            "clause": c[:160]})
     if unmodelled:
         spec["unmodelled"] = unmodelled
+
+    # LAST, so it only ever splits a tie the English pass has already produced: two
+    # opcodes for one status sharing one trigger. See split_duplicate_triggers.
+    split_duplicate_triggers(r, spec, rows or {})
+    # ...and only then the Chinese fallback, so it can never displace an English-derived
+    # trigger -- it fills gaps, it does not arbitrate.
+    fill_triggers_from_zh(r, spec, rows or {})
 
 
 def compile_skill(rows, sid, swings_by_act):

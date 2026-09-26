@@ -56,10 +56,21 @@ import os
 import random
 import statistics
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SERVER = os.path.join(os.path.dirname(HERE), "server")
 sys.path.insert(0, SERVER)
+
+# NEVER TOUCH A REAL SAVE. `loadout_party` imports player_state, which fixes its account
+# directory at import time (CLAUDE.md section 10: server/accounts/ is real people's
+# characters and progress). This sweep only ever builds state dicts in memory and never
+# calls load/save -- but an accidental write must not be able to land on real data, so
+# the directory is pointed at a throwaway before the import can happen. An explicit
+# SEVENSINS_ACCOUNTS from the caller is respected; the suites set their own.
+os.environ.setdefault(
+    "SEVENSINS_ACCOUNTS",
+    tempfile.mkdtemp(prefix="sevensins-arena-"))
 
 import battle as bt                                            # noqa: E402
 import battle_ai                                               # noqa: E402
@@ -181,19 +192,142 @@ def multiwave_stages(count, seed=0, min_waves=2):
     return [out[int(i * step)] for i in range(count)]
 
 
-def mirror_battle(team, level):
+# ---- fighting with a real loadout -------------------------------------------
+# WHY THIS EXISTS. `bt.Battle` accepts either a bare char id or a ROSTER ENTRY, and
+# everything a cast actually carries into a fight -- equipment, its Soulmirrors, its
+# bloodpact, the Consonance and Skill Up stat ladders, the Consonance master passive --
+# is attached to that entry by `player_state.roster.battle_team`, not by Battle.
+#
+# This sweep built fights from bare ids, so EVERY one of those was absent from every
+# fight it ever ran. It was measured: 4,000 fights, 0 findings, and the master passive
+# had never once been on the field. A green sweep said nothing about any of it.
+#
+# So the party is built through `battle_team` -- the same function the live server calls
+# -- rather than by listing annotations here. That is the point: a future `_annotate_*`
+# is covered the day it is added, with no change to this file. test_fuzz_coverage.py
+# asserts exactly that, by enumerating the annotators and failing on one that never fires.
+_LOADOUT_POOLS = None
+
+
+def _loadout_pools():
+    """Item id pools to kit a cast out from, read from the pack once."""
+    global _LOADOUT_POOLS
+    if _LOADOUT_POOLS is None:
+        from player_state.core import _bonus_group_rows, rune_slot, soulfrag_slot
+        from player_state.gear import is_bloodpact
+
+        def rollable(iid):
+            """`make_rune`/`make_soulmirror` REFUSE a piece whose own bonus group is
+            empty rather than roll from the global table -- a deliberate guard, not a
+            bug. Filtering here means a party is fully kitted instead of one bad id
+            dropping the whole fight back to bare casts."""
+            try:
+                return bool(_bonus_group_rows(int(iid)))
+            except Exception:                        # noqa: BLE001 -- pack row oddity
+                return False
+
+        runes, frags, pacts = {}, {}, []
+        for iid in (dd.rows("item") or {}):
+            iid = int(iid)
+            slot = rune_slot(iid)
+            if slot:
+                if rollable(iid):
+                    runes.setdefault(int(slot), []).append(iid)
+                continue
+            try:
+                sf = soulfrag_slot(iid)
+            except Exception:                        # noqa: BLE001 -- pack row oddity
+                sf = None
+            if sf is not None:
+                if rollable(iid):
+                    frags.setdefault(int(sf), []).append(iid)
+            elif is_bloodpact(iid):
+                pacts.append(iid)
+        _LOADOUT_POOLS = (runes, frags, pacts)
+    return _LOADOUT_POOLS
+
+
+def loadout_party(char_ids, level, rng, richness=1.0):
+    """-> roster entries for `char_ids`, kitted out and annotated the server's way.
+
+    `richness` 0..1 is the chance any given slot is filled, so a sweep covers the bare
+    cast, the half-geared one and the fully-kitted one rather than only the last. Karma
+    and Skill Up rungs are rolled per cast for the same reason -- they drive the two stat
+    ladders AND (via Karma) the master passive's rung.
+
+    Returns None -- not bare ids -- if anything in the loadout path raises. Callers
+    already treat None as "fight this one bare", and handing back a mix of dicts and ints
+    is what made `mirror_battle` crash on `int.get` the first time this was wired up.
+    """
+    try:
+        from player_state import gear as gd
+        from player_state import roster as rs
+        from player_state.core import (grant_soulmirror, karma_of,
+                                       SOULFRAG_SLOT_INDEX)
+        runes, frags, pacts = _loadout_pools()
+        state = {"player_id": 999_000_001, "roster": {}, "backpack": {},
+                 "karma": {}, "formations": [{"array": []}], "team": []}
+        for i, cid in enumerate(char_ids):
+            uid = f"f{i}"
+            entry = {"id": int(cid), "lv": level, "equips_list": [""] * 18,
+                     "limit_book": rng.randint(0, 3), "limit_char": rng.randint(0, 3),
+                     "super_star": rng.choice((0, 0, 1, 2))}
+            state["roster"][uid] = entry
+            state["formations"][0]["array"].append(uid)
+            karma_of(state, int(cid))["flv"] = rng.choice((1, 1, 3, 6, 10, 15, 30))
+            for slot, pool in sorted(runes.items()):
+                if pool and rng.random() < richness and 1 <= slot <= 6:
+                    got = gd.grant_rune(state, rng.choice(pool), slot,
+                                        level=rng.randint(0, 15),
+                                        enhance=rng.randint(0, 5), rng=rng)
+                    entry["equips_list"][slot - 1] = got["uid"]
+            for action, idx in sorted(SOULFRAG_SLOT_INDEX.items()):
+                pool = frags.get(action)
+                if pool and rng.random() < richness:
+                    got = grant_soulmirror(state, rng.choice(pool),
+                                           level=rng.randint(0, 10), rng=rng)
+                    entry["equips_list"][idx] = got["uid"]
+            if pacts and rng.random() < richness:
+                got = gd.grant_bloodpact(state, rng.choice(pacts),
+                                         level=rng.randint(0, 10), rng=rng)
+                entry["equips_list"][gd.bloodpact_slots()[0]] = got["uid"]
+        party = rs.battle_team(state)
+        return party if party and all(isinstance(e, dict) for e in party) else None
+    except Exception:                                # noqa: BLE001 -- never kill a sweep
+        return None
+
+
+def mirror_battle(team, level, party=None):
     """A fight with the SAME five casts on both sides.
 
     Built on a real stage's shell so every code path the server uses is the one exercised
     here -- then both sides are replaced, so nothing about the stage's own difficulty
     survives into the result.
+
+    `party` is the annotated roster entries for `team` (see loadout_party). It has to be
+    passed in because this builds Units DIRECTLY rather than through
+    `Battle._add_player_team`, so nothing a roster entry carries -- gear, pacts, the stat
+    ladders, the master passive -- reaches a unit on its own. With no party the fight is
+    bare casts, which is a valid thing to sweep but must be a deliberate choice.
     """
-    b = bt.Battle(SHELL_STAGE, list(team), level, None, 0, 0)
+    b = bt.Battle(SHELL_STAGE, list(party or team), level, None, 0, 0)
     b.units = {}
+    entries = list(party or [])
     for slot, char_id in enumerate(team):
+        e = entries[slot] if slot < len(entries) else {}
+        if not isinstance(e, dict):                  # bare id: fight this slot unkitted
+            e = {}
         for team_no, base in ((bt.TEAM_PLAYER, 101), (bt.TEAM_ENEMY, 201)):
             order = str(base + slot)
-            b.units[order] = bt.Unit(order, char_id, team_no, slot, lv=level)
+            # Mirrored, so BOTH sides carry the loadout -- an effect that only ever
+            # appears on the player's side is half-tested.
+            b.units[order] = bt.Unit(
+                order, e.get("id", char_id), team_no, slot,
+                lv=e.get("lv", level), star=e.get("star"),
+                super_star=e.get("super_star") or 0, uid=e.get("uid", ""),
+                skill_limit=(e.get("limit_book", 0) or 0) + (e.get("limit_char", 0) or 0),
+                pact_iid=e.get("pact_iid", 0), pact_lv=e.get("pact_lv", 0),
+                gear_bonus=e.get("gear_bonus"), master_lv=e.get("master_lv", 0))
     b.enemy_order_base = 201
     # One wave, and no next one: `advance_wave` would respawn the stage's own mobs and
     # quietly end the mirror.
@@ -209,6 +343,9 @@ def stage_battle(stage_id, roster, level, hp_scale):
     ATK is never touched: see the module docstring for the self-inflicted-damage trap
     that makes an ATK-scaled sweep measure nothing.
     """
+    # `roster` may be bare char ids or annotated entries (loadout_party) -- Battle's
+    # _add_player_team accepts either, and the entry form is what carries gear, pacts
+    # and the master passive into the fight.
     b = bt.Battle(stage_id, list(roster), level, None, 0, 0)
     if hp_scale != 1:
         for u in b.units.values():

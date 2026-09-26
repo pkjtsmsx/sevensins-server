@@ -266,7 +266,8 @@ def book_progress(state):
 def char_json(state):
     """PlayerCharData. `acPeriod` and the three ctor params must be present or the
     client NPEs -- see docs/GAME_SERVER.md."""
-    pro_chars = {uid: _char_data_json(uid, entry)
+    from .roster import sheet_bonus
+    pro_chars = {uid: _char_data_json(uid, entry, sheet_bonus(state, entry))
                  for uid, entry in state["roster"].items()}
     # charIDDic is keyed by the character ID, so multiple copies collapse to one entry
     # -- that is the point of it being separate from charDic. Build it with the same

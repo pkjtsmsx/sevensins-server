@@ -41,6 +41,7 @@ SERVER = os.path.join(os.path.dirname(HERE), "server")
 sys.path.insert(0, SERVER)
 
 from engine import core, passives, specs          # noqa: E402
+from engine import pursuit_values as _pursuit     # noqa: E402
 
 # RESOLVED AT IMPORT, ON PURPOSE. The first version of this tool reached for
 # `passives._derived_rules` -- which does not exist, the function is `_compiled_rules` --
@@ -257,7 +258,14 @@ def coverage():
         # engine for obeying the prose. Same treatment as an effect starved of its
         # numbers. Before the sentence-scoped condition work almost no non-status effect
         # carried a gate; this bucket now holds ~1,450 of them.
-        if eff.get("requires"):
+        # A RECOVERED gate counts too. engine.pursuit_values carries the pursuit gates
+        # the compiler never filled in -- a stated chance it dropped, and "only while the
+        # caster holds Bankai", which it cannot express at all. Those effects carry no
+        # `requires` of their own, so without this they read as engine gaps for doing
+        # exactly what the prose says. Same reasoning as the compiled gate above.
+        if eff.get("requires") or (
+                eff.get("op") == "follow_up"
+                and _pursuit.gate(sid, eff.get("skill"))):
             gated[op] += 1
             continue
         cells[(op, eff.get("trigger"))].append((sid, spec, eff))

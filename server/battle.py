@@ -271,6 +271,63 @@ def skill_ranks(char_row, limit_with_suit):
     return ranks
 
 
+# ---- the Consonance master passive -----------------------------------------
+# The passive the Consonance (Kizuna) panel unlocks -- Leviathan's "Sis Is MINE!",
+# Lucifer's "Demon X Human Cannonball". No cast's `_skills` column lists it, so it never
+# reached a fight at all.
+#
+# The link from a cast to its passive lives in the client's DesignSoulbookKizunaRow
+# (`CharID` / `IsSkill` / `SkillID` / `MaxLevel`), and that form is NOT in this design
+# pack. The ids give it up anyway, checkably: it sits in the cast's OWN id band
+# (char_id * 100 + 00..99) and it is the one passive ladder there that the cast's
+# `_skills` does not list -- because `_skills` is what the cast fights with and this is
+# what the panel adds on top.
+#
+#       10011 Leviathan -> 1001161 Sis Is MINE!                I..X
+#       10061 Asmodeus  -> 1006141 Erotic Embodiment           I..X
+#       10001 Lucifer   -> 1000161 Demon X Human Cannonball    I..VI
+#
+# Neither the offset (61 / 41 / 51) nor the depth is fixed, so neither is hardcoded. What
+# is constant is the SHAPE: every rung a `passive`, all one group, at least six of them,
+# and absent from `_skills`. Measured over the pack: 69 of the 122 listed casts match and
+# NONE matches twice, so there is nothing to disambiguate. Depths are 6, 10 and 15.
+_MASTER_PASSIVES = None
+MASTER_MIN_LADDER = 6
+
+
+def _master_table():
+    """-> {char id: (base skill id, ladder depth)}. Built once, off the pack."""
+    global _MASTER_PASSIVES
+    if _MASTER_PASSIVES is None:
+        from engine import specs as _specs
+        skills = _specs.skills()
+        _MASTER_PASSIVES = {}
+        for cid, row in (dd.rows("char") or {}).items():
+            if row.get("_type") != 1 or not row.get("_order"):
+                continue
+            own = {s for s in (row.get("_skills") or []) if s}
+            lo, hi = int(cid) * 100, int(cid) * 100 + 100
+            ladders = {}
+            for sid, spec in skills.items():
+                if lo <= int(sid) < hi and spec.get("type") == "passive":
+                    ladders.setdefault(spec.get("group"), []).append(int(sid))
+            for group, levels in ladders.items():
+                if group not in own and len(levels) >= MASTER_MIN_LADDER:
+                    _MASTER_PASSIVES[int(cid)] = (int(group), len(levels))
+                    break
+    return _MASTER_PASSIVES
+
+
+def master_passive(char_id):
+    """-> (base skill id, ladder depth) for this cast's master passive, or None."""
+    return _master_table().get(int(char_id or 0))
+
+
+def master_passive_table():
+    """-> {char id: (base skill id, ladder depth)} for every recovered master passive."""
+    return dict(_master_table())
+
+
 def skill_at_rank(skill_id, rank=SKILL_RANK):
     """The row for the same skill at the given rank, clamped to what exists."""
     key = (skill_id, rank)
@@ -699,6 +756,10 @@ def story_shard_drop(stage_id):
 def generated_drop_pool(stage_id):
     """Every item id an ordinary stage CAN drop -> [item ids], in weight order.
 
+    Test rows are excluded (see player_state.core.is_test_item). No stage pool contains
+    one today -- checked across all 6,628 -- so this is belt to the braces of the guard in
+    `grant_reward`, on the path a player actually looks at.
+
     **This is the POOL, not a sample of it.** The Drop Info panel asks what a stage can
     pay, and answering it by rolling generated_drops once -- which is what this used to
     do -- shows only the two or three members that one roll happened to pick, so a stage
@@ -723,7 +784,9 @@ def generated_drop_pool(stage_id):
     special = story_special_item(stage_id)
     if special is not None:
         out.append(special)
-    return out
+    # See the docstring: no pool carries one today, so this only ever costs a filter.
+    from player_state.core import is_test_item
+    return [i for i in out if not is_test_item(i)]
 
 
 # `_difficulty` 1/2/3 = Normal/Hard/Nightmare -- confirmed by the same content existing
@@ -1710,7 +1773,7 @@ class Unit(_engine_core.Unit):
 
     def __init__(self, order, char_id, team, index, lv=1, star=None, super_star=0,
                  book_bonus=None, uid="", skill_limit=0, pact_iid=0, pact_lv=0,
-                 gear_bonus=None):
+                 gear_bonus=None, master_lv=0):
         self.order, self.char_id, self.team, self.index = order, char_id, team, index
         # Worn bloodpact, resolved by player_state.roster (battle never sees the
         # backpack). Drives the aura -- see blood_effect.
@@ -1803,6 +1866,13 @@ class Unit(_engine_core.Unit):
         ranks = skill_ranks(row, (skill_limit or 0) + (super_star or 0))
         self.skills = [skill_at_rank(s, ranks[i] if i < len(ranks) else 1)
                        for i, s in enumerate(base_skills)]
+        # THE CONSONANCE MASTER PASSIVE, which no cast's `_skills` lists -- see
+        # master_passive. `master_lv` is the rung it is taken to; roster derives it from
+        # the cast's Karma rank, which is the Consonance panel's own progression.
+        master = master_passive(char_id)
+        if master and int(master_lv or 0) > 0:
+            base, depth = master
+            self.skills.append(skill_at_rank(base, min(int(master_lv), depth)))
         # Remaining cooldown per skill slot. DesignSkillRow._cdTurn is the reload
         # time (0 for basics, 3-5 for the big ones); publishing 0 for everything
         # lets the player spam their strongest skill every turn.
@@ -2332,7 +2402,8 @@ class Battle:
                 skill_limit=(entry.get("limit_book", 0) or 0)
                 + (entry.get("limit_char", 0) or 0),
                 pact_iid=entry.get("pact_iid", 0), pact_lv=entry.get("pact_lv", 0),
-                gear_bonus=entry.get("gear_bonus"))
+                gear_bonus=entry.get("gear_bonus"),
+                master_lv=entry.get("master_lv", 0))
         # enemies keep numbering on from the party, and keep the same numbers across
         # waves so orders stay stable for the whole fight
         self.enemy_order_base = ORDER_BASE + len(char_ids[:MAX_SLOTS])
@@ -2533,6 +2604,50 @@ class Battle:
         # Random, not first: "attacks allies" is a scramble, and always picking the same
         # slot makes a control effect look deterministic to the player.
         return random.choice(pool) if pool else None
+
+    def _forced_skill(self, attacker, skill_id):
+        """-> the skill a redirected unit is actually allowed to use this turn.
+
+        幻惑 (status 619, EN "Charm") is the ONE redirect whose prose restricts the skill
+        as well as the target:
+
+            ※ 幻惑：攻擊力降低，且效果結束前將使用普攻攻擊我方，持續1回合。
+                    ("...will use a NORMAL ATTACK against our side...")
+
+        `_forced_target` already sends it at an ally; without this it did so with its
+        whole kit, Special Move included. Forced to slot 0, the cast's own basic attack.
+
+        Nothing else qualifies, and the English invites exactly the wrong guess:
+          * 608/674 挑釁 "只攻擊自己" -- restricts the TARGET only, so a taunted cast
+            keeps its kit. (Its ATK penalty is the other recovered half -- see
+            engine.status.TAUNT_ATK_DOWN.)
+          * 612 魅惑 "無法操控並且必定攻擊友方" -- no skill restriction, and no ATK
+            penalty either, though EN 612 claims one.
+          * 611/615 混亂 "無法分別敵我" -- scrambles who is hit, says nothing about what with.
+        EN 619 is the faithful one here ("using normal attacks"); EN 612 is not.
+        """
+        if not getattr(attacker, "skills", None):
+            return skill_id
+        got = _engine_status.redirect(attacker)
+        if not got:
+            return skill_id
+        if not any(st.status_id == _engine_status.CHARM_BASIC_ONLY
+                   for st in _engine_status._actives(attacker)):
+            return skill_id
+        return attacker.skills[0] or skill_id
+
+    def _action_ctx(self, acted):
+        """-> what the unit just did, for after-action passives.
+
+        `skill_type` is the design row's own type, so `sp_skill` is the Special Move --
+        which is what 45 passive skills across 27 groups gate a clause on, and what 20 of
+        them were compiled `unmodelled` for want of. A unit that has not acted this
+        battle carries no id and the gate simply does not pass.
+        """
+        sid = int(getattr(acted, "last_skill_id", 0) or 0)
+        return {"skill": sid,
+                "skill_type": (_engine_specs.skill(sid) or {}).get("type") if sid
+                else None}
 
     def _apply_gauge_cd(self, outcome):
         """Fold an effect outcome's charge-gauge and cooldown changes back onto the
@@ -2845,6 +2960,14 @@ class Battle:
         target = self.units.get(defender_order)
         if attacker and target:
             target = self._forced_target(attacker) or target
+        if attacker:
+            # 幻惑 forces the BASIC ATTACK as well as the ally target -- see _forced_skill.
+            skill_id = self._forced_skill(attacker, skill_id)
+            # Remember WHAT was used, for the after-action passives: a clause gated on
+            # the Special Move (使用必殺技時) cannot be judged from the actor alone.
+            # Set after the redirect, so a charmed cast that was forced down to its basic
+            # attack does not still count as having used its ultimate.
+            attacker.last_skill_id = int(skill_id or 0)
 
         from engine import bridge
         combo = bridge.attack_combo(
@@ -3022,10 +3145,20 @@ class Battle:
             # After-action passives fire before the duration tick, so an effect the
             # actor's own turn produces is not immediately aged by it.
             _hp_before = {u.order: u.hp for u in self.units.values()}
+            # WHAT the actor just used goes in the ctx. 45 passive skills across 27
+            # groups gate a clause on the Special Move -- Satan's 使用必殺技時將賦予自身
+            # 「萬解」 is one, and 20 of them were compiled `unmodelled` for want of this
+            # -- and an after-action rule cannot ask about a skill it is never told.
             self._absorb_passive(_engine_passives.fire_all(
                 _engine_passives.AFTER_ACTION, [acted], list(self.units.values()),
+                ctx=self._action_ctx(acted),
                 fired=getattr(self, "_passives_fired", None)),
                 hp_before=_hp_before)
+            # 自身行動結束時 -- the nested scripts that fire on the HOLDER'S OWN action
+            # ending, rather than once per global turn. See status.OWN_ACTION_NESTED for
+            # why the two cannot share one call site.
+            self._queue_status_rows(
+                _engine_status.run_nested(acted, own_action=True))
             # A resolved turn spends a turn of the actor's own statuses. NO removal
             # row for these, on purpose: the client decrements the ACTOR's statuses
             # itself in TurnEndState.OnEnter (BattleUnit.UpdateStatusRound on

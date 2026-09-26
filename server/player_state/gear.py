@@ -176,8 +176,15 @@ def make_bloodpact(state, item_id, level=0, skills=None, rng=None):
     return {"iid": int(item_id), "amount": 1, "attr": attr}
 
 
-def grant_bloodpact(state, item_id, level=0):
-    """Put a bloodpact in storage 4. -> the stored entry."""
+def grant_bloodpact(state, item_id, level=0, rng=None):
+    """Put a bloodpact in storage 4. -> the stored entry.
+
+    `rng` is forwarded to `make_bloodpact`, which uses it to pick the pact's ReplaceSkill
+    rows. Without it that draw falls through to the global `random`, which made the
+    battle fuzzer's findings unreproducible from their own repro line -- the pact skills
+    differed on every run. `grant_rune` and `grant_soulmirror` both already took one; this
+    was the odd one out.
+    """
     bag = state["backpack"].setdefault(str(BP_STORAGE_BLOODPACT), {})
     sid = max((int(k) for k in bag), default=0) + 1
     n = len(bag) + 1
@@ -185,7 +192,7 @@ def grant_bloodpact(state, item_id, level=0):
     while any(e.get("uid") == uid for e in bag.values()):
         n += 1
         uid = f"{state['player_id']}b{n:04d}"
-    entry = make_bloodpact(state, item_id, level)
+    entry = make_bloodpact(state, item_id, level, rng=rng)
     entry["sid"] = sid
     entry["uid"] = uid
     bag[str(sid)] = entry
