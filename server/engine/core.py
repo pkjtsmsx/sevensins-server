@@ -10,6 +10,9 @@ import random
 from typing import Any, Dict, List, Optional
 
 from . import formula, passives as _passives, specs, status as _status
+from . import dot_values as _dot
+from . import multi_basis as _multi
+from . import prose_gates as _gates
 from . import pursuit_values as _pursuit
 
 TEAM_PLAYER, TEAM_ENEMY = 1, 2
@@ -423,6 +426,19 @@ def _condition_met(requires, caster, target, snapshot=None, ctx=None):
         # it is unevaluatable, and takes the same policy as an unparsed condition.
         # `resolved` is set only by the Chinese reader; the English path omits it, and
         # those names come from the registry already.
+        #
+        # MOST OF THEM ARE ANSWERABLE, though, and falling through costs more than it
+        # looks: an unevaluatable gate takes UNSTATED_CHANCE, so "if the caster holds
+        # Harden" becomes a 75% roll whether he holds it or not. engine/prose_gates.py
+        # maps the names that ARE knowable -- categories, and rows under a name the
+        # prose spells differently -- and 194 of the 198 unresolved gates resolve there.
+        # The remaining four state a stack count with the status elided and stay a roll.
+        alias = _gates.resolve(requires.get("status"))
+        if alias:
+            holder = caster if requires.get("on") == "caster" else target
+            got = _gates.holds(holder, alias, snapshot)
+            if got is not None:
+                return (not got) if requires.get("negate") else bool(got)
         return None
     holder = caster if requires.get("on") == "caster" else target
     held = _holds_status(holder, requires["status"], snapshot, requires.get("count"))
@@ -603,6 +619,21 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
                     if basis_override:
                         basis = basis_override
                 amount, detail = formula.strike(caster, tgt, coef, basis, r)
+                # THE OTHER HALF. "20%攻擊力+50%防禦力的3段傷害" is one hit driven by TWO
+                # stats and the compiler keeps only the first, so a DEF-built cast lands
+                # its small ATK component and drops the large DEF one -- 141 skills, and
+                # in 66 of them the dropped half is the bigger. Struck separately so each
+                # is mitigated on its own terms, then added into ONE reported amount: a
+                # second row per swing would push the group count past what the client's
+                # cinematic consumes. See engine/multi_basis.py.
+                second = _multi.second_component(skill_id)
+                if second is not None and amount is not None:
+                    basis2, coef2 = second
+                    extra, _d2 = formula.strike(caster, tgt, coef2, basis2, r)
+                    if extra:
+                        amount += extra
+                        detail["second_basis"] = basis2
+                        detail["second_amount"] = extra
                 if amount is None:
                     out.skipped.append({"op": "damage", "why": "coefficient unknown",
                                         "skill": skill_id})
@@ -651,6 +682,16 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
                 # list everything else reads.
                 if apply_damage:
                     active = _status.apply_event(tgt, ev, caster)
+                    if (active is not None and active.kind == "dot"
+                            and active.magnitude is None):
+                        # A DoT whose rate the status ROW never states -- Venom says only
+                        # "a certain ratio of the caster's ATK". The number is on the ※
+                        # line of THIS skill's prose and varies by skill level, so it is
+                        # keyed by skill. Without it the status lands, draws its icon,
+                        # counts down and ticks ZERO. See engine/dot_values.py.
+                        got = _dot.lookup(skill_id, active.name)
+                        if got:
+                            active.magnitude, active.tick_basis, active.tick_whose = got
                     if active is None:
                         # Blocked by an immunity. Not a status row -- but the client
                         # can SAY so: an "IMMUNE" floating text (DamageMode 10097).
@@ -790,7 +831,8 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
                     tgt.hp = hp
                 out.revives.append({"target": tgt.order, "hp": hp})
         elif op == "attack_rider":
-            _rider(caster, e, targets, out, r, apply_damage, skill_id, units, held, ctx)
+            _rider(caster, e, targets, out, r, apply_damage, skill_id, units, held, ctx,
+                   swings=swings)
         elif op == "follow_up":
             child = specs.skill(e["skill"])
             # Tri-state, like _status_event: False skips, None means the gate could not
@@ -1040,7 +1082,7 @@ def _flag_deaths(out, targets, units=()):
 
 
 def _rider(caster, eff, targets, out, rng, apply_damage, skill_id, units=(),
-           held=None, ctx=None):
+           held=None, ctx=None, swings=1):
     """op 1 -- the attack rider, and op 6 -- the same shape sized off the caster's HP.
 
     Kind comes from prose; see contract doc 6.3.3. `basis` is ATK unless the compiler
@@ -1127,7 +1169,15 @@ def _rider(caster, eff, targets, out, rng, apply_damage, skill_id, units=(),
         # A RIDER rather than a second `damage` effect, because `execute` runs every
         # damage effect once per SWING: Special Sanction has two, so a damage-op form
         # would pay 35% twice. The rider fires once, at swing 0.
+        #
+        # ...EXCEPT where the prose says PER HIT. Belial's Marvelous Combo is
+        # 每段傷害額外造成敵方最大體力13%的傷害 and swings twice, so once was half the clause.
+        # Seven rows say it -- the Marvelous Combo ladder and its alt-band rung -- against
+        # 144 on this branch that state their figure once, which is why the default stays
+        # once. See engine/prose_gates.PER_HIT_MAXHP_RIDER.
+        hits = max(1, int(swings or 1)) if _gates.rider_per_hit(skill_id) else 1
         for tgt in targets:
+          for _hit in range(hits):
             amount, detail = formula.strike(caster, tgt, pct / 100.0, "MAX_HP", rng)
             if amount is None:
                 continue

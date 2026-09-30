@@ -79,6 +79,12 @@ class Active:
     # magnitude cannot express that. Defaults to None so an older save restores cleanly.
     source_order: Optional[str] = None
     shield_hp: int = 0
+    # A recovered DoT's basis and whose stat it reads (engine/dot_values.py). "caster"
+    # uses `source_atk`, the inflicter's snapshot; "owner" reads the carrier's own live
+    # stat, because 造成狀態擁有者本身攻擊力80%傷害 says so. Default None so an older save
+    # restores cleanly and behaves exactly as before.
+    tick_basis: Optional[str] = None          # "atk" | "def" | "max_hp"
+    tick_whose: Optional[str] = None          # "caster" | "owner"
 
     @property
     def permanent(self):
@@ -370,6 +376,51 @@ def is_immune(unit, row):
 # same reason.
 
 
+# ---- a HoT measured off the HOLDER, not the caster --------------------------
+# Five heal statuses are a share of the pool of whoever CARRIES them, and every HoT read
+# `source_atk` -- the inflicter's ATK snapshot. On a 100k pool a 20% regen healed a few
+# hundred instead of 20,000, which reads as simply broken.
+#
+# The rows say so themselves, in both languages, and the Chinese settles what "HP%" means:
+#
+#   1005 Regeneration  "according to the HP% of the caster who RECEIVES this status"
+#   1008 Sleep Well    ※ 充足休眠：回合開始時，回復自身體力最大值25%  -- 最大值, MAXIMUM
+#   1009 Heartwarming  ※ 療癒：回合開始時，回復自身體力最大值15%
+#   1007 Breath of Star / 1101 Guardian Feather -- same English wording
+#
+# ...and which ones must NOT move:
+#
+#   1001 Heal          ※ 治癒：以施術者的75%攻擊力回復體力 -- the CASTER's ATK. Unchanged.
+#   1002 Regen         "according to the caster's current HP%" in English, and its Chinese
+#                      glossary names no owner at all. Ambiguous between the two readings,
+#                      so it is left where it was rather than moved on a guess.
+#
+# Read off the ROW's own text rather than an id list, so a pack that adds another one is
+# covered; `_HOT_CASTER_ATK` is checked first so a row stating the caster's ATK can never
+# be captured by the holder rule.
+_HOT_HOLDER_HP = re.compile(r"receives this status", re.I)
+_HOT_CASTER_ATK = re.compile(r"according to the caster's ATK", re.I)
+_HOT_HOLDER_IDS = None
+
+
+def _hot_reads_holder_pool(active):
+    """-> True if this HoT is a share of the HOLDER's own max HP."""
+    if getattr(active, "kind", None) != "heal":
+        return False
+    global _HOT_HOLDER_IDS
+    if _HOT_HOLDER_IDS is None:
+        _HOT_HOLDER_IDS = set()
+        for sid, row in (specs.statuses() or {}).items():
+            if row.get("kind") != "heal":
+                continue
+            text = str(row.get("description") or "")
+            if _HOT_CASTER_ATK.search(text):
+                continue
+            if _HOT_HOLDER_HP.search(text):
+                _HOT_HOLDER_IDS.add(int(sid))
+    return int(getattr(active, "status_id", 0) or 0) in _HOT_HOLDER_IDS
+
+
 def tick_damage(unit):
     """DoT/HoT for the START of this unit's turn. -> (dot, hot).
 
@@ -382,7 +433,18 @@ def tick_damage(unit):
     """
     dot = hot = 0
     for st in _actives(unit):
-        base = st.source_atk if st.source_atk else getattr(unit, "atk", 0)
+        if st.tick_whose == "owner":
+            # A recovered DoT read LIVE off the unit CARRYING it: 造成狀態擁有者本身攻擊力
+            # 80%傷害 is the owner's own ATK, so its buffs and debuffs move the tick.
+            # Potion's Kiss is a share of that unit's pool instead.
+            base = {"max_hp": getattr(unit, "max_hp", 0),
+                    "def": getattr(unit, "defence", 0)}.get(
+                        st.tick_basis, getattr(unit, "atk", 0))
+        elif _hot_reads_holder_pool(st):
+            # 回復自身體力最大值N% -- a share of the HOLDER's own pool. See above.
+            base = getattr(unit, "max_hp", 0)
+        else:
+            base = st.source_atk if st.source_atk else getattr(unit, "atk", 0)
         # 凍結 is classified `control`, so it never reached the DoT branch even though
         # its Chinese says 受到持續性的傷害. Its size is a house number (CONTROL_DOT);
         # everything else about it -- the ATK basis, the source snapshot, the stacking --

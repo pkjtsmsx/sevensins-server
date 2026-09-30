@@ -380,10 +380,26 @@ def check_condition_shapes():
           core._holds_status(c, "Reload", None, 1) is True)
 
     # -- an unresolvable NAME is unevaluatable, never a permanently shut gate.
+    #
+    # 能力下降 USED TO BE THE EXAMPLE HERE and no longer is: it means "a stat-down", a
+    # CATEGORY, and engine/prose_gates.py now answers it for real instead of letting it
+    # fall through to a 75% roll. 194 of the 198 unresolved gates are answerable that
+    # way. What is left states a stack count with the status name elided -- "if it has
+    # 5 stacks", of what the sentence never says -- and that is still unevaluatable,
+    # which is what this guards.
     c, u = field(n_enemy=1)
-    check("an unresolved gate name is unevaluatable",
-          core._condition_met({"status": "能力下降", "on": "caster", "resolved": False},
+    check("a gate naming only a stack count is unevaluatable",
+          core._condition_met({"status": "5層", "on": "caster", "resolved": False},
                               c, u[1], None) is None)
+    # ...and the category gate really is answered now, both ways.
+    check("a stat-down gate is answered, not rolled",
+          core._condition_met({"status": "能力下降", "on": "caster", "resolved": False},
+                              c, u[1], None) is False)
+    c.statuses.append(Active(status_id=9003, name="Weaken", kind="stat_mod",
+                             category="debuff", remaining=3))
+    check("  ...and reads True once a stat-down is held",
+          core._condition_met({"status": "能力下降", "on": "caster", "resolved": False},
+                              c, u[1], None) is True)
 
 
 def check_prose_stack_caps():

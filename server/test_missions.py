@@ -180,8 +180,20 @@ def test_period_keys_use_the_shared_4am_boundary():
           "3AM and 5AM are different daily windows")
     check(q._mission_period(4, five_am) == q._mission_period(4, five_am + 3600),
           "5AM and 6AM are the same one")
-    check(q._mission_period(6, five_am) == q._mission_period(6, five_am + 86400),
+    # ANCHORED MID-MONTH, not on today. This used to add a day to *today* and assert the
+    # month key was unchanged, which is false on the last day of any month -- it failed on
+    # 2026-09-30 with nothing wrong, the same shape as test_shops' "monthly outlasts
+    # weekly". The property being checked is that a monthly window spans days, so the
+    # 15th is where to check it.
+    mid = time.mktime((t.tm_year, t.tm_mon, 15, 5, 0, 0, 0, 0, -1))
+    check(q._mission_period(6, mid) == q._mission_period(6, mid + 86400),
           "a day later is still the same month")
+    # ...and it DOES change across a month boundary, which is the other half.
+    nxt_mon = 1 if t.tm_mon == 12 else t.tm_mon + 1
+    nxt_yr = t.tm_year + 1 if t.tm_mon == 12 else t.tm_year
+    next_month = time.mktime((nxt_yr, nxt_mon, 15, 5, 0, 0, 0, 0, -1))
+    check(q._mission_period(6, mid) != q._mission_period(6, next_month),
+          "next month is a different monthly window")
 
 
 if __name__ == "__main__":

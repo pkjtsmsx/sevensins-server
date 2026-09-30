@@ -100,9 +100,22 @@ def check_resets():
     check("weekly outlasts daily",
           sh.next_reset_time(sh.RESET_WEEKLY, now)
           >= sh.next_reset_time(sh.RESET_DAILY, now))
-    check("monthly outlasts weekly",
-          sh.next_reset_time(sh.RESET_MONTHLY, now)
-          >= sh.next_reset_time(sh.RESET_WEEKLY, now))
+    # NOT "monthly outlasts weekly". That held on most days and is not a property of the
+    # code: the resets are CALENDAR-anchored, monthly to the 1st and weekly to a weekday,
+    # so their order depends on today's date. On 2026-09-29 the next monthly was Oct 1
+    # (+41h) and the next weekly Oct 5 (+137h), and the assertion failed with nothing
+    # wrong -- a test asserting an incidental relationship rather than the behaviour.
+    #
+    # What IS true year-round: every reset lands on the 04:00 rollover that the whole
+    # system shares, and on its own calendar anchor.
+    import datetime as _dt
+    for cyc, label in ((sh.RESET_DAILY, "daily"), (sh.RESET_WEEKLY, "weekly"),
+                       (sh.RESET_MONTHLY, "monthly")):
+        when = _dt.datetime.fromtimestamp(sh.next_reset_time(cyc, now))
+        check(f"{label} resets at the 04:00 rollover",
+              (when.hour, when.minute, when.second) == (4, 0, 0), str(when))
+    check("monthly resets on the 1st",
+          _dt.datetime.fromtimestamp(sh.next_reset_time(sh.RESET_MONTHLY, now)).day == 1)
 
 
 def main():
