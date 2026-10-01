@@ -114,8 +114,17 @@ def check_dot_death_reaches_the_wire():
         # THE assertion: without this the client never learns the unit died, keeps it
         # in its own action order, and waits for a turn that never comes.
         check(f"{dead}: the row carries die=1", rows[0]["die"] == 1)
-        check(f"{dead}: damage is what was removed, not the raw tick",
-              rows[0]["dmg"] == pools.get(dead),
+        # MAGNITUDE *and* SIGN. This used to assert the positive pool value and so
+        # encoded a real bug: `DamageInfo.IsDamage` (0x16870B4) is `Mode == 1 &&
+        # Damage < 0`, so a positive amount told the client to HEAL the unit by the
+        # damage that killed it -- no hurt voice, no injured animation, HP bar going the
+        # wrong way. Reported from a device as an AoE that "registered only two, third
+        # one had full hp". Damage rides negative; the strike path always negated and
+        # only this hand-built row did not.
+        check(f"{dead}: damage rides NEGATIVE, as IsDamage requires",
+              rows[0]["dmg"] < 0, str(rows[0]["dmg"]))
+        check(f"{dead}: magnitude is what was removed, not the raw tick",
+              abs(rows[0]["dmg"]) == pools.get(dead),
               f"{rows[0]['dmg']} vs pool {pools.get(dead)}")
         check(f"{dead}: gone from the turn line", dead not in cmd["line"])
         try:

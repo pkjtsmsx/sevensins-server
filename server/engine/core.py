@@ -691,7 +691,8 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
                         # counts down and ticks ZERO. See engine/dot_values.py.
                         got = _dot.lookup(skill_id, active.name)
                         if got:
-                            active.magnitude, active.tick_basis, active.tick_whose = got
+                            (active.magnitude, active.tick_basis,
+                             active.tick_whose, active.tick_when) = got
                     if active is None:
                         # Blocked by an immunity. Not a status row -- but the client
                         # can SAY so: an "IMMUNE" floating text (DamageMode 10097).

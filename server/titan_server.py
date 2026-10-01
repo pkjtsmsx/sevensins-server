@@ -1439,7 +1439,27 @@ def battle_replies(battle, cmd, intargs, strargs, state=None, uid=""):
         start_avg = battle.avg(battle.before_avgs, battle.wave + 1)
         log(f"    -> wave {battle.wave}/{battle.wave_max} result {result} "
             f"avg next={next_avg} end={end_avg} start={start_avg}")
-        return [battle_msg(bt.CMD_WAVE_END,
+        # AN OUT-OF-BAND DEATH ON THE TURN THAT CLEARS A WAVE WAS BEING THROWN AWAY.
+        #
+        # `_pending_dot_deaths` was drained in exactly two places, both attack replies
+        # (`play_turn_msgs` and REQ_ATTACK). A DoT tick, a counter or an after-action rule
+        # that finishes the LAST enemy queues its death and then the next RPCs are judge ->
+        # wave-end -> next-wave, none of which drained -- and `advance_wave` CLEARS the
+        # queue. So the client was never told that unit died: no `die` row, no death
+        # animation, its object left standing at full HP while the server had it dead.
+        #
+        # Reported from a device as exactly that: an AoE "supposed to kill 3 enemies
+        # registered only two, third one had full hp", then the party "walk to wave 2 or 3
+        # even tho someone survived. And it locks up."
+        #
+        # Sent BEFORE the wave-end message so the client plays the death and then ends the
+        # wave, which is the order it would have got had the kill landed inside an attack.
+        deaths = [battle_msg(bt.CMD_ATTACK, [], [j])
+                  for j in battle.dot_death_cmds_json()]
+        if deaths:
+            log(f"    -> {len(deaths)} out-of-band death(s) flushed before the wave end "
+                f"(these used to be dropped by advance_wave)")
+        return deaths + [battle_msg(bt.CMD_WAVE_END,
                            [result, battle.wave, next_avg, end_avg, start_avg],
                            # BtCollector -- the per-unit damage table behind the
                            # results screen's Result button. An EMPTY dmgTbl ends the
@@ -1448,6 +1468,29 @@ def battle_replies(battle, cmd, intargs, strargs, state=None, uid=""):
                            # threw ArgumentOutOfRange and appeared dead.
                            [battle.collector_json()])]
     if cmd == bt.REQ_NEXT_WAVE:
+        # DESYNC TRIPWIRE, not a guard. The client decides when to walk to the next wave
+        # (TurnEndState.DoNextState has already incremented its own BattleData.Wave by the
+        # time it asks) and the server has always obeyed. That is fine while the two agree
+        # about who is dead, and it is how a disagreement becomes PERMANENT when they do
+        # not: the next wave spawns on top of a survivor the server still has standing.
+        #
+        # Reported from a device: an AoE "supposed to kill 3 enemies registered only two,
+        # third one had full hp", then "they walk to wave 2 or 3 even tho someone survived.
+        # And it locks up". The server cannot have reported that clear -- `wave_cleared()`
+        # is `not team_alive(ENEMY)` -- so this ask is the first observable moment the two
+        # disagree.
+        #
+        # NOT refused, deliberately: the client is waiting on CMD_NEXT_WAVE, and declining
+        # would hang the fight here instead of later -- trading a diagnosable bug for an
+        # undiagnosable one. Logged loudly instead, because 356 swept skill/hp combinations
+        # could not reproduce the lost kill server-side.
+        alive = [o for o, u in battle.units.items()
+                 if u.team == bt.TEAM_ENEMY and u.alive]
+        if alive:
+            log(f"    !! DESYNC: client asked for wave {battle.wave + 1} while the server "
+                f"still has {len(alive)} live enemy/enemies {alive} in wave "
+                f"{battle.wave} -- hp {[battle.units[o].hp for o in alive]}. Advancing "
+                f"anyway; the client believes they are dead. Soft-lock signature.")
         battle.advance_wave()
         log(f"    -> next wave {battle.wave}/{battle.wave_max}: "
             f"{[o for o, u in battle.units.items() if u.team == bt.TEAM_ENEMY]}")

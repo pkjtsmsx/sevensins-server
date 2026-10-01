@@ -57,7 +57,7 @@ GLOSS = re.compile(r"^\s*※\s*([^：:]{1,14})[：:](.+)$")
 def every_entry_is_derivable_from_its_prose():
     """Rate, basis AND whose must all come back out of the ※ line."""
     rows = dd.rows("skill") or {}
-    for sid, (name, rate, basis, whose) in dv.RECOVERED_DOT.items():
+    for sid, (name, rate, basis, whose, when) in dv.RECOVERED_DOT.items():
         zh = (rows.get(sid) or {}).get("_note1") or ""
         found = None
         for line in zh.split("\n"):
@@ -81,11 +81,11 @@ def every_entry_is_derivable_from_its_prose():
 def the_stat_can_sit_either_side_of_the_percentage():
     """The bug this guards: reading only "N%攻擊力" mis-reads 最大體力10% twice over."""
     got = dv.lookup(2084101, "Potion's Kiss")
-    check(got == (10.0, "max_hp", "owner"),
+    check(got == (10.0, "max_hp", "owner", "turn"),
           f"Potion's Kiss is {got}; its prose is 造成目標最大體力10%的傷害 -- a share of the "
           f"holder's POOL, not of anyone's ATK")
     ven = dv.lookup(1005121, "Venom")
-    check(ven == (40.0, "atk", "caster"),
+    check(ven == (40.0, "atk", "caster", "action"),
           f"Venom is {ven}; its prose is 每次行動時持續造成40%攻擊力的傷害")
 
 
@@ -124,6 +124,85 @@ def a_landed_dot_actually_ticks():
         FAILURES.append("Potion's Kiss never landed in 20 seeds")
 
 
+def the_action_cadence_is_recorded_but_off():
+    """每次行動時 is recorded per skill and NOT acted on until somebody plays it.
+
+    Beelzebub's Devil Cooking lands this on 3-4 enemies at ~10 ticks per round on a full
+    board -- roughly 10x the turn cadence. It was contributed, suspected of a battle
+    soft-lock, disabled, and the soft-lock persisted, so it came back. That rules the
+    cadence out as that bug's cause; it does not make it harmless, and an action tick has
+    no message of its own. Recorded, measured, tested, defaulted OFF.
+    """
+    cadences = {v[4] for v in dv.RECOVERED_DOT.values()}
+    check(cadences == {"turn", "action"},
+          f"cadences present: {cadences}; both readings should still be recorded")
+    check(est.ACTION_DOT_CADENCE is False,
+          "ACTION_DOT_CADENCE is on. That is a ~10x damage change on Venom and Magic "
+          "Potion and an out-of-band HP path -- fine to turn on deliberately, but update "
+          "this test and dot_values' note when you do")
+    check(est.ACTION_DOT_CAN_KILL is False,
+          "ACTION_DOT_CAN_KILL is on while the cadence is off, which can never fire")
+    # With it off, an action-cadence DoT still ticks -- at turn start, like the rest.
+    u = bt.Unit(order="p1", char_id=10001, team=1, index=0, lv=50)
+    u.atk = 1_000
+    a = est.Active(status_id=5006, name="Venom", remaining=3, kind="dot",
+                   category="debuff", magnitude=40.0)
+    a.source_atk = 1_000
+    a.tick_when = "action"
+    u.statuses.append(a)
+    check(est.tick_damage(u)[0] == 400,
+          f"an action-cadence DoT ticked {est.tick_damage(u)[0]} at turn start; with the "
+          f"cadence off it must still tick there")
+    check(est.action_tick_damage(u) == 0,
+          "action_tick_damage pays out while the cadence is off")
+
+
+def the_action_tick_can_never_soft_lock():
+    """Whichever way the switches are set, the client is never left holding a live unit
+    the server thinks is dead -- the shape this project has had to fix twice.
+
+    Exercised with the switches forced on, then restored, so the behaviour is proven
+    without shipping it.
+    """
+    cad, kill = est.ACTION_DOT_CADENCE, est.ACTION_DOT_CAN_KILL
+    try:
+        def rig(hp, can_kill):
+            est.ACTION_DOT_CADENCE, est.ACTION_DOT_CAN_KILL = True, can_kill
+            b = object.__new__(bt.Battle)
+            b.units, b.wave, b._pending_dot_deaths = {}, 1, []
+            u = bt.Unit(order="201", char_id=10051, team=2, index=0, lv=50)
+            u.max_hp, u.hp, u.atk = 100_000, hp, 1_000
+            a = est.Active(status_id=5006, name="Venom", remaining=3, kind="dot",
+                           category="debuff", magnitude=125.0)
+            a.source_atk = 10_000
+            a.tick_when = "action"
+            u.statuses.append(a)
+            b.units["201"] = u
+            b._tick_action_dots()
+            return u, b
+
+        # 125% of the 10,000 snapshot = 12,500 a tick.
+        u, b = rig(100_000, False)
+        check(u.hp == 87_500, f"a non-lethal tick took {100_000 - u.hp}, expected 12,500")
+        for hp in (12_500, 5_000, 1):
+            u, b = rig(hp, False)
+            check(u.alive and u.hp == 1,
+                  f"CAN_KILL off: hp {hp} -> {u.hp}, alive={u.alive}; it must floor at 1 "
+                  f"and die on its own turn through the path the client is told about")
+            check(not b._pending_dot_deaths,
+                  "CAN_KILL off queued a death, which can never happen")
+        for hp in (5_000, 1):
+            u, b = rig(hp, True)
+            check(not u.alive and u.hp == 0, f"CAN_KILL on: hp {hp} -> {u.hp} still alive")
+            check(len(b._pending_dot_deaths) == 1,
+                  f"an out-of-band death queued {len(b._pending_dot_deaths)} rows, not 1 "
+                  f"-- unqueued is exactly the soft-lock")
+    finally:
+        est.ACTION_DOT_CADENCE, est.ACTION_DOT_CAN_KILL = cad, kill
+    check(est.ACTION_DOT_CADENCE is cad and est.ACTION_DOT_CAN_KILL is kill,
+          "the switches were not restored")
+
+
 def an_unlisted_skill_is_left_alone():
     check(dv.lookup(1) is None, "an unlisted skill got a rate")
     # ...and the name guard stops a rate reaching the wrong status.
@@ -157,6 +236,8 @@ def main():
     every_entry_is_derivable_from_its_prose()
     the_stat_can_sit_either_side_of_the_percentage()
     a_landed_dot_actually_ticks()
+    the_action_cadence_is_recorded_but_off()
+    the_action_tick_can_never_soft_lock()
     an_unlisted_skill_is_left_alone()
     the_unrecovered_ones_are_still_honestly_zero()
     for f in FAILURES:

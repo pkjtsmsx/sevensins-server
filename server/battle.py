@@ -2347,9 +2347,11 @@ class Battle:
         # with the battle: on reconnect the client rebuilds every unit's statuses from
         # BattleDatas.status, so a dropped queue costs nothing.
         self._pending_status_rows = []
-        # Units killed by their OWN start-of-turn DoT, queued for the wire. Same
-        # not-saved reasoning as the status rows above: a reconnect rebuilds the field
-        # from BattleDatas, where the unit is already dead.
+        # Out-of-band HP changes, queued for the wire: a start-of-turn DoT tick and any
+        # damage a passive deals outside a skill. Each row carries `die`, because BOTH
+        # halves need telling -- see dot_death_cmds_json. Same not-saved reasoning as the
+        # status rows above: a reconnect rebuilds the field from BattleDatas, where the
+        # HP is already current.
         self._pending_dot_deaths = []
         self.units = {}
         # status name -> times it landed on a PLAYER unit this run (rating kind 20)
@@ -2820,7 +2822,7 @@ class Battle:
                     dealt = min(dealt, int(hp_before.get(target.order, dealt)))
                 self._pending_dot_deaths.append({"order": target.order,
                                                  "dmg": dealt,
-                                                 "wave": self.wave})
+                                                 "wave": self.wave, "die": 1})
         self._queue_status_rows(rows)
 
     def _drain_pending_status(self, combo):
@@ -2898,7 +2900,7 @@ class Battle:
         }, separators=(",", ":"))
 
     def dot_death_cmds_json(self):
-        """-> a BattleCmd per unit killed by its own start-of-turn DoT, and drains.
+        """-> a BattleCmd per out-of-band HP change queued this turn, and drains.
 
         Shaped exactly like an attack (cmd 1201) because that is the only message the
         client renders damage and death from: `die` is set nowhere else on the wire.
@@ -2906,10 +2908,19 @@ class Battle:
         shape attack_cmd_json already falls back to when a skill has no runnable spec,
         so it is a form the client is known to accept.
 
-        DEATHS ONLY, deliberately. A non-lethal tick still moves HP silently through
-        `sync`; sending a 1201 for it would put an extra Perform in front of a unit that
-        has not acted yet, and whether the client's turn machine tolerates that has not
-        been tested on a device. The lock is the death case, so that is what this fixes.
+        NO LONGER DEATHS ONLY. It used to be: a non-lethal tick moved HP silently through
+        `sync`, on the grounds that a 1201 would put an extra Perform in front of a unit
+        that had not acted yet and nobody had watched that on a device. Somebody has now,
+        and the silent version is what is visibly wrong -- "when they get hit by poison,
+        the hp bar lowers without the damage numbers or the hit animation/voice effects".
+        Retail played that beat: the death branch below already records a damage number and
+        a pain sound on the dying unit's own turn, which only makes sense if the non-fatal
+        tick showed one too.
+
+        So `die` comes off the queued row rather than being hardcoded. THE RISK THE OLD
+        NOTE NAMED IS REAL AND UNCHANGED: this is an extra Perform before the unit acts, it
+        now happens on every DoT tick in the game, and it wants a device before it is
+        trusted. A rollback is one `active.txt` edit.
         """
         deaths, self._pending_dot_deaths = self._pending_dot_deaths, []
         out = []
@@ -2928,8 +2939,19 @@ class Battle:
                 cur_team=unit.team if unit else TEAM_PLAYER))
             cmd["combo"] = [{
                 "caster": d["order"], "skill": 0,
-                "data": [[{"c": d["order"], "md": 1, "cg": 0, "dmg": int(d["dmg"]),
-                           "cri": 0, "die": 1, "status": [], "extra": [],
+                # NEGATIVE. `DamageInfo.IsDamage` (0x16870B4) is `Mode == 1 &&
+                # Damage < 0`, and `PlayInjured` is gated on the same test -- damage
+                # rides negative, healing positive. This row was built by hand with a
+                # POSITIVE amount, so every out-of-band death told the client to HEAL the
+                # unit by the damage that killed it: no hurt voice, no injured animation,
+                # and the HP bar going the wrong way. It is exactly the report that an AoE
+                # "supposed to kill 3 enemies registered only two, third one had full hp".
+                # The strike path has always negated (wire._row via `-int(st.amount)`);
+                # only this hand-built row did not.
+                "data": [[{"c": d["order"], "md": 1, "cg": 0,
+                           "dmg": -abs(int(d["dmg"])),
+                           "cri": 0, "die": int(d.get("die", 1)),
+                           "status": [], "extra": [],
                            "picons": [], "pskill_id": 0}]],
             }]
             out.append(json.dumps(cmd, separators=(",", ":")))
@@ -3167,11 +3189,47 @@ class Battle:
             # answers with ServerRPCReportError. The two paths below are the ones the
             # client cannot see, because their holder never has a TurnEnd.
             _engine_status.tick_duration(acted)
+        self._tick_action_dots()
         self._age_gauge_blocks()
         self._roll_turn_order()
         self.round += 1
         self.turn_open = False
         self._start_of_turn()
+
+    def _tick_action_dots(self):
+        """Pay the 每次行動時 DoTs -- the ones the prose bills on EVERY action.
+
+        Beelzebub's Devil Cooking is 每次行動時持續造成125%攻擊力的傷害，持續2回合 on 3-4
+        enemies: once per action by ANY unit, not once per round on the holder's turn.
+        Rate, basis and cadence come from engine/dot_values.py.
+
+        OFF BY DEFAULT -- see status.ACTION_DOT_CADENCE for the history and the reason.
+        With the cadence off this is a no-op and the same statuses tick at turn start.
+
+        THE FLOOR IS THE POINT. A tick that empties a pool with ACTION_DOT_CAN_KILL off
+        leaves the unit at 1 HP to die on its own turn, through the path that tells the
+        client. With it on, the death is queued on `_pending_dot_deaths`, the channel the
+        after-action rules already use. Either way the client is never left holding a unit
+        in its ActionOrderList that the server thinks is dead -- that is the soft-lock
+        this project has had to fix twice.
+        """
+        if not _engine_status.ACTION_DOT_CADENCE:
+            return
+        floor = 0 if _engine_status.ACTION_DOT_CAN_KILL else 1
+        for unit in list(self.units.values()):
+            if not unit.alive:
+                continue
+            dot = _engine_status.action_tick_damage(unit)
+            if dot <= 0:
+                continue
+            dealt = max(0, min(dot, unit.hp - floor))
+            if not dealt:
+                continue
+            unit.hp -= dealt
+            if not unit.alive:
+                self._pending_dot_deaths.append({"order": unit.order, "dmg": dealt,
+                                                 "wave": self.wave,
+                                                 "die": 0 if unit.alive else 1})
 
     def _age_gauge_blocks(self):
         """Spend a turn off a gauge block even though its holder never gets a turn.
@@ -3225,6 +3283,17 @@ class Battle:
             unit.hp = max(0, unit.hp - dot)
         if hot:
             unit.hp = min(unit.max_hp, unit.hp + hot)
+        if dot and unit.alive:
+            # A NON-FATAL TICK NEEDS TELLING TOO. This used to move HP silently and let
+            # `sync` catch the client up, which was a deliberate call -- see
+            # dot_death_cmds_json -- taken because nobody had watched it on a device.
+            # Somebody has now: "when they get hit by poison, the hp bar lowers without
+            # the damage numbers or the hit animation/voice effects". That is precisely
+            # the missing beat, and retail played it -- the comment below records a damage
+            # number and a pain sound on the dying unit's own turn, which only makes sense
+            # if the non-fatal tick showed one too.
+            self._pending_dot_deaths.append({"order": unit.order, "dmg": dealt,
+                                             "wave": self.wave, "die": 0})
         if not unit.alive:
             # A DoT that KILLS has to reach the client as an event, not just as a
             # smaller number in the next `sync`. The client runs its own action order
@@ -3236,7 +3305,7 @@ class Battle:
             # death, and only then the next character. Queue it so the reply that
             # follows this turn carries that beat; see dot_death_cmds_json.
             self._pending_dot_deaths.append({"order": unit.order, "dmg": dealt,
-                                             "wave": self.wave})
+                                             "wave": self.wave, "die": 1})
             # A DoT death is still a death: on_death passives fired only for units
             # killed by a skill's own hit, so poison finishing someone off skipped
             # them entirely -- no revive, no death-triggered cleanse. Absorbed like

@@ -85,6 +85,9 @@ class Active:
     # restores cleanly and behaves exactly as before.
     tick_basis: Optional[str] = None          # "atk" | "def" | "max_hp"
     tick_whose: Optional[str] = None          # "caster" | "owner"
+    # "turn" -- the holder's own turn start, with every other DoT -- or "action": 每次行動時,
+    # once per action by ANY unit on the field. See ACTION_DOT_CADENCE.
+    tick_when: str = "turn"
 
     @property
     def permanent(self):
@@ -421,6 +424,67 @@ def _hot_reads_holder_pool(active):
     return int(getattr(active, "status_id", 0) or 0) in _HOT_HOLDER_IDS
 
 
+# ---- 每次行動時: DoTs that tick on EVERY action ------------------------------
+# Beelzebub's Devil Cooking (her Special Move) reads
+#     ※ 中毒：每次行動時持續造成125%攻擊力的傷害，持續2回合
+# -- "EACH TIME ANYONE ACTS", not once on the holder's own turn. She lands it on 3-4 enemies
+# at once, so on a 5v5 board it is roughly TEN ticks per round per enemy instead of one:
+# ~10x the damage, and around half a million from a single cast at 10k ATK.
+#
+# WHY IT IS A SWITCH. The beat has no message of its own. A turn-start tick rides a command
+# the client is already waiting for; an action tick lands on a BYSTANDER, so its HP only
+# catches up at the next `sync`. A KILL is different and already has a channel --
+# `battle._pending_dot_deaths`, the same one the after-action damage rules use, which sends
+# the death-shaped 1201.
+#
+# THE HISTORY, because it is the reason for the default and not a footnote. The cadence was
+# contributed, suspected of causing a battle soft-lock, disabled -- and the soft-lock
+# PERSISTED, so it was re-enabled on the grounds that it had been ruled out. That reasoning
+# is sound as far as it goes: it shows the cadence is not that bug's cause. It does not show
+# the cadence is harmless, and the soft-lock it was tested against may itself have been the
+# Headwind lockout fixed separately (OWN_ACTION_NESTED below) and shipped only afterwards.
+# So: implemented, measured, tested -- and OFF until somebody plays it.
+#
+# With False these statuses tick at their holder's own turn start with everything else: the
+# same damage per round against a single acting enemy, less on a full board, and the timing
+# the client has always been told about.
+ACTION_DOT_CADENCE = False
+
+# Whether an action tick may KILL is a separate question even with the cadence on. The death
+# channel exists, but an out-of-band death is the shape this project has already had to fix
+# twice, so it gets its own switch rather than riding on the first.
+ACTION_DOT_CAN_KILL = False
+
+
+def action_tick_damage(unit):
+    """DoT for ONE action, for the 每次行動時 statuses. -> damage.
+
+    Does NOT touch duration: 持續2回合 still means two of the holder's own turns, and
+    `tick_duration` still owns that.
+    """
+    if not ACTION_DOT_CADENCE:
+        return 0
+    total = 0
+    for st in _actives(unit):
+        if st.tick_when != "action" or st.magnitude is None:
+            continue
+        total += _tick_base(unit, st)
+    return total
+
+
+def _tick_base(unit, st):
+    """One tick of `st` on `unit`, honouring basis and whose. Shared by both cadences."""
+    if st.tick_whose == "owner":
+        base = {"max_hp": getattr(unit, "max_hp", 0),
+                "def": getattr(unit, "defence", 0)}.get(
+                    st.tick_basis, getattr(unit, "atk", 0))
+    elif _hot_reads_holder_pool(st):
+        base = getattr(unit, "max_hp", 0)
+    else:
+        base = st.source_atk if st.source_atk else getattr(unit, "atk", 0)
+    return int(base * float(st.magnitude) / 100.0) * max(1, int(st.stacks))
+
+
 def tick_damage(unit):
     """DoT/HoT for the START of this unit's turn. -> (dot, hot).
 
@@ -455,6 +519,8 @@ def tick_damage(unit):
             continue
         if st.kind not in ("dot", "heal") or st.magnitude is None:
             continue
+        if st.tick_when == "action" and ACTION_DOT_CADENCE:
+            continue            # paid on every action instead; see action_tick_damage
         amount = int(base * float(st.magnitude) / 100.0) * max(1, st.stacks)
         if st.kind == "dot":
             dot += amount
