@@ -2347,6 +2347,11 @@ class Battle:
         # with the battle: on reconnect the client rebuilds every unit's statuses from
         # BattleDatas.status, so a dropped queue costs nothing.
         self._pending_status_rows = []
+        # (target, status_id) pairs the client has been SENT an application for and not yet
+        # a removal. Needed to tell "the client never heard of this" from "the client is
+        # drawing it" -- see _queue_status_rows. Not saved, same as the queues: a reconnect
+        # rebuilds the icons from BattleDatas.
+        self._status_told = set()
         # Out-of-band HP changes, queued for the wire: a start-of-turn DoT tick and any
         # damage a passive deals outside a skill. Each row carries `die`, because BOTH
         # halves need telling -- see dot_death_cmds_json. Same not-saved reasoning as the
@@ -2764,9 +2769,29 @@ class Battle:
             # as `_pending_dot_deaths`, where it was doing real damage.
             ch = dict(ch, wave=self.wave)
             key = (ch.get("target"), ch.get("status_id"))
+            prior = [q for q in self._pending_status_rows
+                     if (q.get("target"), q.get("status_id")) == key]
             self._pending_status_rows = [
                 q for q in self._pending_status_rows
                 if (q.get("target"), q.get("status_id")) != key]
+            if (prior and prior[-1].get("applied") and not ch.get("applied")
+                    and key not in self._status_told):
+                # APPLIED THEN EXPIRED, BOTH INSIDE THE GAP BETWEEN TWO ATTACK REPLIES.
+                # Collapsing to the latest state alone left a BARE REMOVAL for a status the
+                # client was never told about, and `removeStatusDataByID` (0x197C3D0) on an
+                # id it does not hold calls ServerRPCReportError -- which is where the
+                # fight stops. The client saw neither event, so it must see neither row:
+                # drop the pair.
+                #
+                # It is why a hang got likelier the longer a wave ran: every turn is
+                # another chance for a short status to be granted and expire inside one
+                # gap, and one such pair is enough.
+                #
+                # `_status_told` is what keeps this from over-reaching. If the client HAS
+                # already been sent an application it is drawing the icon, and the removal
+                # is exactly what it needs -- dropping that pair would swap a hang for a
+                # stale icon. Only a pair the client never heard about is dropped.
+                continue
             self._pending_status_rows.append(ch)
 
     def _absorb_passive(self, applied, hp_before=None):
@@ -2828,12 +2853,13 @@ class Battle:
     def _drain_pending_status(self, combo):
         """Attach queued out-of-band status changes to an outgoing attack."""
         rows = self._pending_status_rows
-        if not rows:
-            return
         groups = (combo or {}).get("data") or []
         if not groups or not groups[0]:
             return
         lead = groups[0][0]
+        # NOT `if not rows: return` any more. The bookkeeping at the bottom has to run on
+        # EVERY outgoing attack, because most status rows are the engine's own and an
+        # attack with nothing queued is the common case.
         for ch in rows:
             if ch.get("wave") is not None and ch["wave"] != self.wave:
                 continue                  # belongs to a wave that is over; see above
@@ -2849,6 +2875,21 @@ class Battle:
             lead.setdefault("status", []).append(
                 [ch["target"], sid, rounds, *self._status_row_extras(ch, rounds)])
         self._pending_status_rows = []
+        # RECORD EVERY STATUS ROW GOING OUT, not just the ones queued here. A status
+        # applied inside the attack rides the engine's own rows (`wire._status_rows`), and
+        # the client is told about those exactly the same way -- so if only out-of-band
+        # applies were remembered, a status granted in an attack and then re-granted and
+        # expired inside one gap would look un-told and have its removal dropped, leaving
+        # a stale icon. Read the lead's whole list, after the merge, and let the round
+        # sentinel decide: 0 removes, anything else draws.
+        for row in lead.get("status") or []:
+            if not isinstance(row, (list, tuple)) or len(row) < 3:
+                continue
+            key = (row[0], row[1])
+            if int(row[2]) == 0:
+                self._status_told.discard(key)
+            else:
+                self._status_told.add(key)
 
     def _status_row_extras(self, ch, rounds):
         """-> (lv, value, actOn) for an out-of-band status row. Zeros on removal."""
@@ -3531,6 +3572,10 @@ class Battle:
         # queues from growing across a long stage.
         self._pending_status_rows = []
         self._pending_dot_deaths = []
+        # Orders are RECYCLED by _spawn_wave, so what wave N's unit "201" was told says
+        # nothing about wave N+1's unit "201". Forgetting here is what stops a fresh mob
+        # inheriting the previous occupant's icon bookkeeping.
+        self._status_told = set()
         self._spawn_wave()
         # New wave's enemies get their battle-start passives now that they are on the
         # field; the party's already fired at battle open and does not re-trigger.
