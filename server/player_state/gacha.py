@@ -16,6 +16,7 @@ from .core import (
     bump_quest_counter,
     grant_reward,
     grant_soulmirror,
+    is_internal_soulmirror,
     spend_cost,
 )
 
@@ -446,7 +447,9 @@ def _soulmirror_gacha_pool(alignment):
     chars |= soulmirror_shared_chars()
     pool = {}
     for iid, row in (bt.dd.rows("item") or {}).items():
-        if row.get("_action") in SOULFRAG_ACTION_RANGE and row.get("_param3") in chars:
+        if (row.get("_action") in SOULFRAG_ACTION_RANGE
+                and row.get("_param3") in chars
+                and not is_internal_soulmirror(iid)):
             pool.setdefault(int(row.get("_param2") or 0), []).append(int(iid))
     return pool
 

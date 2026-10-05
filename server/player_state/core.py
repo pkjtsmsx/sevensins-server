@@ -463,12 +463,19 @@ def load(player_id):
 
 
 def _purge_test_items(state):
-    """Strip the pack's internal TEST rows from a save. -> True if anything changed.
+    """Strip the pack's internal rows from a save. -> True if anything changed.
 
     REPAIRS OLD DAMAGE. `grant_reward` and `make_rune` refuse these now (see
     is_test_item), but that only helps new grants -- a player who already banked one is
     stuck, because a test starshard in storage 2 takes the client's starshard panel down
     and the session with it. One was reported unable to play at all.
+
+    ALSO THE INTERNAL SOULMIRRORS (see is_internal_soulmirror). Those are the milder
+    case -- they work, they just show a table key or a blank where a name belongs -- so
+    this deletes gear a player may have upgraded. That is deliberate: they were handed
+    out by the banner and the fuse for long enough to spread, and leaving them in place
+    means leaving an item in the bag that can never be made legitimate. They ride the
+    same `equips_list` as runes, so the unequip half below already covers them.
 
     BOTH HALVES, or the repair is worse than the damage: the bag entry AND any
     `equips_list` slot pointing at its uid. Deleting the row alone leaves a cast wearing
@@ -494,7 +501,7 @@ def _purge_test_items(state):
                 if not isinstance(rec, dict):
                     continue
                 iid = rec.get("iid")
-                if iid and is_test_item(iid):
+                if iid and (is_test_item(iid) or is_internal_soulmirror(iid)):
                     doomed[str(rec.get("uid") or "")] = (storage, slot, int(iid))
         if not doomed:
             return False
@@ -511,7 +518,7 @@ def _purge_test_items(state):
                     worn[i] = ""
                     stripped += 1
         print(f"[test-items] {state.get('player_id')}: removed "
-              f"{len(doomed)} internal test item(s) "
+              f"{len(doomed)} internal row(s) "
               f"{sorted({i for _s, _sl, i in doomed.values()})}"
               + (f", unequipped {stripped}" if stripped else ""), flush=True)
         return True
@@ -1425,6 +1432,40 @@ RUNE_SLOT_PRIMARY = {
 }
 
 
+# Soulmirror rows the pack keeps for its own bookkeeping, not for players.
+#
+# A real mirror's name is the DISPLAY name -- 大破水晶‧夏傲① / "Summer I". The internal ones
+# carry the same name plus an underscore and a stat character:
+#
+#     大破水晶‧夏傲①        Summer I                               <- real
+#     超大破史詩水晶‧夏傲③_攻  UR Soulmirror Piece of Summer ③ (ATK)   <- internal
+#
+# 1,692 of the 5,682 soulmirror rows are of the second kind, exactly 564 each of _體 / _攻 /
+# _防, and they sit in their own id bands (711/731/733) while every real mirror is in
+# 400/420/421/450/470/471. The split is total: no real mirror has an underscore and no
+# internal one lacks it.
+#
+# WHY IT MATTERS. They are rollable and equippable -- they carry real bonus rows, so one
+# lands in the bag with real stats and works -- which is why nothing crashed and why it took
+# a screenshot to notice. What gives it away is the name: the player sees a table key where
+# every other mirror shows a character.
+#
+# TWO PATHS HANDED THEM OUT, both filtering on (`_action`, char, rarity) and neither on the
+# name: the soulmirror banner (2,619 of 12,279 drawable ids -- about one pull in five) and
+# the fuse (261 of 789 transmute cells, half the candidates in some). Measured, not guessed.
+#
+# NOT PURGED FROM SAVES. Unlike the 測試 starshards, these do not break anything -- they are
+# working gear a player may already have upgraded, and deleting it is a different and
+# destructive decision. The sources are closed so no more appear; what to do about the ones
+# already out there is the owner's call.
+def is_internal_soulmirror(item_id):
+    """-> True if this Soulmirror row is internal bookkeeping, not a real drop."""
+    row = bt.dd.row("item", int(item_id or 0)) or {}
+    if row.get("_action") not in SOULFRAG_SLOT_INDEX:
+        return False
+    return "_" in str(row.get("_itemName") or "")
+
+
 # Items the pack ships for INTERNAL TESTING, and which must never be handed to a player.
 #
 # NEITHER LANGUAGE ALONE IS ENOUGH, and each misses exactly nine:
@@ -1689,6 +1730,11 @@ def make_soulmirror(state, item_id, level=0, enhance=0, rng=None):
     if soulfrag_slot(item_id) is None:
         raise ValueError(
             f"item {item_id} is not a Soulmirror (_action must be 101..109)")
+    # The funnel every grant path routes through, so one refusal here closes all of them.
+    # `soulmirror_items_for` already drops candidates on ValueError, which fixes the fuse
+    # for free; the gacha builds its pool from rows directly and is filtered at the pool.
+    if is_internal_soulmirror(item_id):
+        raise ValueError(f"Soulmirror {item_id} is an internal row, not a real drop")
     rows = _bonus_group_rows(item_id)
     if not rows:
         raise ValueError(f"Soulmirror {item_id} has no usable equipment_bonus rows")
