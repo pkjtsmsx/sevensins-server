@@ -21,6 +21,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 os.environ["SEVENSINS_ACCOUNTS"] = tempfile.mkdtemp(prefix="sevensins-lobby-test-")
 
+import battle as bt                                            # noqa: E402
 import design_data as dd                                       # noqa: E402
 from player_state import roster                                # noqa: E402
 from player_state.charprogress import char_data_json           # noqa: E402
@@ -66,6 +67,20 @@ def main():
     # Equipment must NOT leak in: the client draws those deltas itself.
     entry["gear_bonus"] = {"hp": 999999}
     assert roster.sheet_bonus(state, entry) == only_limit, "gear double-counted"
+
+    # ---- and the fight must land on the same number ---------------------------------
+    # The sheet and `battle.Unit` are two independent sums of grow + ladders (+ gear on
+    # the battle side only), held together by nothing but convention -- which is exactly
+    # how the Skill Up ladder came to be paid in battle and not on the sheet. Assert the
+    # RELATION rather than either number: fight == sheet + equipment.
+    entry.pop("gear_bonus")                     # drop the fake gear the check above set
+    karma_of(state, cid)["flv"] = 30
+    state["backpack"] = {}
+    roster._annotate_gear(state, entry)         # gear (none here) + both ladders
+    shown = json.loads(char_data_json(state, "u1"))
+    u = bt.Battle(1101, [dict(entry, uid="u1")], entry["lv"], None, 0, 0).units["101"]
+    for key, got in (("hp", u.max_hp), ("atk", u.atk), ("def", u.defence), ("spd", u.spd)):
+        assert got == shown[key], f"{key}: fight {got} != sheet {shown[key]}"
 
     print(f"lobby sheet ok (char {cid}, ladders {want})")
 

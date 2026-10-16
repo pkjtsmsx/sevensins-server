@@ -1801,6 +1801,10 @@ class Unit(_engine_core.Unit):
         # LightBattleChar carries only Star, so super_star never crosses the wire --
         # it only moves which _growStar rung the stats come from.
         self.super_star = super_star
+        # KEPT, because BattleCharData has a field for it. It used to be consumed by
+        # skill_ranks below and then dropped, so the in-battle detail popup had nothing
+        # to report and sent a hardcoded 0 -- see battle_char_data.
+        self.skill_limit = int(skill_limit or 0)
         stats = _grow(row, self.star, lv, super_star)
         # Soul Link rank pays out as a flat stat bonus on every cast -- that IS the
         # "reward", there is no item drop. It has to be applied here because the
@@ -2065,8 +2069,18 @@ class Unit(_engine_core.Unit):
             "tm": self.team, "owner": owner_uid, "order": str(self.order),
             "idx": self.index, "uid": self.uid or "", "id": self.char_id,
             "lv": self.lv, "star": self.star,
-            "limit_book": 0, "limit_char": 0, "limit_suit": 0,
-            "super_star": 0,
+            # THE CAST'S RANK, not zeros. These were hardcoded to 0, so the in-battle
+            # detail popup read "Skill+0" on a cast the lobby showed at SKL+11. The
+            # popup is the one place a player can check what the server thinks it is
+            # fighting with, so it has to report what the unit was actually built from.
+            #
+            # `skill_limit` is limit_book + limit_char already summed (the split is not
+            # carried onto the unit and the client only ever adds them), so it goes out
+            # under limit_char with limit_book at 0 -- the TOTAL is what "Skill+" shows.
+            # `super_star` rides its own field, exactly as skill_ranks reads it:
+            # rank = skill_limit + super_star.
+            "limit_book": 0, "limit_char": self.skill_limit, "limit_suit": 0,
+            "super_star": self.super_star or 0,
             "max": self._attributes(current=False),
             "cur": self._attributes(current=True),
             "skdic": [[sk, cd] for sk, cd in zip(self.skills, self.cooldowns)],
