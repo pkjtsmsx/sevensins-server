@@ -42,6 +42,7 @@
   <span id="state" class="pill off">disarmed</span>
   <button id="arm">Arm</button>
   <button id="step" disabled>Step 1 turn</button>
+  <button id="drop" disabled>Drop 1 turn</button>
   <button id="resume" disabled>Release all</button>
   <span id="count" class="muted"></span>
 </header>
@@ -143,6 +144,7 @@ async function refresh() {
   $('state').className = 'pill ' + (s.armed ? 'on' : 'off');
   $('arm').textContent = s.armed ? 'Disarm' : 'Arm';
   $('step').disabled = !s.held.length;
+  $('drop').disabled = !s.held.length;
   $('resume').disabled = !s.held.length;
   $('count').textContent = s.held.length ? `${s.held.length} turn(s) held` : '';
 
@@ -170,6 +172,8 @@ document.addEventListener('click', ev => {
 
 $('arm').onclick = () => post('/api/arm', {on: $('state').textContent === 'disarmed'});
 $('step').onclick = () => post('/api/step');
+// Throw the held reply away instead of sending it -- see battle_inspector.drop.
+$('drop').onclick = () => post('/api/drop');
 $('resume').onclick = () => post('/api/resume');
 refresh();
 setInterval(refresh, 1000);

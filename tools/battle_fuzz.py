@@ -254,7 +254,18 @@ def one_fight(cfg, cap=200, cover=None):
                 found.append(("crash", f"{type(exc).__name__} @ {where(exc)}", str(exc)))
                 break
         actor = b.acting_unit()
+        # BOTH TEAMS ARE ALIVE -- the two checks above already said so -- so "nobody is
+        # acting" is not the end of the fight, it is the fight hanging. This used to
+        # `break` silently and count as a clean finish, which is how a permanent
+        # deadlock sat in 2,000 fuzzed fights without being reported once: every living
+        # unit gauge-blocked leaves `_roll_turn_order` with an empty queue, so no actor,
+        # so no turn, so nothing ages the blocks. On a device that is a fight that idles
+        # forever with the server answering every judge with nothing.
         if actor is None:
+            found.append(("deadlock", "no acting unit with both teams alive",
+                          f"turn_order={b.turn_order} round={b.round} "
+                          f"wave={b.wave}/{b.wave_max} blocked="
+                          f"{[o for o, u in b.units.items() if u.alive and _status.blocks_gauge_gain(u)]}"))
             break
         target_team = 2 if actor.team == 1 else 1
         try:
@@ -264,6 +275,13 @@ def one_fight(cfg, cap=200, cover=None):
                           str(exc)))
             break
         if not move:
+            # Same reasoning as the `actor is None` case above: both teams are alive, so
+            # an actor with no legal move is a hang, not a finish. `play_turn_msgs`
+            # answers this state with an empty reply and the client never acts again.
+            found.append(("deadlock", "actor has no legal move with both teams alive",
+                          f"{actor.order} (team {actor.team}) skills={actor.skills} "
+                          f"cooldowns={actor.cooldowns} "
+                          f"usable={b.usable_slots(actor)}"))
             break
         att, dfn, skill_id, slot = move
         acted[att] = acted.get(att, 0) + 1

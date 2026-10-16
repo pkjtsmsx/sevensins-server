@@ -149,6 +149,30 @@ def step(mtype=131):
     return {"stepped": 1, "sent": sent, "error": err}
 
 
+def drop():
+    """Discard the oldest held turn WITHOUT sending it, and carry on.
+
+    The other half of `step`, and the one that reproduces a real soft-lock rather than
+    merely pausing one. Staying armed and never stepping freezes the whole fight -- the
+    server is still computing replies, they are just queued. What the device reports
+    instead is a fight that loses ONE message and then idles: the client never learns
+    something (a death, a turn hand-off), keeps waiting on the unit it still believes is
+    acting, and no amount of further play un-sticks it. That is the state to recreate on
+    a phone, and it needs a message to go missing, not to arrive late.
+
+    Recorded in history as `sent: 0, dropped` so the UI shows what was thrown away.
+    """
+    with _lock:
+        if not _pending:
+            return {"dropped": 0}
+        entry = _pending.pop(0)
+        _history.insert(0, {"id": entry["id"], "at": entry["at"], "ctx": entry["ctx"],
+                            "messages": [_decode(b) for b in entry["bodies"]],
+                            "sent": 0, "dropped": True, "error": None})
+        del _history[HISTORY_MAX:]
+        return {"dropped": 1, "messages": len(entry["bodies"])}
+
+
 def release_all(mtype=131):
     n = 0
     with _lock:
@@ -242,6 +266,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._send(200, {"armed": arm(bool(body.get("on", True)))})
         if path == "/api/step":
             return self._send(200, step())
+        if path == "/api/drop":
+            return self._send(200, drop())
         if path == "/api/resume":
             return self._send(200, release_all())
         if path == "/api/patch":

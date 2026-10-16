@@ -2561,6 +2561,35 @@ class Battle:
         # whoever can actually fill. If NOBODY can, the gauges simply do not advance --
         # better a stalled queue than inf arithmetic on every bar.
         fillable = [u for u in alive if not _engine_status.blocks_gauge_gain(u)]
+        # EVERY LIVING UNIT BLOCKED IS A SOFT-LOCK, and it was a permanent one.
+        #
+        # `_age_gauge_blocks` spends a turn off a Headwind on the BATTLE's clock
+        # precisely because its holder never gets one -- but it is driven from
+        # `end_turn`, which only runs when somebody acts. Block the last unfilled bar
+        # on the field and that clock stops too: no queue, so no actor, so no turn, so
+        # nothing ages, so no queue. Reproduced at the RPC layer -- 100 judges, round
+        # still 1, every Headwind still at its full duration, and every reply empty,
+        # which on a device is a fight that idles forever with nobody acting.
+        #
+        # So the clock is run HERE, where the condition is discovered and where every
+        # caller (init, end_turn, a death prune, a skip, a resume) already passes. The
+        # loop is bounded by the longest block it could be waiting on; `_age_gauge_blocks`
+        # skips permanent statuses, so it reports False the moment it has nothing left
+        # to spend and the fallback below takes over.
+        while not fillable:
+            if not self._age_gauge_blocks():
+                # Nothing left to age -- every block on the field is permanent. Somebody
+                # still has to move or the fight never ends, so the fastest unit is
+                # handed a full bar outright. `fill_gauge` and `fill_time` both refuse a
+                # blocked unit by design, so seating an actor means setting the bar
+                # rather than filling it; the step below then no-ops (its fill_time is
+                # still inf) and the projection seats exactly this one unit. Taking the
+                # turn spends the gauge and ticks durations, which is the only thing
+                # that can move a fight out of this state at all.
+                fillable = [min(alive, key=rank_key)]
+                fillable[0].scv = float(SCV_FULL)
+                break
+            fillable = [u for u in alive if not _engine_status.blocks_gauge_gain(u)]
         step = min((u.fill_time() for u in fillable), default=0.0)
         if step > 0 and step != float("inf"):
             for u in alive:
@@ -3304,7 +3333,11 @@ class Battle:
         the only clock it leaves running. Only the blocking statuses age here; the rest
         of the unit's statuses keep their own-turn timing, since those are not what is
         denying the turns.
+
+        -> True if a block was actually decremented, so `_roll_turn_order` can tell
+        "the clock moved, try again" from "these blocks are permanent, give up".
         """
+        aged = False
         for unit in self.units.values():
             if not unit.alive or not _engine_status.blocks_gauge_gain(unit):
                 continue
@@ -3314,9 +3347,11 @@ class Battle:
                 if not _engine_status.blocks_gauge_gain_status(st):
                     continue
                 st.remaining = int(st.remaining) - 1
+                aged = True
                 if st.remaining <= 0:
                     unit.statuses.remove(st)
                     self._queue_expired(unit, [st])
+        return aged
 
     def _start_of_turn(self, _depth=0):
         """DoT/HoT ticks for whoever is now at the front of the queue, then skip its

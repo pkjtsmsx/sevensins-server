@@ -1327,6 +1327,20 @@ def play_turn_msgs(battle, target_team):
     """
     move = battle.auto_move(target_team)
     if not move:
+        # AN EMPTY REPLY HERE IS A SOFT-LOCK, ALWAYS. The client asked for a judge and
+        # is parked in SituationJudge, whose OnEnter/OnUpdate/OnLeave are all stubs --
+        # it acts only when the server pushes Attack, so sending nothing means it idles
+        # until the player force-quits. The one way this was reachable (every living
+        # unit gauge-blocked, so no actor and no queue) is fixed in `_roll_turn_order`;
+        # the remaining paths need live targets, which REQ_JUDGE has already ruled out
+        # via wave_cleared/party_wiped. So this should be unreachable -- and if it is
+        # not, the next report must arrive with evidence instead of "it just idles".
+        acting = battle.acting_unit()
+        alive = {o: u.hp for o, u in battle.units.items() if u.alive}
+        log(f"    !! NO MOVE for {acting.order if acting else 'nobody'} "
+            f"vs team {target_team} -- order={battle.turn_order} "
+            f"wave={battle.wave}/{battle.wave_max} round={battle.round} "
+            f"alive={alive} -- answering nothing. Soft-lock signature.")
         return []
     attacker, defender, skill, slot = move
     # Log the SKILL, not just the unit. This said only "auto turn for 104" for as long
@@ -1347,7 +1361,114 @@ def play_turn_msgs(battle, target_team):
 
 
 def battle_replies(battle, cmd, intargs, strargs, state=None, uid=""):
-    """Answer one client->server battle RPC.
+    """Answer one client->server battle RPC, and never leave a death unsent.
+
+    AN OUT-OF-BAND DEATH THAT NO REPLY CARRIES IS A SOFT-LOCK. `die` is set nowhere
+    else on the wire (see Battle.dot_death_cmds_json), so a unit the server killed
+    outside an attack -- a DoT tick, a counter, an after-action rule -- stays standing
+    in the client's own ActionOrderList until a message says otherwise. The client then
+    waits for a turn from a unit the server has already buried.
+
+    `_pending_dot_deaths` was drained at three hand-picked sites, all of them replies
+    that carry an attack: `play_turn_msgs`, REQ_ATTACK, and the wave-end branch below
+    (itself added after a device reported the wave-clear case). The two replies that
+    carry NO attack -- a manual player turn's Judge, and StartTurn -- drained nothing,
+    so a tick that killed an enemy just before the party's turn was never reported.
+
+    FOUND BY AUDIT, NOT BY REPRODUCTION, and the difference matters. The hunt started
+    from a device photo -- wave 1/3 idling forever, the turn arrow parked on a frozen,
+    poisoned enemy with an empty HP bar, no skill bar to tap -- which is the SHAPE this
+    leak produces. It has not been shown to be that photo's cause: 400 fights driven
+    through this function left a death queued across a non-attack reply exactly zero
+    times, because every writer runs inside `end_turn`, which an attack reply then
+    drains. So the hole is real and the fix is right, and the reported hang is still
+    unexplained. Do not let this comment stand in for that answer.
+
+    The hole itself is reproduced directly, in test_softlock_invariants: with a death
+    queued, REQ_JUDGE answers one message and REQ_START_TURN two, and the queue is
+    still full after both.
+
+    So the drain is done HERE, where every battle reply passes, rather than at a fourth
+    hand-picked site. Deaths go FIRST for the same reason the wave-end site puts them
+    first: the client plays the death and then reads the message that follows, which is
+    the order it would have got had the kill landed inside an attack. The attack sites
+    keep their own drain because theirs must come AFTER their attack body, which this
+    cannot express -- by the time it runs their queue is already empty.
+    """
+    _log_client_disagreement(battle, cmd, strargs)
+    msgs = _battle_replies(battle, cmd, intargs, strargs, state, uid)
+    pending = battle.dot_death_cmds_json()
+    if pending:
+        log(f"    -> {len(pending)} out-of-band death(s)/tick(s) flushed onto the "
+            f"cmd {cmd} reply (nothing else was going to carry them)")
+    return [battle_msg(bt.CMD_ATTACK, [], [j]) for j in pending] + msgs
+
+
+def _log_client_disagreement(battle, cmd, strargs):
+    """Say so in the log when the client's request contradicts the server's state.
+
+    WE CANNOT ASK THE CLIENT WHAT IT BELIEVES -- but we do not have to, because some
+    requests ARE an assertion of it. `ServerRPCAttack` names the attacker and the
+    defender, so every tap tells us which unit the client thinks is acting and which
+    one it thinks is still standing. If either contradicts us, the two pictures have
+    already diverged, and the log can say so at the moment it becomes observable
+    instead of after a player reports a frozen screen.
+
+    Why this is the hinge. Most divergence is harmless -- an HP number a few points
+    out, a stale icon -- and the next `sync` corrects it. Divergence about WHO ACTS is
+    the kind that stalls the fight, because the client keeps its own ActionOrderList
+    (BattleUnitManager.GetNextAction re-derives the queue from the Scv/SPD in `sync`)
+    and will sit waiting on a unit the server has already moved past. Both checks below
+    are about exactly that state.
+
+    DETECT ONLY. Nothing is corrected here on purpose: a server that quietly rewrote
+    the request would hide the very evidence this exists to produce, and which side is
+    right is not always us. The attacker mismatch in particular is worth seeing raw --
+    `_battle_replies` resolves the attack for the order the CLIENT named and then calls
+    `end_turn()`, which rotates whoever the SERVER had acting, so on a mismatch one
+    unit swings and a different one pays the gauge and the cooldowns.
+    """
+    if cmd != bt.REQ_ATTACK or not strargs:
+        return
+    acting = battle.acting_unit()
+    attacker = strargs[0]
+    defender = strargs[1] if len(strargs) > 1 else ""
+    seen = getattr(battle, "_desync_seen", None)
+    if seen is None:
+        seen = battle._desync_seen = set()
+
+    def once(key, msg):
+        # One line per distinct disagreement per wave: a player re-tapping a dead
+        # target would otherwise fill the log with the same fact.
+        if (battle.wave, key) in seen:
+            return
+        seen.add((battle.wave, key))
+        log(f"    !! DESYNC: {msg} (wave {battle.wave}, round {battle.round}). "
+            f"Soft-lock signature.")
+
+    if acting and attacker and attacker != acting.order:
+        once(("actor", attacker, acting.order),
+             f"client attacked with {attacker} while the server has {acting.order} "
+             f"acting -- the two disagree about whose turn it is; the swing resolves "
+             f"for {attacker} and end_turn() spends {acting.order}'s gauge")
+    au = battle.units.get(attacker)
+    if au is not None and not au.alive:
+        once(("dead_attacker", attacker),
+             f"client attacked with {attacker}, which the server has dead")
+    du = battle.units.get(defender)
+    # A dead ALLY is a legitimate target -- that is what a revive aims at -- so only an
+    # opposing dead target is evidence. That is also the case that matters: a corpse the
+    # client is still drawing on its feet is the shape every soft-lock here has taken.
+    if du is not None and not du.alive and au is not None and du.team != au.team:
+        once(("dead_target", defender),
+             f"client attacked {defender}, which the server has dead at "
+             f"{du.hp}/{du.max_hp} holding "
+             f"{[getattr(s, 'name', '?') for s in du.statuses]} -- the client is still "
+             f"drawing a unit the server has buried")
+
+
+def _battle_replies(battle, cmd, intargs, strargs, state=None, uid=""):
+    """The reply itself; see battle_replies for the death flush wrapped around it.
 
     The client drives the fight by asking; the server answers with the state it
     should render. Ready is sent by StartState.DoBattleStart once the scene is up
