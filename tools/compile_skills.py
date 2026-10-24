@@ -1471,6 +1471,70 @@ def status_removes(r, status_name):
         return got
 
 
+# The pack writes immunity BOTH WAYS ROUND, and both have to be recognised:
+#
+#   "gains immunity to Enchant and Charm"      -- the names follow, as a list
+#   "grants all allies Charm immunity"         -- the name leads
+#
+# A status named inside either phrase is one the unit is protected FROM, not one it
+# receives. The prefix form is bounded by the punctuation that ends its list so a whole
+# sentence is never swallowed; the postfix form reaches back at most three words, enough
+# for "Freeze/Headwind immunity" without claiming the recipient words in front of it.
+#
+# A LIST ITEM IS A NAME, AND NOTHING ELSE. The first version let an item run over spaces
+# freely, so Leviathan's "gains immunity to Freeze for 3 turns and inflict Gale on all
+# allies and Slow on all enemies" was swallowed whole from `Freeze` to the final word --
+# and Gale and Slow, which that same sentence really does inflict, were masked and lost
+# their trigger. An item is therefore at most three words and may not BEGIN with a word
+# that ends the list: the duration tail, a preposition, a recipient, or a granting verb.
+_IMM_STOP = (r"(?:for|by|when|while|with|on|in|to|and|or|of|the|an?|lasts?|turns?|"
+             r"rounds?|grants?|gains?|inflicts?|applies|apply|casts?|gives?|receives?|"
+             r"deals?|reduces?|increases?|removes?|clears?|all|allies|ally|enemies|"
+             r"enemy|caster|self|target|targets|its|their)")
+_IMM_ITEM = (rf"\b(?!{_IMM_STOP}\b)[a-z0-9'\-]+"
+             rf"(?:\s+(?!{_IMM_STOP}\b)[a-z0-9'\-]+){{0,2}}")
+_IMMUNITY_LIST = re.compile(
+    rf"immun\w*\s+to\s+(?:the\s+)?{_IMM_ITEM}"
+    rf"(?:(?:,|\s+and|\s+or|/)\s*(?:the\s+)?{_IMM_ITEM})*", re.I)
+_IMMUNITY_NAMED = re.compile(
+    rf"{_IMM_ITEM}\s+immunit(?:y|ies)", re.I)
+
+
+def _immunity_spans(low):
+    """-> [(start, end)] covering every immunity phrase in `low`, either word order."""
+    return ([m.span() for m in _IMMUNITY_LIST.finditer(low)]
+            + [m.span() for m in _IMMUNITY_NAMED.finditer(low)])
+
+
+def _in_span(at, spans):
+    return any(s <= at < e for s, e in spans)
+
+
+def _immunity_only_clauses(note, name):
+    """-> the sentences of `note` that name `name` ONLY inside an immunity phrase.
+
+    What `_clause_for` declined to use, so `annotate_passive` can still count those
+    sentences as accounted-for prose. A status whose own name is about immunity is never
+    reported: for it the immunity phrase is the grant, and `_clause_for` returns it.
+    """
+    low_name = (name or "").lower()
+    if not note or not low_name or "immun" in low_name:
+        return []
+    bare = re.sub(r"\s*\([^)]*\)\s*$", "", low_name).strip()
+    out = []
+    for sentence in re.split(r"(?<=[.!?])\s+", note):
+        low = sentence.lower()
+        spans = _immunity_spans(low)
+        if not spans:
+            continue
+        for w in {low_name, bare} - {""}:
+            hits = [m.start() for m in re.finditer(re.escape(w), low)]
+            if hits and all(_in_span(at, spans) for at in hits):
+                out.append(sentence)
+                break
+    return out
+
+
 def _clause_for(note, name, _with_strength=False):
     """-> the sentence naming this status, or None.
 
@@ -1507,6 +1571,10 @@ def _clause_for(note, name, _with_strength=False):
     # toggle came out requiring The Divine and the marker never flipped. Prefer the
     # sentence where a granting verb precedes the name; fall back to first match.
     fallback = None
+    # Any wanted form that is ITSELF about immunity -- the row named `Charm Immunity`,
+    # and the "immunity to charm" variants generated above for it. For these the immunity
+    # phrase IS the grant, so they are exempt from the skip below.
+    immunity_forms = {w for w in wanted if "immun" in w}
     for sentence in re.split(r"(?<=[.!?])\s+", note):
         # Search past the clause's own LABEL, and only past that. A clause is written
         # "Diligence: When a battle starts, inflict Diligence on ...", so the name's
@@ -1520,8 +1588,25 @@ def _clause_for(note, name, _with_strength=False):
         low = sentence.lower()
         label = re.match(r"[^:]{1,40}:\s*", low)
         base = label.end() if label else 0
+        immune = _immunity_spans(low)
         for w in wanted:
             at = low.find(w, base)
+            # "GAINS IMMUNITY TO CHARM" DOES NOT GRANT CHARM. _GRANTS matches `gains`,
+            # so the first sentence of Asmodeus's Devil's Tempt -- "Asmodeus gains
+            # immunity to Enchant and Charm." -- was graded a STRONG match for Charm and
+            # returned before the sentence that actually casts it ("When defeated, cast
+            # Charm on the enemy with the highest ATK for 2 turns"). All three of the
+            # Charm effect's fields then came off the wrong sentence: no trigger, so the
+            # rule builder dropped it; `allies` for a recipient; and 1 turn where the
+            # prose says 2. 19 of her 23 variants compile that way.
+            #
+            # An immunity mention is positive evidence that this sentence does NOT grant
+            # the status, so the occurrence is skipped rather than kept as a weak
+            # fallback. The named-immunity forms this function generates above
+            # ("immunity to freeze", for the row NAMED `Freeze Immunity`) are exempt --
+            # for those the immunity phrase IS the grant.
+            while at >= 0 and w not in immunity_forms and _in_span(at, immune):
+                at = low.find(w, at + 1)
             if at < 0:
                 continue
             if fallback is None:
@@ -3035,6 +3120,18 @@ def annotate_passive(r, spec, rows=None):
         op = e.get("op")
         if op == "apply_status":
             name = ((e.get("status") or {}).get("name")) or ""
+            # ACCOUNTED FOR, THOUGH NOT THE GRANT. `_clause_for` refuses a sentence that
+            # names this status only inside an immunity phrase, which is right for the
+            # effect's own fields -- but that sentence is not UNACCOUNTED prose, and
+            # `unclaimed` below is what decides whether a deferred effect may become an
+            # always-on trait. Asmodeus is the case: once Charm correctly took "When
+            # defeated, cast Charm ...", her "gains immunity to Enchant and Charm"
+            # sentence fell out of `claimed`, `unclaimed` went non-empty, and the two
+            # Kneel Down! immunity rows that ride on implicit_trait lost the battle_start
+            # they have always had. Marking it claimed keeps that bookkeeping exactly as
+            # it was while the fields come off the right sentence.
+            claimed.update(_norm_clause(c)
+                           for c in _immunity_only_clauses(note, name))
             clause, strong = _clause_for(note, name, _with_strength=True)
             if not strong:
                 # A WEAK match -- the name merely appears somewhere, with no granting
