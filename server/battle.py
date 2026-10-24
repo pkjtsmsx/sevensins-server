@@ -67,6 +67,21 @@ ELITE_ON_BOSS_WAVE = True
 ELITE_STATUS_ID, ELITE_STATUS_NAME = 140, "Elite"
 _STORY_FINALS = None
 
+# Whether a DoT tick that does NOT kill gets its own message, so the client plays the
+# damage number, the hurt animation and the voice line. True is what retail did and what
+# the report asked for -- "the hp bar lowers without the damage numbers or the hit
+# animation/voice effects" -- and db552c1 turned it on for that reason.
+#
+# IT IS ALSO THE ONE UNTESTED BEAT ON THE WIRE, in its own author's words: an extra
+# Perform in front of a unit that has not acted yet, now on every tick in the game rather
+# than only on a lethal one. The symptom to watch for is a unit losing HP before its turn
+# and then the fight hanging -- the shape reported twice already. Setting this False folds
+# those ticks back into `sync`, which is the timing the client has always handled, and
+# costs only the animation: the damage is identical and a LETHAL tick still sends its own
+# message unconditionally, because without it the client holds a dead unit in its action
+# list forever. That half is load-bearing and is deliberately not behind this switch.
+TELL_NON_FATAL_DOT = True
+
 
 def _story_finals():
     """-> the set of stage ids that END a story map: the highest `_sort` in each.
@@ -3009,6 +3024,12 @@ class Battle:
         deaths, self._pending_dot_deaths = self._pending_dot_deaths, []
         out = []
         for d in deaths:
+            if not TELL_NON_FATAL_DOT and not int(d.get("die", 1)):
+                # Filtered HERE rather than at the three queue sites: every out-of-band
+                # row routes through this drain, and the queue is also what
+                # `_absorb_passive` reads for kills, so dropping rows at the source would
+                # change more than the wire. HP still reaches the client through `sync`.
+                continue
             if d.get("wave") is not None and d["wave"] != self.wave:
                 # A DEATH FROM THE PREVIOUS WAVE. The order it names now belongs to a
                 # freshly spawned, living enemy, and this message carries `die: 1` --
