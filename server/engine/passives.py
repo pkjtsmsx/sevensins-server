@@ -1149,8 +1149,19 @@ def fire_all(trigger, holders, units=None, ctx=None, fired=None):
     """
     field = list(units if units is not None else holders)
     applied = []
+    victim = (ctx or {}).get("victim")
     for holder in list(holders):
-        if not holder.alive:
+        # A CORPSE MAY STILL FIRE ITS OWN DEATH. Skipping every dead holder is right for
+        # every other trigger, but 65 passives are shaped around their OWN holder being
+        # downed -- Gabriel's Purity First grants the party All DMG Reduction 被擊倒時,
+        # Astaroth's Emotional Patchwork drains the enemy gauge -- and the holder is
+        # necessarily dead by the time core fires ON_DEATH for it. Those rules could never
+        # run, however well-formed: the engine dropped them one line before reading them.
+        #
+        # EXEMPT ONLY THE VICTIM, and only on ON_DEATH. A dead unit must not answer
+        # someone else's death, and `ctx["victim"]` is per-call (core fires once per unit
+        # that died), so this never widens to "the dead act on every trigger".
+        if not holder.alive and not (trigger == ON_DEATH and holder is victim):
             continue
         for sid in (getattr(holder, "skills", None) or []):
             if not sid:
