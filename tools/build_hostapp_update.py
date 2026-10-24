@@ -23,12 +23,16 @@ UpdateManager.java). "Newer" is decided by comparing the zip's sha256 against wh
 already has applied -- no version counter to keep in sync, and it self-corrects if a build
 is re-run with identical output.
 
-Usage:  tools/build_hostapp_update.py [--out DIR]
+Runs tools/compile_skills.py and tools/compile_statuses.py first, so the payload can never
+carry a new engine with stale tables -- see compile_battle_data. `--no-compile` opts out.
+
+Usage:  tools/build_hostapp_update.py [--out DIR] [--no-compile]
 """
 import argparse
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import ast
 import zipfile
@@ -147,7 +151,45 @@ def _check_imports_covered(rels):
                  + "\nadd the missing name to `packages` or `modules`.")
 
 
-def build(out_dir):
+COMPILERS = ("compile_skills.py", "compile_statuses.py")
+
+
+def compile_battle_data():
+    """Regenerate battle_data from design_cache before anything is zipped.
+
+    THE DATA IS GENERATED-BUT-SHIPPED and gitignored (battle_data/skills, statuses.json),
+    while `_iter_files` zips the `battle_data` DIRECTORY wholesale -- so a file that is
+    merely absent is silently omitted. No error, no warning, and `_check_imports_covered`
+    cannot see it because it only inspects .py. The payload then carries a new engine with
+    the old tables, or none at all, which on the phone is `specs.py` failing to open
+    statuses.json at import.
+
+    That has already cost two rounds of "none of the fixes work": 35f0d2b's own first line
+    is REQUIRES A RECOMPILE, and a build made without doing so ships exactly what the
+    warning is about. A compiler run is ~40 seconds in exchange for a step nobody can
+    forget again, so the build does it rather than asking.
+
+    Deterministic, which the sha256 "is this new?" check depends on: both compilers
+    reproduce byte-identical output from an unchanged design_cache -- verified file by file
+    across all 68 skill shards and statuses.json.
+    """
+    for name in COMPILERS:
+        print(f"-- {name}", flush=True)
+        r = subprocess.run([sys.executable, os.path.join(ROOT, "tools", name)], cwd=ROOT,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        if r.returncode != 0:
+            # The tail, not the whole stats dump -- but never silence. A build that walks
+            # past a failed compiler is the failure this function exists to prevent.
+            tail = "\n".join((r.stdout or "").splitlines()[-15:])
+            sys.exit(f"{name} failed (exit {r.returncode}):\n{tail}")
+        for line in (r.stdout or "").splitlines():
+            if line.startswith("wrote "):
+                print(f"   {line}")
+
+
+def build(out_dir, compile_first=True):
+    if compile_first:
+        compile_battle_data()
     with open(FILE_LIST, encoding="utf-8") as f:
         spec = json.load(f)
     rels = []
@@ -196,8 +238,13 @@ def build(out_dir):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=DEFAULT_OUT)
+    # For a build that must match a tree exactly as it stands -- reproducing an older
+    # payload, or when design_cache is absent. It reintroduces the stale-data trap, which
+    # is why it is opt-in and named for what it skips.
+    ap.add_argument("--no-compile", action="store_true",
+                    help="zip battle_data as it lies instead of regenerating it")
     args = ap.parse_args()
-    build(args.out)
+    build(args.out, compile_first=not args.no_compile)
 
 
 if __name__ == "__main__":
