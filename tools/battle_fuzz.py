@@ -54,6 +54,7 @@ import battle as bt                                            # noqa: E402
 import design_data as dd                                       # noqa: E402
 from engine import specs as _specs                             # noqa: E402
 from engine import status as _status                           # noqa: E402
+from engine import wire as _wire                               # noqa: E402
 
 VALID_MD = {1, 2, 3, 4, 5}  # noqa: E501
 VALID_MD = VALID_MD | {10097}   # DamageMode.Immunity -- an "IMMUNE" floating text, moves no HP
@@ -159,7 +160,13 @@ def check_cmd(cmd, battle):
     if missing:
         bad.append(f"sync omits units {sorted(missing)}")
     combos = cmd.get("combo") or []
-    if len(combos) != 1:
+    # ONE ENTRY, OR ONE PER FOLLOW-UP. `wire.FOLLOW_UP_OWN_COMBO` gives a pursuit its own
+    # AttackJsonData so it can play its own cinematic, and they ride one message by
+    # design -- see that flag. Asserting exactly 1 was itself a statement about how
+    # settled "one" was, so the bound follows the switch rather than the old constant.
+    if not combos:
+        bad.append("envelope carries no combo at all")
+    elif len(combos) != 1 and not _wire.FOLLOW_UP_OWN_COMBO:
         bad.append(f"envelope carries {len(combos)} combos, expected 1")
     return bad
 
@@ -308,13 +315,16 @@ def one_fight(cfg, cap=200, cover=None):
         combos = cmd.get("combo") or []
         combo = combos[0] if combos else None
         cover["legacy_path" if _spec_missing(skill_id) else "engine_path"] += 1
-        if combo:
-            for group in combo.get("data") or []:
+        # EVERY entry is counted and checked, not just the parent's. A follow-up entry is
+        # a full AttackJsonData and can violate the same invariants.
+        for entry in combos:
+            for group in entry.get("data") or []:
                 for row in group:
                     if row.get("die"):
                         cover["deaths"] += 1
                     cover["status_rows"] += len(row.get("status") or [])
-        for v in check_wire(combo, b) + check_cmd(cmd, b) + check_state(b):
+        wire_bad = [v for entry in combos for v in check_wire(entry, b)]
+        for v in wire_bad + check_cmd(cmd, b) + check_state(b):
             found.append(("wire", v.split(" ")[0] + " " + " ".join(v.split(" ")[2:4]),
                           f"skill {skill_id}: {v}"))
         try:

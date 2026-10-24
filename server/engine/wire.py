@@ -95,6 +95,34 @@ def _status_row(order, sid, rounds, ev=None):
 # identically.
 FLATTEN_FOLLOW_UPS = True
 
+# ...except that the flat form does NOT render identically, which is the one thing the
+# comment above got wrong. `fold` sums rows naming the same unit in the same group, so a
+# pursuit landing on the unit the parent just hit disappears INTO the parent's number:
+# measured over all 277 playable-cast skills with a follow_up, 146 of them show one
+# number where the prose describes two beats. Divine Envoy is the extreme case -- its own
+# hit is an after_action, so the single row it sends is entirely the pursuit's damage.
+# From the player's side of the screen that reads as "follow-ups don't work", on a build
+# where they land every point of their damage.
+#
+# §6.4 of the client contract says why they should be their own beat: sub-skills are
+# SkillType 7 and carry their own `_actName` cinematic, so retail played them separately.
+# With this on, each follow-up gets its own AttackJsonData entry, named with the
+# sub-skill's id and sized by the sub-skill's own swing count -- its own cinematic, its
+# own number, and the parent's group count untouched.
+#
+# BOTH ENTRIES RIDE ONE BattleCmd, deliberately. The follow-up's damage is already
+# applied server-side when the parent executes, so a second MESSAGE would arrive after a
+# sync that had already accounted for it and the client would subtract it twice. Entries
+# inside one message share that message's single sync.
+#
+# OFF BY DEFAULT, because one thing is unverified and only a device can answer it:
+# whether `HandleAttack` iterates the combo array or reads `combo[0]`. It is a List, and
+# BATTLE_ENGINE_PLAN notes PlayStart "runs once per AttackJsonData (we send exactly
+# one)", which reads like a loop -- but nobody has watched a second entry on a phone. If
+# the client ignores it, the pursuit's number vanishes until the next sync corrects the
+# HP, which is worse than a merged number. One fight settles it.
+FOLLOW_UP_OWN_COMBO = False
+
 
 class WireError(AssertionError):
     """A payload that would have failed silently on the client."""
@@ -106,20 +134,23 @@ def _row(order, mode, amount, crit=False, died=False):
             "status": [], "extra": [], "picons": [], "pskill_id": 0}
 
 
-def _all_strikes(outcome):
+def _all_strikes(outcome, include_children=True):
     """-> every strike in the tree, parents before children.
 
     A follow-up's strikes belong to the same animation: the sub-skill has no cinematic of
     its own being played here, so its damage has to ride the invoker's swings.
+
+    `include_children=False` is the split form -- the children are getting entries of
+    their own, so folding them in here would send their damage twice.
     """
     out = list(outcome.strikes)
-    if FLATTEN_FOLLOW_UPS:
+    if FLATTEN_FOLLOW_UPS and include_children:
         for child in outcome.children:
             out.extend(_all_strikes(child))
     return out
 
 
-def _status_rows(outcome):
+def _status_rows(outcome, include_children=True):
     rows = []
     for ev in outcome.statuses:
         # Not just "is it set" -- it must be a status the CLIENT can resolve. A
@@ -148,12 +179,14 @@ def _status_rows(outcome):
         # icon; the uncertainty is recorded in the spec, not here.
         rounds = ev.duration if ev.duration is not None else 1
         rows.append(_status_row(ev.target, sid, max(1, int(rounds)), ev))
-    for child in outcome.children:
-        rows.extend(_status_rows(child))
+    if include_children:
+        for child in outcome.children:
+            rows.extend(_status_rows(child))
     return rows
 
 
-def attack_json(outcome, *, caster_order=None, skill_id=None):
+def attack_json(outcome, *, caster_order=None, skill_id=None,
+                include_children=True):
     """-> the AttackJsonData dict for one skill use.
 
     Raises `WireError` rather than emitting a payload that the client would mishandle.
@@ -177,7 +210,7 @@ def attack_json(outcome, *, caster_order=None, skill_id=None):
                 return
         group.append(_row(order, mode, amount, crit, died))
 
-    for st in _all_strikes(outcome):
+    for st in _all_strikes(outcome, include_children):
         idx = min(max(int(st.swing), 0), swings - 1)
         # NEGATIVE: `IsDamage` is `Mode == 1 && Damage < 0`.
         fold(groups[idx], st.target, MODE_HP, -int(st.amount),
@@ -294,11 +327,57 @@ def attack_json(outcome, *, caster_order=None, skill_id=None):
     _assert_invariants(groups, swings)
 
     if groups and groups[0]:
-        groups[0][0]["status"] = _status_rows(outcome)
+        groups[0][0]["status"] = _status_rows(outcome, include_children)
 
     return {"caster": caster_order or outcome.caster,
             "skill": int(skill_id if skill_id is not None else (outcome.skill_id or 0)),
             "pskill_id": 0, "data": groups}
+
+
+def _has_damage(entry):
+    """-> True if this entry's FIRST group carries a damage row.
+
+    `AttackBehavior.PlayStart` builds the cinematic's track targets by walking group 0
+    and adding `GetUnit(row.c).Doll`, so an entry whose group 0 has nothing to aim at
+    reaches `NormalizeSkillAimpoint` with no targets.
+    """
+    data = entry.get("data") or []
+    return bool(data and any(r["md"] == MODE_HP and r["dmg"] < 0 for r in data[0]))
+
+
+def attack_entries(outcome, *, caster_order=None, skill_id=None):
+    """-> the list of AttackJsonData entries for one skill use, parent first.
+
+    One entry unless FOLLOW_UP_OWN_COMBO is on, in which case each follow-up gets its
+    own -- its own `_actName` cinematic, its own damage number, and the parent's group
+    count left alone. See that flag for why both ride a single BattleCmd.
+    """
+    if not (FOLLOW_UP_OWN_COMBO and outcome.children):
+        return [attack_json(outcome, caster_order=caster_order, skill_id=skill_id)]
+
+    parent = attack_json(outcome, caster_order=caster_order, skill_id=skill_id,
+                         include_children=False)
+    if not _has_damage(parent):
+        # THE PARENT HAS NOTHING LEFT TO ANIMATE. Divine Envoy and The Supreme both state
+        # their own hit as an after_action, so lifting the pursuit out leaves group 0
+        # empty and the cinematic with no target. Fall back to the fold: one merged
+        # number is a cosmetic loss, an unaimed cinematic is an unknown.
+        return [attack_json(outcome, caster_order=caster_order, skill_id=skill_id)]
+
+    out = [parent]
+    for child in outcome.children:
+        # The CHILD's own caster and skill id, because that is what selects the
+        # cinematic; a child with no damage of its own is skipped rather than sent as an
+        # entry the client would animate at nobody.
+        try:
+            entry = attack_entries(child, caster_order=child.caster or caster_order,
+                                   skill_id=child.skill_id)
+        except WireError:
+            # One malformed child must not cost the parent its whole attack. Folding it
+            # back in is exactly the old behaviour for that child.
+            return [attack_json(outcome, caster_order=caster_order, skill_id=skill_id)]
+        out.extend(e for e in entry if _has_damage(e))
+    return out
 
 
 def _assert_invariants(groups, swings):

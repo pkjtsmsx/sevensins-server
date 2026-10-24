@@ -3097,9 +3097,13 @@ class Battle:
             attacker.last_skill_id = int(skill_id or 0)
 
         from engine import bridge
-        combo = bridge.attack_combo(
+        # A LIST of AttackJsonData entries, parent first -- one unless
+        # wire.FOLLOW_UP_OWN_COMBO is on and this skill has a follow-up. They all ride
+        # THIS message, so they share its sync; see that flag.
+        combos = bridge.attack_combo(
             self, attacker_order,
             target.order if target else defender_order, skill_id, rng=rng)
+        combo = combos[0] if combos else None
         if combo is None:
             # The engine has no runnable spec for this skill. 15 rows corpus-wide reach
             # here and they are boss PHASE SCRIPTS -- `即死`, "HP Changed to 50%",
@@ -3113,11 +3117,15 @@ class Battle:
                                 "cg": 0, "dmg": 0, "cri": 0, "die": 0,
                                 "status": [], "extra": [], "picons": [],
                                 "pskill_id": 0}]]}
+            combos = [combo]
+        # The out-of-band status rows ride the FIRST entry, which is the parent's. They
+        # describe changes that already happened, so the beat they are drawn on does not
+        # matter -- but they must be sent exactly once, not per entry.
         self._drain_pending_status(combo)
         _trace_action(self, attacker, target, skill_id)
         cmd = json.loads(self.battle_cmd_json(
             cur_team=attacker.team if attacker else TEAM_PLAYER))
-        cmd["combo"] = [combo]
+        cmd["combo"] = list(combos)
         return json.dumps(cmd, separators=(",", ":"))
 
     def _bank_enemy(self, unit):

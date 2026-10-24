@@ -105,7 +105,7 @@ def _flat_strikes(outcome):
 
 
 def attack_combo(battle, attacker_order, defender_order, skill_id, rng=None):
-    """-> the `combo` entry for one skill use, or None if the new engine cannot run it.
+    """-> the `combo` ENTRIES for one skill use, or None if the new engine cannot run it.
 
     Returning None is a deliberate escape hatch rather than a raise: a skill the new
     engine has no spec for should fall back to the old path, not kill the battle.
@@ -131,6 +131,9 @@ def attack_combo(battle, attacker_order, defender_order, skill_id, rng=None):
             or outcome.statuses):
         return None
 
-    payload = wire.attack_json(outcome, caster_order=attacker_order, skill_id=skill_id)
+    # A LIST, parent first. One entry unless wire.FOLLOW_UP_OWN_COMBO is on, in which
+    # case each follow-up carries its own cinematic -- see that flag. The caller puts the
+    # whole list in one BattleCmd's `combo`, which is what keeps them on one sync.
+    payload = wire.attack_entries(outcome, caster_order=attacker_order, skill_id=skill_id)
     _write_back(battle, outcome)
     return payload
