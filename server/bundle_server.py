@@ -30,9 +30,19 @@ def log(msg):
 
 class Handler(http.server.BaseHTTPRequestHandler):
     root = DEFAULT_ROOT
+    # ROOTS SEARCHED BEFORE `root`, first hit wins. The SFW and NSFW releases ship
+    # different art in the same bundle NAMES, and the client fetches bundles one at a
+    # time by name -- so which release answers can be decided per file. Drop the
+    # character-sheet bundles into an overlay and everything else, menus included, still
+    # comes from the main root. An overlay needs only the bundles it replaces.
+    #
+    # The design pack is NOT mixable this way and no overlay should hold one:
+    # design_pack_*.ab is a single bundle whose hash is the client's cache key, so there
+    # is no half of it to take. It carries tables, not art.
+    overlays = ()
 
     def resolve(self):
-        """Map a request path onto a file under root, or None.
+        """Map a request path onto a file under an overlay or root, or None.
 
         Bundles are requested under the dated CDN dir by their full manifest name,
         but we keep ONE flat copy in patch_root/bundles/, so the same set serves
@@ -44,13 +54,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
         marker = "Android_AssetBundles/"
         if marker in rel:
             rel = rel[rel.index(marker):]
-        candidate = os.path.normpath(os.path.join(self.root, rel))
+        # Overlays first, in order, then the main root. The containment check is done
+        # per root rather than once, so an overlay cannot be used to escape either tree.
+        for base in tuple(self.overlays) + (self.root,):
+            hit = self._under(base, rel)
+            if hit:
+                return hit
+        return None
+
+    @staticmethod
+    def _under(base, rel):
+        """-> the file for `rel` under this one root, or None. Never escapes `base`."""
+        real = os.path.realpath(base)
+        candidate = os.path.normpath(os.path.join(base, rel))
         # Never let a crafted path escape the served tree.
-        if not candidate.startswith(os.path.realpath(self.root)):
+        if not candidate.startswith(real):
             return None
         if os.path.isfile(candidate):
             return candidate
-        flat = os.path.join(self.root, "bundles", os.path.basename(rel))
+        flat = os.path.join(base, "bundles", os.path.basename(rel))
         return flat if os.path.isfile(flat) else None
 
     def _serve(self, body):
@@ -76,7 +98,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     if not chunk:
                         break
                     self.wfile.write(chunk)
-        log(f"[{self.command}] {self.path} -> 200 ({size}b {os.path.relpath(fp, self.root)})")
+        # WHICH ROOT ANSWERED, not just which file -- with an overlay in play that is the
+        # whole question, and `relpath` against `root` renders an overlay hit as ../..
+        base = next((b for b in tuple(self.overlays) + (self.root,)
+                     if fp.startswith(os.path.realpath(b))), self.root)
+        where = os.path.relpath(fp, base)
+        tag = "" if base == self.root else f" via overlay {base}"
+        log(f"[{self.command}] {self.path} -> 200 ({size}b {where}{tag})")
 
     def do_GET(self):
         self._serve(True)
@@ -91,12 +119,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
 _httpd = None
 
 
-def serve(port=8088, root=DEFAULT_ROOT, bind="0.0.0.0"):
-    """Blocking serve loop, callable from an embedding host (the Android app)."""
+def serve(port=8088, root=DEFAULT_ROOT, bind="0.0.0.0", overlays=()):
+    """Blocking serve loop, callable from an embedding host (the Android app).
+
+    `overlays` are roots searched before `root`. Empty by default, which makes this
+    byte-identical to the behaviour before overlays existed.
+    """
     global _httpd
     Handler.root = os.path.realpath(root)
+    Handler.overlays = tuple(os.path.realpath(o) for o in (overlays or ()) if o)
     _httpd = http.server.ThreadingHTTPServer((bind, port), Handler)
-    log(f"bundle_server listening on {bind}:{port} (root={Handler.root})")
+    log(f"bundle_server listening on {bind}:{port} (root={Handler.root}"
+        + (f", overlays={list(Handler.overlays)}" if Handler.overlays else "") + ")")
     try:
         _httpd.serve_forever()
     finally:
@@ -113,8 +147,14 @@ def main():
     ap.add_argument("port", nargs="?", type=int, default=8088)
     ap.add_argument("--root", default=DEFAULT_ROOT)
     ap.add_argument("--bind", default="0.0.0.0")
+    # Repeatable, and also readable from the environment so the Android host can set it
+    # without a command line: BUNDLE_OVERLAY=/a:/b, os.pathsep-separated.
+    ap.add_argument("--overlay", action="append", default=[],
+                    help="root searched before --root; repeatable, first hit wins")
     args = ap.parse_args()
-    serve(args.port, args.root, args.bind)
+    overlays = list(args.overlay) or [
+        p for p in os.environ.get("BUNDLE_OVERLAY", "").split(os.pathsep) if p]
+    serve(args.port, args.root, args.bind, overlays)
 
 
 if __name__ == "__main__":
