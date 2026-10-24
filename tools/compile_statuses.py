@@ -83,8 +83,19 @@ KIND_PATTERNS = [
                    r"(when|at the start of|each|every).{0,30}turn.{0,50}\bdamage\b"),
     ("heal",       r"\b(restore|recover|heal)"),
     ("damage_mod", r"damage (dealt|output|taken)|final damage|\bdmg\b"),
-    ("stat_mod",   r"\b(atk|def|spd|hp|cri|crit)\s*[+\-]|"
-                   r"(increases?|reduces?|lowers?|raises?).{0,25}\b(atk|def|spd|hp)\b"),
+    # `crt` IS A STAT NAME. The pack writes crit rate as **CRT** -- "Increases CRT for a
+    # set duration" is the whole of row 3003's note -- and this vocabulary had only
+    # cri/crit, so 63 rows that state a crit change in their own description classified
+    # as `other`. `status.crit_rate_bonus` reads ONLY `kind=stat_mod`, deliberately, so
+    # every one of them applied, drew its icon, counted down and moved nothing: Critical
+    # (47 skills), Penetrate (75), Malefics (56), Keen (127), and the Hell Roar / Gloom /
+    # Admonition debuffs that are supposed to take crit AWAY.
+    #
+    # The verbs branch gains the crit tokens too, for "reduces the caster's CRT", which
+    # states no sign of its own and relies on the category.
+    ("stat_mod",   r"\b(atk|def|spd|hp|cri|crit|crt)\s*[+\-]|"
+                   r"(increases?|reduces?|lowers?|raises?).{0,25}"
+                   r"\b(atk|def|spd|hp|cri|crit|crt)\b"),
 ]
 
 # 20 status rows end their note with an explicit `(Crowd Control Debuff)`. That is a
@@ -92,7 +103,39 @@ KIND_PATTERNS = [
 # pattern scan outright.
 CC_TAG_RE = re.compile(r"\(\s*crowd control[^)]*\)", re.I)
 
-STAT_RE = re.compile(r"\b(ATK|DEF|SPD|HP|CRI|CRIT)\b", re.I)
+STAT_RE = re.compile(r"\b(ATK|DEF|SPD|HP|CRI|CRIT|CRT)\b", re.I)
+
+# THREE DIFFERENT CRIT STATS SHARE ONE SPELLING, and conflating them is worse than
+# leaving the kind as `other`, because `crit_rate_bonus` would then add a crit-DAMAGE
+# magnitude to the crit RATE. Checked before the bare token, longest reading first:
+#
+#   "Increases Crit Damage Bonus"      -> CDI   15 rows: Teardown, Void Slash, Break,
+#                                               Vesperia, Commendation (Crit Damage)...
+#   "Increases CRT Avoidance"          -> none   3 rows: Tough, Rash, Blunder. Anti-crit
+#                                               is its own mechanic (formula's `tgn`),
+#                                               not a negative crit rate.
+#   "Increases CRT" / CRI / 暴擊率      -> CRI   the 63 this change is for.
+#
+# CDI is recorded rather than dropped so the row says what it is, but nothing reads a
+# CDI status today -- `formula.strike` takes crit damage off the unit's own attribute
+# -- so those rows stay inert either way. That gap is real and is NOT this change.
+CRIT_DAMAGE_RE = re.compile(r"crit(?:ical)?\s*(?:hit\s*)?dam|crit\s*dmg|暴擊傷害", re.I)
+CRIT_AVOID_RE = re.compile(r"\b(?:crt|cri|crit(?:ical)?)\s*(?:hit\s*)?avoid", re.I)
+
+
+def crit_stat(text):
+    """-> "CDI" / None / "CRI" for a note that names a crit stat, else False.
+
+    False, not None, because None is a real answer here: "CRT Avoidance" names a crit
+    stat this engine does not model, and that is different from "no crit word at all".
+    """
+    if CRIT_DAMAGE_RE.search(text or ""):
+        return "CDI"
+    if CRIT_AVOID_RE.search(text or ""):
+        return None
+    if re.search(r"\b(?:CRI|CRIT|CRT)\b|critical hit rate|暴擊率", text or "", re.I):
+        return "CRI"
+    return False
 
 # 500 status rows declare that a cleanse cannot touch them, always as a parenthetical.
 # This matters more than it looks: op 114 removes by CATEGORY BLOCK ("removes the
@@ -308,10 +351,32 @@ def classify(own_note, bodies):
     glossary_kinds = [_kind_of(b) for b in bodies]
     stats = collections.Counter()
     for b in ([own_note] if own_note else []) + list(bodies):
+        # A CRIT WORD IS ANSWERED BY `crit_stat`, NOT BY THE BARE TOKEN. "Crit Damage
+        # Bonus" contains "Crit", so STAT_RE alone filed 15 crit-damage rows as CRI --
+        # latent while their kind stayed `other`, and a live crit-rate bug the moment the
+        # CRT vocabulary promoted them to stat_mod. `False` means "no crit word here";
+        # `None` means "a crit stat this engine does not model", and both skip the token.
+        crit = crit_stat(b)
+        if crit is not False:
+            if crit:
+                stats[crit] += 1
+            continue
         m = STAT_RE.search(b)
         if m:
             stats[m.group(1).upper().replace("CRIT", "CRI")] += 1
     stat = stats.most_common(1)[0][0] if stats else None
+
+    # WHICH CRIT STAT IS THE ROW'S OWN NOTE'S ANSWER TO GIVE, not the glossary's -- the
+    # same precedence this function already applies to `kind`, and for the same reason.
+    # Teardown, Void Slash and Vesperia say "Increases Crit Damage Bonus" in their own
+    # note while the skills that apply them talk about 暴擊率 in theirs, so the majority
+    # vote carried CRI over the row's own CDI and fed a crit-damage magnitude to the crit
+    # rate. The count still decides ATK vs DEF vs SPD, where the sources do not disagree
+    # about what the status IS.
+    if own_note:
+        own_crit = crit_stat(own_note)
+        if own_crit is not False:
+            stat = own_crit
 
     if own_note:
         kind = _kind_of(own_note)
