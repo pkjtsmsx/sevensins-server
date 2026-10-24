@@ -226,9 +226,19 @@ def _loadout_pools():
             except Exception:                        # noqa: BLE001 -- pack row oddity
                 return False
 
+        from player_state.core import is_test_item
+
         runes, frags, pacts = {}, {}, []
         for iid in (dd.rows("item") or {}):
             iid = int(iid)
+            # NEVER KIT A CAST FROM AN INTERNAL ROW. The three `make_*` constructors
+            # refuse one, so a test id in any of these pools drops the whole party back
+            # to bare casts -- and for the pacts it raised outright, because this pool
+            # took every `is_bloodpact` row while the other two were filtered by
+            # `rollable()` and happened to exclude them. Filtered once here, for all
+            # three, so the harness kits from what a player could actually own.
+            if is_test_item(iid):
+                continue
             slot = rune_slot(iid)
             if slot:
                 if rollable(iid):

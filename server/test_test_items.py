@@ -118,6 +118,48 @@ def every_one_is_refused_by_the_funnels():
             pass
 
 
+def every_gear_funnel_refuses_a_test_row():
+    """All THREE constructors, not just the starshard one.
+
+    `make_rune` and `make_soulmirror` refused an internal row; `make_bloodpact` did not,
+    and the pack carries two test pacts (721004/721005). Asserted per family and read
+    off the pack, so a new test row in any of the three is caught by whichever funnel
+    owns it rather than by a hardcoded id list.
+    """
+    import design_data as _dd
+    from player_state.core import (make_rune, make_soulmirror, rune_slot,
+                                   SOULFRAG_ACTION_RANGE)
+    from player_state.gear import make_bloodpact, is_bloodpact
+
+    def is_soulmirror(i):
+        return (_dd.row("item", int(i)) or {}).get("_action") in SOULFRAG_ACTION_RANGE
+
+    st = {"player_id": 1}
+    built = []
+    for iid in _test_ids():
+        for name, pred, fn in (
+                ("make_rune", lambda i: rune_slot(i) is not None,
+                 lambda i: make_rune(st, i, 1)),
+                ("make_soulmirror", is_soulmirror,
+                 lambda i: make_soulmirror(st, i)),
+                ("make_bloodpact", is_bloodpact,
+                 lambda i: make_bloodpact(st, i))):
+            try:
+                if not pred(iid):
+                    continue
+            except Exception:                              # noqa: BLE001
+                continue
+            try:
+                fn(iid)
+                built.append(f"{name} built gear from test item {iid}")
+            except ValueError:
+                pass
+    check(not built, "; ".join(built) or "all three funnels refuse test rows")
+    # And the pact family really is represented, or the check above proves nothing.
+    pacts = [i for i in _test_ids() if is_bloodpact(i)]
+    check(bool(pacts), f"no test bloodpact in the pack to exercise (found {pacts})")
+
+
 def an_ordinary_item_is_untouched():
     """The guard must not catch real rewards."""
     ok = [int(i) for i, r in (dd.rows("item") or {}).items()
@@ -160,6 +202,7 @@ def main():
     neither_language_alone_is_enough()
     the_word_boundary_protects_273_real_items()
     every_one_is_refused_by_the_funnels()
+    every_gear_funnel_refuses_a_test_row()
     an_ordinary_item_is_untouched()
     no_drop_pool_offers_one()
     for f in FAILURES:

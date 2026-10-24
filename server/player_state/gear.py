@@ -165,6 +165,19 @@ def make_bloodpact(state, item_id, level=0, skills=None, rng=None):
     rng = rng or _r
     if not is_bloodpact(item_id):
         raise ValueError(f"item {item_id} is not a bloodpact (_action 131..133)")
+    # THE THIRD FUNNEL, which was the one without this guard. `make_rune` and
+    # `make_soulmirror` both refuse an internal row; this did not, and the pack carries
+    # two test pacts (721004/721005, 測試 狂熱之契約 / "Test Pact of Frenzy") that would
+    # have built cleanly. Latent rather than live today -- `grant_bloodpact` has no
+    # caller outside the suites, and `grant_reward` refuses a test row before routing --
+    # so this closes the hole before a future shop row or drop table walks into it,
+    # which is the same reasoning is_test_item's own comment gives. Raises rather than
+    # skips, matching its two siblings.
+    from .core import is_test_item
+    if is_test_item(item_id):
+        raise ValueError(
+            f"item {item_id} is an internal TEST row (測試) and must never be filed as "
+            "a bloodpact -- see is_test_item")
     attr = {RUNE_ATTR_LEVEL: int(max(0, min(level, BLOODPACT_MAX_LV))),
             RUNE_ATTR_TS: int(time.time())}
     pool = bloodpact_skill_rows(item_id)
