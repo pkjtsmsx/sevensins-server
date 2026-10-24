@@ -14,7 +14,7 @@ Wire-format notes live next to each builder; the key names are NOT the C# field 
   CharData  : pro_chars / group_tbl / id_tbl / formations / acPeriod / ...
   Backpack  : "sid" (LuaTableConverter) inside BackpackItemsData
 """
-import json, math, os, re, shutil, threading, time
+import datetime, json, math, os, re, shutil, threading, time
 
 import battle as bt
 import design_data as dd
@@ -374,6 +374,31 @@ DAILY_PASS_FLOOR = 3
 # Owned by battle.py so the Starshard Temple's set rotation and every daily reset
 # here share one boundary; they used to disagree (the Temple flipped at midnight).
 DAILY_RESET_HOUR = bt.DAILY_RESET_HOUR
+
+
+def at_reset_hour(ref, days=0):
+    """-> epoch second of DAILY_RESET_HOUR, `days` calendar days after `ref`'s date.
+
+    THE 4AM BOUNDARY, IN ONE PLACE. Every window in the economy hinges on it -- daily
+    passes, the free pull, the shop's daily/weekly/monthly strips, the challenge
+    countdown -- and the way to get it wrong is to add 86400-second blocks, because a
+    local day is 23 or 25 hours twice a year. `shop.next_reset_time` did exactly that and
+    on 2026-10-22 reported the weekly reset at **03:00** on the Monday; on 2027-03-26 it
+    reported **05:00**. The daily did the same on the transition day itself.
+
+    Walking the calendar instead fixes it for every zone, and the step is done on a
+    `date` rather than on seconds so that `ref` may be ANY time of day. A first version
+    stepped `ref + days*86400 + 43200` and read the date off that, which is only safe
+    while `ref` sits near 04:00: called from the challenge countdown at 11:30 on the eve
+    of Sydney's spring-forward, the probe landed at 00:30 the following day and the
+    answer came back a day late. `isdst=-1` then lets mktime pick the offset actually in
+    force on the target date.
+    """
+    d = time.localtime(ref)
+    target = (datetime.date(d.tm_year, d.tm_mon, d.tm_mday)
+              + datetime.timedelta(days=days))
+    return int(time.mktime(time.struct_time(
+        (target.year, target.month, target.day, DAILY_RESET_HOUR, 0, 0, 0, 1, -1))))
 
 
 def _daily_period(now=None):

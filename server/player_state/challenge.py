@@ -361,12 +361,14 @@ def challenge_reset_seconds(now=None):
     """Seconds to the next 4AM. The client stores `resetTime = utcNow + intargs[3]`,
     i.e. it wants a DURATION, not a timestamp -- which is also why the value does not
     have to be reconciled with the client's clock."""
-    from .core import DAILY_RESET_HOUR
-    t = now if now is not None else time.time()
-    lt = time.localtime(t)
-    secs = lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec
-    reset = DAILY_RESET_HOUR * 3600
-    return (reset - secs) if secs < reset else (86400 - secs + reset)
+    # Off the SAME 4AM boundary everything else uses, rather than counting seconds since
+    # local midnight: on a DST day those two disagree by an hour, and this value is what
+    # the client turns back into a wall-clock reset. See core.at_reset_hour for the shop's
+    # version of the same mistake.
+    from .core import at_reset_hour
+    t = int(now if now is not None else time.time())
+    today = at_reset_hour(t, 0)
+    return (today if t < today else at_reset_hour(t, 1)) - t
 
 
 def challenge_sync_intargs(state, now=None):

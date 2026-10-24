@@ -12,6 +12,7 @@ import battle as bt
 
 from .core import (
     DAILY_RESET_HOUR,
+    at_reset_hour,
     QUEST_CASE_BUY_GOODS,
     add_char,
     bump_quest_counter,
@@ -1161,11 +1162,17 @@ def next_reset_time(cycle, now=None):
     day_start = int(time.mktime(start))
     if now < day_start:                       # before 4AM we are still in yesterday's
         day_start -= 86400
+    # CALENDAR DAYS, NOT 86400-SECOND BLOCKS. A day is 23 or 25 hours twice a year, so
+    # adding seconds walks off the 4AM boundary the whole system is anchored to: on
+    # 2026-10-22 the weekly reset came back 2026-10-26 **03:00** and on 2027-03-26 it came
+    # back 2027-03-29 **05:00**, and the daily did the same on the transition day itself.
+    # The monthly branch below never had the bug because it rebuilds the date and lets
+    # mktime resolve the offset; these two now do the same.
     if cycle == RESET_DAILY:
-        return day_start + 86400
+        return at_reset_hour(day_start, 1)
     if cycle == RESET_WEEKLY:
         wday = time.localtime(day_start).tm_wday          # 0 = Monday
-        return day_start + (7 - wday) * 86400
+        return at_reset_hour(day_start, 7 - wday)
     # Monthly: 4AM on the 1st of next month.
     d = time.localtime(day_start)
     year, mon = (d.tm_year + 1, 1) if d.tm_mon == 12 else (d.tm_year, d.tm_mon + 1)
