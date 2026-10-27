@@ -249,8 +249,17 @@ CONDITIONAL_CHANCE = 0.5
 UNSTATED_CHANCE = 0.75
 
 
-def _status_recipients(who, caster, targets, units):
-    """-> who a status is applied to. Defaults to the skill's targets."""
+def _status_recipients(who, caster, targets, units, select=None):
+    """-> who a status is applied to. Defaults to the skill's targets.
+
+    `select` is the NARROWING the clause states inside that side -- "對敵方速度最高者
+    附加麻痺", one superlative unit rather than everything the skill hit. It wins over
+    `who`, which is only ever the coarse side. Resolved through the selector the
+    compiled passives already use, so the two paths cannot drift: see
+    passives._selector and the Void Laser report in compile_skills.status_select.
+    """
+    if (select or {}).get("top"):
+        return _passives._selector({"select": select}, None)(caster, units)
     if who == "caster":
         return [caster]
     if who == "allies":
@@ -673,7 +682,8 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
             # follow_up branch already makes.
             gate_on = (targets[0] if targets else None) \
                 if e.get("recipient") in ("allies", "caster") else None
-            for tgt in _status_recipients(e.get("recipient"), caster, targets, units):
+            for tgt in _status_recipients(e.get("recipient"), caster, targets, units,
+                                          e.get("select")):
                 ev = _status_event(caster, tgt, e, r, held, ctx, gate_on=gate_on)
                 if ev is None:
                     continue
@@ -899,7 +909,8 @@ def execute(caster, spec, units, rng=None, chosen=None, depth=0, apply_damage=Tr
             else:
                 # Recipient read from the clause like everything else -- a CD change is
                 # as often "the ally with the highest ATK" as it is the unit being hit.
-                for tgt in _status_recipients(e.get("target"), caster, targets, units):
+                for tgt in _status_recipients(e.get("target"), caster, targets, units,
+                                              e.get("select")):
                     if turns < 0 and _status.blocks_cd_reduction(tgt):
                         # A refresh is refused; a DELAY still lands.
                         out.skipped.append({"op": op, "why": "cd reduction blocked",

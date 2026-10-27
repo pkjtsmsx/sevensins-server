@@ -275,6 +275,55 @@ def check_the_qualifier_is_stripped():
           cs.status_target(r, "Agony", "激痛(5)") is None)
 
 
+def check_a_superlative_clause_narrows_to_one_unit():
+    """對敵方速度最高者附加麻痺 is ONE enemy, not every enemy the skill hit.
+
+    `status_target` only ever answered the coarse side, so a clause that names a
+    superlative fell through to the skill's whole target set. Lucifer's Void Laser is
+    the report: it hits 3 enemies and the Stun went to all three, which immobilized the
+    entire enemy side -- and a round where every enemy is immobilized is skipped
+    silently inside `Battle._start_of_turn`, so the fight came straight back to the
+    caster with the client never told an enemy turn had happened. Her second skill
+    carries no Stun below rank VI, which is why only the first one hung.
+
+    Asserted as the RELATION the prose states (CLAUDE.md section 6), per skill level,
+    read off the pack -- not as a constant. Each case is annotated with the fragment the
+    answer comes from.
+    """
+    rows = dd.rows("skill") or {}
+    # (skill id, zh name, en name, expected select, the fragment it is read from)
+    cases = [
+        (1000111, "麻痺", "Stun", {"who": "enemy", "top": "SPD", "n": 1, "least": False},
+         "並對敵方速度最高者附加麻痺 -- Void Laser, the reported freeze"),
+        (1000116, "麻痺", "Stun", {"who": "enemy", "top": "SPD", "n": 1, "least": False},
+         "same clause at rank VI: the narrowing does not change with the level"),
+        # 最低 is the same shape pointed the other way, and the COUNT rides the skill
+        # level: Aurora narrows to 1 ally at ranks II-III, 2 at IV-V and 3 at VI.
+        (2001112, "全傷害激減", "All DMG Reduction",
+         {"who": "ally", "top": "HP", "n": 1, "least": True},
+         "對我方體力最低者附加全傷害激減"),
+        (2001116, "全傷害激減", "All DMG Reduction",
+         {"who": "ally", "top": "HP", "n": 3, "least": True},
+         "對我方體力最低的3人附加全傷害激減 -- the same clause, three units"),
+        # The element restriction (力屬性) is deliberately unmodelled: it narrows the
+        # pool the superlative is drawn from, so ignoring it can pick the wrong single
+        # unit but never goes back to hitting the whole target set.
+        (1006111, "幻惑", "Charm",
+         {"who": "enemy", "top": "HP", "n": 1, "least": True},
+         "對敵方力屬性當下體力最低者附加幻惑"),
+    ]
+    for sid, zh, en, want, why in cases:
+        r = rows.get(sid) or {}
+        got = cs.status_select(r, en, zh)
+        check(f"{sid} {en}: {want}", got == want, f"{got!r}   [{why}]")
+    # ...and the status in the SAME sentence that states no narrowing keeps the whole
+    # target set. This is the half a sentence-wide read gets wrong in the other
+    # direction: 附加重傷 is its own fragment and names nobody.
+    r = rows.get(1000111) or {}
+    check("1000111 Injured is NOT narrowed (附加重傷 names nobody)",
+          cs.status_select(r, "Injured", "重傷") is None)
+
+
 def main():
     for fn in (check_hand_read_cases,
                check_passives_read_the_granting_fragment,
@@ -284,7 +333,8 @@ def main():
                check_a_condition_never_supplies_the_recipient,
                check_side_vocabulary_is_complete_for_this_pack,
                check_a_list_separator_does_not_split_a_shared_grant,
-               check_the_qualifier_is_stripped):
+               check_the_qualifier_is_stripped,
+               check_a_superlative_clause_narrows_to_one_unit):
         print(f"\n{fn.__name__}:")
         fn()
     print(f"\n{_fail} failure(s)")

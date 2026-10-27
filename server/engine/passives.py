@@ -128,20 +128,24 @@ def ATTACKER(holder, units, ctx=None):
     return [src] if src is not None and src.alive else []
 
 
-def _top(pool, key, n):
-    return sorted(pool, key=key, reverse=True)[:n]
+def _top(pool, key, n, least=False):
+    return sorted(pool, key=key, reverse=not least)[:n]
 
 
-def TOP(group, stat, n):
-    """`group` allies or enemies, ranked by `stat`, top `n`.
+def TOP(group, stat, n, least=False):
+    """`group` allies or enemies, ranked by `stat`, top `n` -- or BOTTOM `n` if `least`.
 
     The named helpers below are the hand table's vocabulary; this is the one the compiled
     rules use, because "the 2 enemies with the highest SPD" is a shape the prose produces
     in every combination and enumerating them by hand is exactly what this work removes.
+
+    `least` is 最低 -- 對我方體力最低者附加全傷害激減 is the same shape pointed the other
+    way, and the skill path (compile_skills.status_select) reads both.
     """
     pick = ALLIES if group == "ally" else ENEMIES
     key = str(stat or "").lower()
-    return lambda h, u, c=None: _top(pick(h, u), lambda x: getattr(x, key, 0) or 0, n)
+    return lambda h, u, c=None: _top(pick(h, u), lambda x: getattr(x, key, 0) or 0, n,
+                                     least)
 
 
 def ALLIES_TOP_ATK(n):
@@ -558,7 +562,7 @@ def _selector(eff, category):
     if sel.get("top"):
         stat = _STAT_ATTR.get(sel["top"], sel["top"].lower())
         return TOP("ally" if sel.get("who") == "ally" else "enemy",
-                   stat, int(sel.get("n") or 1))
+                   stat, int(sel.get("n") or 1), bool(sel.get("least")))
     # `select.who` is read from the fragment governing THIS status, and cross-checked
     # against the original Chinese; `recipient` is the older sentence-wide guess. Prefer
     # the narrower reading -- a sentence that grants one status to the caster and inflicts

@@ -1259,6 +1259,12 @@ def effects(rows, r, claimed=None):
                         # status_target needs to find the clause in `_note1`.
                         "recipient": status_target(r, meta.get("name"),
                                                    (rows.get(aid) or {}).get("_name")),
+                        # ...and the NARROWING inside that side, when the clause states
+                        # one. See status_select: "對敵方速度最高者附加麻痺" is one unit,
+                        # not every unit the skill hit.
+                        **({"select": sel} if (sel := status_select(
+                            r, meta.get("name"),
+                            (rows.get(aid) or {}).get("_name"))) else {}),
                         "removes": status_removes(r, meta.get("name")),
                         "status": meta,
                         # Per-(skill, status): no column carries these, and they change
@@ -2093,6 +2099,69 @@ def status_target(r, status_name, zh_name=None):
     # attack that inflicts something on what it hit, and naming the enemy explicitly
     # does not change that.
     return {"self": "caster", "ally": "allies"}.get(who)
+
+
+# 對敵方速度最高者附加麻痺 -- a status whose own fragment narrows the recipient to ONE
+# superlative unit, not to everything the skill hit. `status_target` only ever answered
+# the coarse side (caster / allies / fall through to the targets), so every one of these
+# landed on all 3 enemies.
+#
+# Lucifer's Void Laser is the report that found it: the pack says the Stun goes to
+# 敵方速度最高者, we stunned all three enemies, and a round in which every enemy is
+# immobilized is skipped entirely server-side (`Battle._start_of_turn`) -- the fight
+# came back to the caster with the client never told an enemy turn had happened. Her
+# second skill carries no Stun below rank VI, which is why only the first one hung.
+#
+# The ELEMENT restriction some of these also carry (敵方「技」屬性速度最高的2人) is NOT
+# modelled: it narrows which pool the superlative is drawn from, so ignoring it can pick
+# the wrong single unit but never goes back to hitting the whole target set.
+_ZH_SUPERLATIVE = re.compile(
+    r"對\s*(?P<who>我方|敵方)[^，。；]{0,10}?"
+    r"(?P<stat>體力|血量|攻擊力|攻擊|速度|防禦力|防禦|行動值)\s*"
+    r"(?P<dir>最高|最低)(?:的?\s*(?P<n>\d+)\s*[人名]|者|的?(?:目標|角色|單位|敵人|隊友|夥伴))")
+
+_ZH_STAT_EN = {"體力": "HP", "血量": "HP", "攻擊力": "ATK", "攻擊": "ATK",
+               "速度": "SPD", "防禦力": "DEF", "防禦": "DEF", "行動值": "SCV"}
+
+
+def _granting_fragment(note, name):
+    """-> the fragment of `note` that GRANTS `name`, or None.
+
+    The same narrowing `_who_for` does, for the same reason: a status is routinely named
+    twice in one sentence and only the fragment with a granting verb states who it hits.
+    """
+    if not note or not name:
+        return None
+    clause = _clause_for(note, name)
+    if not clause:
+        return None
+    bare = re.sub(r"\s*[(（][^)）]*[)）]\s*$", "", name).strip()
+    for want in (name, bare):
+        if not want or want.lower() not in clause.lower():
+            continue
+        frags = _fragments_naming(clause, want)
+        for _i, frag in frags:
+            if _GRANT_VERB.search(frag):
+                return frag
+        if frags:
+            return frags[0][1]
+    return None
+
+
+def status_select(r, status_name, zh_name=None):
+    """-> {"who", "top", "n", "least"} when the clause narrows to a superlative, else None.
+
+    Chinese first (CLAUDE.md section 3), falling back to `passive_select`, which reads
+    the same shape out of the English. The key names match what `engine/passives._selector`
+    already consumes, so nothing new has to learn this shape.
+    """
+    m = _ZH_SUPERLATIVE.search(_granting_fragment(r.get("_note1"), zh_name) or "")
+    if m:
+        return {"who": "ally" if m.group("who") == "我方" else "enemy",
+                "top": _ZH_STAT_EN[m.group("stat")],
+                "n": int(m.group("n") or 1),
+                "least": m.group("dir") == "最低"}
+    return passive_select(_granting_fragment(r.get("_note1_en"), status_name) or "")
 
 
 def condition_requires(r, status_name):
