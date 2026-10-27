@@ -1319,6 +1319,25 @@ def battle_end_reward(battle, state):
     return msgs
 
 
+# THE THREE PUSHES THAT REPLACE `PlayerBattle._battleCmd`, and why that is a rule.
+#
+# `_battleCmd` (PlayerBattle +0x20) is ONE shared field, and `HandleWaveBegin`
+# (0x16896C8), `HandleStartTurn` (0x1689FB4) and `HandleAttack` (0x16899EC) each
+# `PopulateObject` the incoming json straight into it. Two of them in one reply are read
+# in the same frame, so the second overwrites the first before anything has animated it.
+# The other pushes do not touch it -- Judge (0x1689260) writes `nowSkillEnable` and the
+# cooldowns, WaveEnd (0x168A2FC) writes `CollectorData`, NextWave (0x1689D44) mutates a
+# field of `_battleCmd` rather than replacing it -- so they are safe company.
+#
+# Two Attacks was the Lucifer tutorial freeze. An Attack behind a StartTurn is the same
+# collision with different cmds: the out-of-band death's payload is replaced by the
+# turn's before the client can play it, and a death the client is never shown is the
+# soft-lock the queue exists to prevent. WaveBegin + StartTurn also collides on paper and
+# is kept: both are populated from the SAME `battle_cmd_json()`, so the second write is
+# idempotent in content, and that pair has opened every wave since the first fight ran.
+POPULATES_BATTLE_CMD = frozenset({bt.CMD_WAVE_BEGIN, bt.CMD_START_TURN, bt.CMD_ATTACK})
+
+
 def play_turn_msgs(battle, target_team):
     """Server-side move for the acting unit -> the CMD_ATTACK messages to send.
 
@@ -1354,10 +1373,12 @@ def play_turn_msgs(battle, target_team):
                       [battle.attack_cmd_json(attacker, defender, skill)])
     battle.spend_skill(attacker, slot)
     battle.end_turn()
-    # end_turn runs the NEXT unit's start-of-turn, so a lethal DoT lands after `body`
-    # was built. Those deaths ride out in the same reply, right behind this move.
-    return [body] + [battle_msg(bt.CMD_ATTACK, [], [j])
-                     for j in battle.dot_death_cmds_json()]
+    # ONE ATTACK PER REPLY -- see battle_replies. `end_turn` runs the next unit's
+    # start-of-turn, so a lethal DoT (or an after-action passive kill) lands after
+    # `body` was built; it stays QUEUED and goes out on the client's next ask rather
+    # than riding behind this move, because a second Attack push arriving while the
+    # client is still performing the first is dropped and wedges the fight.
+    return [body]
 
 
 def battle_replies(battle, cmd, intargs, strargs, state=None, uid=""):
@@ -1391,16 +1412,74 @@ def battle_replies(battle, cmd, intargs, strargs, state=None, uid=""):
     So the drain is done HERE, where every battle reply passes, rather than at a fourth
     hand-picked site. Deaths go FIRST for the same reason the wave-end site puts them
     first: the client plays the death and then reads the message that follows, which is
-    the order it would have got had the kill landed inside an attack. The attack sites
-    keep their own drain because theirs must come AFTER their attack body, which this
-    cannot express -- by the time it runs their queue is already empty.
+    the order it would have got had the kill landed inside an attack.
+
+    The attack sites used to keep a drain of their own, appended AFTER their attack body.
+    That is the bug fixed below: two Attack pushes in one reply is one more than the
+    client can take. They now return their attack alone and leave the queue to this.
     """
     _log_client_disagreement(battle, cmd, strargs)
+    # A DEATH NEVER WAITS OUT MORE THAN ONE JUDGE. Everything below holds the queue back
+    # from a reply that carries an attack, which is right -- but a run of enemy turns is
+    # a run of attack-carrying replies, and a death parked behind it leaves the client
+    # drawing a unit the server has buried for as long as the run lasts. REQ_JUDGE is the
+    # client's own loop and the one ask that can always be answered with a push instead:
+    # it performs what it is given and judges again, so handing it the death here costs
+    # one round-trip and bounds the wait at one Judge. Deaths only -- a non-fatal tick is
+    # cosmetic and its HP is in `sync` either way.
+    if cmd == bt.REQ_JUDGE and any(int(d.get("die", 1))
+                                   for d in battle._pending_dot_deaths):
+        held = battle.dot_death_cmds_json(limit=1)
+        if held:
+            log(f"    -> out-of-band death answered the judge on its own "
+                f"({len(battle._pending_dot_deaths)} more queued); the client will "
+                f"judge again once it has played it")
+            return [battle_msg(bt.CMD_ATTACK, [], [j]) for j in held]
     msgs = _battle_replies(battle, cmd, intargs, strargs, state, uid)
-    pending = battle.dot_death_cmds_json()
+    # ONE ATTACK PUSH PER REPLY, and the reason is in the client's state machine.
+    #
+    #   `PlayerBattle.HandleAttack` (0x16899EC) deserialises the payload into ONE shared
+    #     field, `AttackData` at +0x20, overwriting it in place -- there is no queue --
+    #     and then raises battle event 3 to play it.
+    #   `BattleStateMachine.ChangeState` (0x17F83DC) is a no-op when the key it is given
+    #     is the one it already holds: it logs "now CurrentKey is {0}!" and RETURNS,
+    #     running neither OnLeave nor OnEnter.
+    #   `PerformState.OnEnter` (0x196A9CC) is what ARMS and STARTS a perform -- it
+    #     installs the OnPerformEnd delegate on the attack behaviour (+0x20) and kicks
+    #     the animation. `OnLeave` (0x196AB20) clears that delegate again.
+    #   `PerformState.OnPerformEnd` (0x196ABC8) is the ONLY exit from Perform: it calls
+    #     ChangeState(nextKey), key 4 = SituationJudge, which is what makes the client
+    #     send Judge(200).
+    #
+    # So a second Attack in the same reply is read in the same frame, overwrites
+    # AttackData under the still-running first animation, and asks for Perform while
+    # already in Perform. That transition is dropped, so the second attack is never
+    # started -- and nothing is left to call OnPerformEnd. The client holds the second
+    # payload with no run driving it, never leaves Perform, and never asks for anything
+    # again. No exception, no skill bar, no enemy turn, server none the wiser.
+    #
+    # Watched on a phone and then reproduced on an emulator:
+    # Lucifer's Blink Slash kills the tutorial's first mob, her passive The Supreme
+    # (after_action, 180% ATK on the top-HP enemy) kills a second one inside `end_turn`,
+    # and that out-of-band death went out as a second Attack right behind the first.
+    # Reported as "she uses her first skill, it kills one enemy and then nothing
+    # happens".
+    #
+    # So the queue is NOT drained onto a reply that already carries an attack. Nothing is
+    # lost: the client finishes the animation and asks for a judge, and the drain below
+    # puts the death on THAT reply, ahead of whatever else it carries -- the same
+    # death-then-next-message order the wave-end branch already uses.
+    if any(getattr(m, "cmd", None) in POPULATES_BATTLE_CMD for m in msgs):
+        return msgs
+    # ONE row, not the whole queue, for the same reason: each out-of-band death is its
+    # own Attack push and the client performs them one at a time. The rest stay queued
+    # and ride the following replies -- the client asks again after every animation, so
+    # a backlog drains at one per round-trip rather than being dumped in a batch the
+    # client would refuse all but the first of.
+    pending = battle.dot_death_cmds_json(limit=1)
     if pending:
-        log(f"    -> {len(pending)} out-of-band death(s)/tick(s) flushed onto the "
-            f"cmd {cmd} reply (nothing else was going to carry them)")
+        log(f"    -> out-of-band death/tick flushed onto the cmd {cmd} reply "
+            f"({len(battle._pending_dot_deaths)} more queued behind it)")
     return [battle_msg(bt.CMD_ATTACK, [], [j]) for j in pending] + msgs
 
 
@@ -1575,12 +1654,20 @@ def _battle_replies(battle, cmd, intargs, strargs, state=None, uid=""):
         #
         # Sent BEFORE the wave-end message so the client plays the death and then ends the
         # wave, which is the order it would have got had the kill landed inside an attack.
+        # ONE AT A TIME, AND THE WAVE END WAITS. Each death is its own Attack push and
+        # the client can only perform one per reply (see battle_replies), so a reply
+        # carrying two of them loses the second. Answering with just the death leaves
+        # the client to animate it and ask again, and the wave ends on the ask that
+        # finds the queue empty -- the client's own pacing, no backlog, and nothing
+        # dropped by `advance_wave`.
         deaths = [battle_msg(bt.CMD_ATTACK, [], [j])
-                  for j in battle.dot_death_cmds_json()]
+                  for j in battle.dot_death_cmds_json(limit=1)]
         if deaths:
-            log(f"    -> {len(deaths)} out-of-band death(s) flushed before the wave end "
-                f"(these used to be dropped by advance_wave)")
-        return deaths + [battle_msg(bt.CMD_WAVE_END,
+            log(f"    -> out-of-band death flushed BEFORE the wave end "
+                f"({len(battle._pending_dot_deaths)} more queued); the wave end waits "
+                f"for the client to ask again")
+            return deaths
+        return [battle_msg(bt.CMD_WAVE_END,
                            [result, battle.wave, next_avg, end_avg, start_avg],
                            # BtCollector -- the per-unit damage table behind the
                            # results screen's Result button. An EMPTY dmgTbl ends the
@@ -1660,11 +1747,10 @@ def _battle_replies(battle, cmd, intargs, strargs, state=None, uid=""):
         body = battle_msg(bt.CMD_ATTACK, [],
                           [battle.attack_cmd_json(attacker, defender, skill)])
         battle.end_turn()
-        # See play_turn_msgs: a start-of-turn DoT kill happens inside end_turn, after
-        # the attack payload is built, and has to be told to the client in this reply
-        # or it sits waiting for the dead unit's turn.
-        return [body] + [battle_msg(bt.CMD_ATTACK, [], [j])
-                         for j in battle.dot_death_cmds_json()]
+        # The kill an after-action passive or a start-of-turn DoT makes inside
+        # `end_turn` lands after this payload was built. It stays queued and rides the
+        # client's NEXT ask -- one attack per reply, see battle_replies.
+        return [body]
     if cmd == bt.REQ_RETREAT:
         # Menu -> Retreat. `HandleRetreat` deserialises strargs[0] into a BtCollector,
         # sets BattleResultType = 2 (the loss/abandon value) and dispatches BattleEvent 4,
@@ -1857,10 +1943,14 @@ class Conn:
     the save editor's is-anyone-playing check, and a Battle object would break the
     publish silently (it is wrapped in a bare except).
     """
-    __slots__ = ("battle",)
+    __slots__ = ("battle", "battle_seen", "battle_sent", "battle_stalled")
 
     def __init__(self):
         self.battle = None
+        # --- battle stall watchdog, see check_battle_stall -------------------------
+        self.battle_seen = None       # time.time() of the last battle RPC from the client
+        self.battle_sent = ()         # the cmds of the last battle reply we sent
+        self.battle_stalled = False   # already warned about the current silence
 
 
 class Rpc:
@@ -3958,6 +4048,70 @@ def recv_exact(conn, n):
     return buf
 
 
+# How long a fight may go without the client saying anything before we say so. The
+# client asks for something every few seconds when a battle is healthy -- StartTurn,
+# Judge, Attack -- so 25 s of nothing is already far outside normal play, and well
+# inside a player's patience for "it has stopped".
+BATTLE_STALL_SECS = 25
+
+
+def check_battle_stall(cx, now=None):
+    """Say so, loudly and with the state, when a live fight stops asking for anything.
+
+    THE SOCKET IS NOT THE SIGNAL. `conn.settimeout(120)` catches a dead connection, and
+    this failure is not one: the heartbeat (cmd 16) and the chat poll (cmd 339) keep
+    arriving every ten seconds while the battle FSM is wedged, so the session looks
+    perfectly healthy and the server simply waits. Every battle hang this project has
+    had -- the DoT soft-lock, the unreported wave-clear kill, the two-Attack freeze --
+    presented exactly like this and was found by a human saying "it stopped", with the
+    log showing nothing at all. This is the line that should have been in the log.
+
+    Driven from the inbound frame loop rather than a timer thread: the heartbeat gives
+    us a tick every few seconds for free, and a thread would need its own locking around
+    a Battle that this thread mutates.
+
+    Warns ONCE per silence -- `battle_stalled` clears when the client speaks again -- so
+    a player who puts the phone down does not fill the log.
+    """
+    battle = cx.battle
+    if battle is None:
+        cx.battle_seen, cx.battle_stalled = None, False
+        return
+    if cx.battle_seen is None:
+        # A fight that has just been created and has not had a single battle RPC yet.
+        # Clock it from here rather than from the three places that build a Battle, so
+        # the case where the client loads the scene and then never asks for anything --
+        # a dead load coroutine, a missing bundle -- is caught too.
+        cx.battle_seen = time.time()
+        return
+    now = time.time() if now is None else now
+    quiet = now - cx.battle_seen
+    if quiet < BATTLE_STALL_SECS:
+        cx.battle_stalled = False
+        return
+    if cx.battle_stalled:
+        return
+    cx.battle_stalled = True
+    actor = battle.acting_unit()
+    alive = {o: u.hp for o, u in battle.units.items() if u.alive}
+    log(f"    !! BATTLE STALL: no battle RPC for {quiet:.0f}s while the fight is live. "
+        f"The client is not asking for anything and we are not sending anything -- "
+        f"this is what a wedged client FSM looks like from here. Soft-lock signature.")
+    # The ONE pair that may legally share a reply is WaveBegin + StartTurn: both are
+    # populated from the same `battle_cmd_json()`, so the second write is idempotent in
+    # content. Flagging that would cry wolf on the reply that opens every wave.
+    pushes = sorted(c for c in cx.battle_sent if c in POPULATES_BATTLE_CMD)
+    collided = len(pushes) > 1 and pushes != [bt.CMD_WAVE_BEGIN, bt.CMD_START_TURN]
+    log(f"       last reply we sent: {list(cx.battle_sent)}"
+        + ("  <-- TWO PUSHES INTO _battleCmd, the second overwrote the first; "
+           "see POPULATES_BATTLE_CMD" if collided else ""))
+    log(f"       stage {battle.stage_id} wave {battle.wave}/{battle.wave_max} "
+        f"round {battle.round} turn_open={battle.turn_open} auto={battle.auto}")
+    log(f"       acting={actor.order if actor else None} order={battle.turn_order} "
+        f"alive={alive}")
+    log(f"       queued out-of-band rows: {battle._pending_dot_deaths}")
+
+
 def handle(conn, addr):
     log(f"[+] CONNECT from {addr}")
     c2s, s2c = RC4(KEY_C2S), RC4(KEY_S2C)
@@ -4005,6 +4159,11 @@ def handle(conn, addr):
                 return
             body = c2s.crypt(recv_exact(conn, size)) if size else b""
             log_frame("<", mtype, body)
+
+            # EVERY frame ticks the battle watchdog, including the heartbeat and the
+            # chat poll. Those are the only things still arriving when a fight wedges,
+            # which is exactly why they are the right clock for noticing it.
+            check_battle_stall(cx)
 
             msg = pb_parse(body)
             if mtype == MSG_LOGIN:
@@ -4133,8 +4292,12 @@ def handle(conn, addr):
                                     intargs, strargs, strargs2))
                     elif (index == bt.BATTLE_SERVER_INDEX and cx.battle
                           and cmd != bt.REQ_BATTLE_SYNC):
+                        # Watchdog bookkeeping: the client just spoke, and whatever we
+                        # answer is what it will be chewing on if it never speaks again.
+                        cx.battle_seen, cx.battle_stalled = time.time(), False
                         bodies = list(battle_replies(cx.battle, cmd, intargs,
                                                      strargs, state, ps.uid(state)))
+                        cx.battle_sent = tuple(getattr(b, "cmd", None) for b in bodies)
                         # The inspector, when ARMED, takes ownership of the reply and
                         # releases it on a step. It never blocks this thread -- the
                         # heartbeat shares this socket and the client times out on its

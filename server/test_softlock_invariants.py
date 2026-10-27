@@ -85,6 +85,11 @@ def blocked_field(remaining):
     return b
 
 
+def dead_queued(b):
+    """-> the queued rows that are DEATHS, the only kind that can soft-lock a client."""
+    return [d for d in b._pending_dot_deaths if int(d.get("die", 1))]
+
+
 def drive_fights(n=40, cap=60):
     """Play fights through the RPC layer the way the client does. -> [violations]
 
@@ -114,13 +119,41 @@ def drive_fights(n=40, cap=60):
                       rng.choice([30, 60, 100]), None, 0, 0)
         hit = []
 
+        # TWO invariants, and they pull against each other. Draining the whole queue
+        # onto one reply satisfies "nothing is left queued" and wedges the client;
+        # holding a death indefinitely is the soft-lock this file was written for.
+        #
+        #  1. AT MOST ONE push per reply that REPLACES `PlayerBattle._battleCmd` --
+        #     WaveBegin, StartTurn and Attack each PopulateObject into that one shared
+        #     field, so a second overwrites the first in the same frame, before anything
+        #     has animated it. Two Attacks was the Lucifer tutorial freeze; an Attack
+        #     behind a StartTurn silently loses the death the Attack was carrying.
+        #     WaveBegin + StartTurn is the one allowed pair: both are populated from the
+        #     same `battle_cmd_json()`, so the overwrite is idempotent in content.
+        #  2. A JUDGE ANSWERED WHILE A DEATH IS QUEUED MUST CARRY ONE. Judge is the
+        #     client's own loop, so a death can always be slipped into it; that bounds
+        #     the wait at a single Judge however long the enemy's turn chain runs. A
+        #     backlog therefore drains at one per round-trip, which is as fast as the
+        #     client can take it -- and non-fatal ticks may wait longer, since their HP
+        #     is in `sync` and only a death can leave the client holding a corpse.
+
         def rpc(cmd, ia, sa=()):
+            owed = bool(dead_queued(b))
             msgs = ts.battle_replies(b, cmd, list(ia), list(sa), None, "u1")
-            if b._pending_dot_deaths:
+            attacks = [m for m in msgs if getattr(m, "cmd", None) == bt.CMD_ATTACK]
+            populates = sorted(getattr(m, "cmd", None) for m in msgs
+                               if getattr(m, "cmd", None) in ts.POPULATES_BATTLE_CMD)
+            if len(populates) > 1 and populates != [bt.CMD_WAVE_BEGIN,
+                                                    bt.CMD_START_TURN]:
                 hit.append(f"seed {seed} stage {b.stage_id} wave {b.wave} "
-                           f"round {b.round}: cmd {cmd} answered with "
-                           f"{len(b._pending_dot_deaths)} death(s) still queued "
-                           f"{b._pending_dot_deaths}")
+                           f"round {b.round}: cmd {cmd} answered with {populates} -- "
+                           f"two pushes into the one _battleCmd field, so the second "
+                           f"overwrites the first before the client plays it")
+            elif cmd == bt.REQ_JUDGE and owed and not attacks:
+                hit.append(f"seed {seed} stage {b.stage_id} wave {b.wave} "
+                           f"round {b.round}: judge answered with no attack while a "
+                           f"death was queued {dead_queued(b)} -- the client has no "
+                           f"other ask to be told on")
             return msgs
 
         rpc(bt.REQ_READY, [0])
@@ -140,7 +173,14 @@ def drive_fights(n=40, cap=60):
                 continue
             if not b.turn_open:
                 rpc(bt.REQ_START_TURN, [0])
-            rpc(bt.REQ_JUDGE, [])
+            judged = rpc(bt.REQ_JUDGE, [])
+            # A Judge answered with an ATTACK is an enemy (or auto) move, not the skill
+            # bar. The client performs it and asks again; it cannot send an Attack of its
+            # own off the back of one. Driving it as though it could is what made this
+            # sweep report a death "owed twice" that no client could ever have been owed.
+            if any(getattr(m, "cmd", None) == bt.CMD_ATTACK for m in judged):
+                b.turn_open = False
+                continue
             if b.player_turn() and not b.auto:
                 act = b.acting_unit()
                 foes = [o for o, u in b.units.items()
@@ -191,22 +231,45 @@ def main():
     # ---- 2. every death the server books is reported to the client ------------------
     # The targeted case first, then a sweep. Pre-fix the targeted one left the queue
     # full after both replies.
-    for cmd, name, ia in ((bt.REQ_JUDGE, "judge", []),
-                          (bt.REQ_START_TURN, "start-turn", [0])):
+    def _with_queued_death():
         b = bt.Battle(1101, [10001, 10002], 60, None, 0, 0)
         foe = next(u for u in b.units.values() if u.team == bt.TEAM_ENEMY)
         b._pending_dot_deaths.append({"order": foe.order, "dmg": 1,
                                       "wave": b.wave, "die": 1})
         foe.hp = 0
         b._roll_turn_order()
-        sent = ts.battle_replies(b, cmd, ia, [], None, "u1")
-        check(f"an out-of-band death rides out on the {name} reply",
-              not b._pending_dot_deaths and len(sent) > len(ia) - len(ia),
-              f"{len(sent)} msg(s), queue still {b._pending_dot_deaths}")
+        return b
 
+    # JUDGE is the carrier. It writes no `_battleCmd`, and it is the ask the client
+    # always makes, so a death can always be slipped into it.
+    b = _with_queued_death()
+    sent = ts.battle_replies(b, bt.REQ_JUDGE, [], [], None, "u1")
+    check("an out-of-band death rides out on the judge reply",
+          not b._pending_dot_deaths and sent,
+          f"{len(sent)} msg(s), queue still {b._pending_dot_deaths}")
+
+    # START-TURN IS NOT A CARRIER ANY MORE, and that is the fix rather than a gap. Its
+    # reply populates `_battleCmd` with the turn, which would overwrite the death's own
+    # payload in the same frame -- the client would be told nothing and go on holding a
+    # unit the server has buried. It keeps the queue instead, and the Judge the client
+    # sends next takes it.
+    b = _with_queued_death()
+    sent = ts.battle_replies(b, bt.REQ_START_TURN, [0], [], None, "u1")
+    check("start-turn leaves the death queued rather than clobbering it",
+          b._pending_dot_deaths and not [m for m in sent
+                                         if getattr(m, "cmd", None) == bt.CMD_ATTACK],
+          f"{[getattr(m, 'cmd', None) for m in sent]}, queue {b._pending_dot_deaths}")
+    sent = ts.battle_replies(b, bt.REQ_JUDGE, [], [], None, "u1")
+    check("...and the judge right after it pays the death",
+          not b._pending_dot_deaths and [m for m in sent
+                                         if getattr(m, "cmd", None) == bt.CMD_ATTACK],
+          f"{[getattr(m, 'cmd', None) for m in sent]}, queue {b._pending_dot_deaths}")
+
+    # Pre-fix the first half failed: REQ_ATTACK answered with its own attack plus every
+    # out-of-band death `end_turn` had just booked, which is the Lucifer tutorial freeze.
     undelivered = drive_fights()
-    check("no death goes unreported across a driven sweep", not undelivered,
-          "; ".join(undelivered[:3]))
+    check("one attack per reply, and every judge pays its death, across a driven sweep",
+          not undelivered, "; ".join(undelivered[:3]))
 
     print(f"\n{'all OK' if not _fail else str(_fail) + ' failure(s)'}")
     return 1 if _fail else 0

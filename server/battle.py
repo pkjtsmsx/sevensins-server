@@ -2998,8 +2998,22 @@ class Battle:
             "tskill": [],
         }, separators=(",", ":"))
 
-    def dot_death_cmds_json(self):
+    def dot_death_cmds_json(self, limit=None):
         """-> a BattleCmd per out-of-band HP change queued this turn, and drains.
+
+        `limit` caps how many rows are taken, leaving the rest queued. Callers pass 1:
+        each row is its own Attack push and the client performs exactly one per reply,
+        so handing it a batch loses all but the first (see titan_server.battle_replies).
+        Rows that this drain would discard anyway -- a filtered non-fatal tick, a death
+        from a wave that is over, a unit that is gone -- do NOT count against the limit,
+        or a queue full of them would starve the real death behind it one reply at a
+        time.
+
+        DEATHS GO FIRST when the take is limited, because only a death can soft-lock:
+        the client keeps a unit it has not been told died in its own ActionOrderList and
+        waits for a turn the server will never hand out. A non-fatal tick is a damage
+        number and a pain sound; its HP is already travelling in `sync`, so it can wait a
+        reply. Unlimited drains keep the queued order, which is the order things happened.
 
         Shaped exactly like an attack (cmd 1201) because that is the only message the
         client renders damage and death from: `die` is set nowhere else on the wire.
@@ -3022,8 +3036,13 @@ class Battle:
         trusted. A rollback is one `active.txt` edit.
         """
         deaths, self._pending_dot_deaths = self._pending_dot_deaths, []
+        if limit is not None:
+            deaths.sort(key=lambda d: not int(d.get("die", 1)))   # stable: deaths first
         out = []
-        for d in deaths:
+        for i, d in enumerate(deaths):
+            if limit is not None and len(out) >= limit:
+                self._pending_dot_deaths = deaths[i:] + self._pending_dot_deaths
+                break
             if not TELL_NON_FATAL_DOT and not int(d.get("die", 1)):
                 # Filtered HERE rather than at the three queue sites: every out-of-band
                 # row routes through this drain, and the queue is also what
